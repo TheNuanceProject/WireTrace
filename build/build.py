@@ -538,7 +538,12 @@ def generate_update_json(version: str, all_artifacts: dict[str, list[Path]]) -> 
     update_json = {
         "latest_version": version,
         "release_notes": "",
-        "min_version": "26.01.01",
+        # min_version follows SemVer (matches latest_version format).
+        # "1.0.0" means: any installed version >= 1.0.0 can update to
+        # this one. For the very first release, this is just a
+        # baseline. Bump it on a release that requires migration from
+        # a specific older version.
+        "min_version": "1.0.0",
         "platforms": platforms_data,
     }
 

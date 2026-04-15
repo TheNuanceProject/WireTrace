@@ -90,6 +90,12 @@ addopts = [
     "-ra",              # Show summary of all non-passing tests
     "--strict-markers", # Error on unknown markers
     "--strict-config",  # Error on unknown config keys
+    # Disable pytest-qt if it's installed in the environment. Our
+    # tests use lightweight stubs in conftest.py instead of real
+    # PySide6 — pytest-qt would try to import QtTest on startup and
+    # fail against the stubs. When real Qt tests are added later,
+    # remove this flag and use pytest-qt normally.
+    "-p", "no:pytest_qt",
 ]
 filterwarnings = [
     "error",                               # Treat warnings as errors

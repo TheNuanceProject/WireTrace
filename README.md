@@ -143,6 +143,17 @@ that helps. Attribution is appreciated but not required.
 Third-party dependencies and their licenses are documented in
 [NOTICE](./NOTICE).
 
+## Trademarks and Other Uses of the Name
+
+WireTrace, as used in this repository and at
+[thenuanceproject.com](https://thenuanceproject.com), refers to this
+open-source serial data monitor for hardware and embedded engineers.
+It is an independent project by The Nuance Project and is not
+affiliated with, sponsored by, or endorsed by any other product,
+company, or organisation that may use a similar name in a different
+product category. The Nuance Project does not claim a trademark on
+the name.
+
 ---
 
 Built under [The Nuance Project](https://thenuanceproject.com) by

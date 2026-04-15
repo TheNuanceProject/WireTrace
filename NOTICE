@@ -1,0 +1,37 @@
+WireTrace
+Copyright 2026 Mohamad Shahin Ambalatha Kandy / The Nuance Project
+
+This product was designed, architected, and developed by
+Mohamad Shahin Ambalatha Kandy as the first project of The Nuance Project.
+
+Website: https://thenuanceproject.com
+
+-------------------------------------------------------------------------------
+Third-Party Software
+-------------------------------------------------------------------------------
+
+WireTrace uses the following third-party libraries at runtime:
+
+  PySide6 — licensed under LGPLv3 (with GPL exception) / Commercial
+    https://www.qt.io/licensing/
+    Distributed as separate dynamically-linked libraries in the
+    WireTrace installation. Users are free to replace these libraries
+    with their own builds of Qt/PySide6 as permitted by the LGPL.
+
+  pyserial — licensed under BSD-3-Clause
+    https://github.com/pyserial/pyserial
+
+The following build-time-only tools are used to produce distributable
+binaries. They are not redistributed with WireTrace:
+
+  Nuitka — licensed under Apache License 2.0
+    https://nuitka.net/
+
+  ordered-set — licensed under MIT License
+
+  Inno Setup (Windows) — licensed under a permissive license
+    https://jrsoftware.org/isinfo.php
+
+Each third-party component's license applies to that component
+only. WireTrace itself is licensed under the MIT License (see the
+LICENSE file in this repository).

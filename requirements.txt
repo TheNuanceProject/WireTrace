@@ -1,0 +1,4 @@
+# WireTrace v2.0 Runtime Dependencies
+# Two packages only — everything else is Python stdlib.
+PySide6>=6.6.0          # Qt6 framework (includes QSerialPort)
+pyserial>=3.5           # Fallback serial library

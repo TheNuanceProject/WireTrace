@@ -1,0 +1,25 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="app_icon.ico">app_icon.ico</file>
+    <file alias="app_icon.png">app_icon.png</file>
+  </qresource>
+  <qresource prefix="/icons">
+    <file alias="connect.svg">icons/connect.svg</file>
+    <file alias="disconnect.svg">icons/disconnect.svg</file>
+    <file alias="log_on.svg">icons/log_on.svg</file>
+    <file alias="log_off.svg">icons/log_off.svg</file>
+    <file alias="pause.svg">icons/pause.svg</file>
+    <file alias="resume.svg">icons/resume.svg</file>
+    <file alias="clear.svg">icons/clear.svg</file>
+    <file alias="search.svg">icons/search.svg</file>
+    <file alias="filter.svg">icons/filter.svg</file>
+    <file alias="export.svg">icons/export.svg</file>
+    <file alias="settings.svg">icons/settings.svg</file>
+    <file alias="add_tab.svg">icons/add_tab.svg</file>
+    <file alias="close_tab.svg">icons/close_tab.svg</file>
+    <file alias="refresh.svg">icons/refresh.svg</file>
+  </qresource>
+  <qresource prefix="/themes">
+    <!-- QSS themes loaded from file system at runtime, not embedded -->
+  </qresource>
+</RCC>

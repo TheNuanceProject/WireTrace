@@ -1,0 +1,3 @@
+# WireTrace v2.0 Build Dependencies
+nuitka>=2.0             # Python-to-C compiler
+ordered-set             # Nuitka dependency

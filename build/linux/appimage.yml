@@ -1,0 +1,16 @@
+# WireTrace AppImage Recipe
+# Used by appimage-builder
+
+version: 1
+AppDir:
+  path: ./AppDir
+  app_info:
+    id: com.thenuanceproject.wiretrace
+    name: WireTrace
+    icon: wiretrace
+    version: 1.0.0
+    exec: usr/bin/wiretrace
+
+AppImage:
+  arch: x86_64
+  file_name: WireTrace-v1.0.0-x86_64.AppImage

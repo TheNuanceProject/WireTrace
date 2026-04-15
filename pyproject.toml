@@ -1,0 +1,123 @@
+# pyproject.toml — Central Tool Configuration
+#
+# Per PEP 518, PEP 621. This is the modern standard for Python project
+# configuration. Replaces scattered setup.cfg, .flake8, tox.ini, and
+# per-tool config files.
+#
+# WireTrace does not distribute as a Python package (it's a desktop
+# app, shipped as a compiled binary via Nuitka + Inno Setup). So this
+# file exists only to centralize developer tool configuration:
+# linting, formatting, type checking, and testing.
+
+# ═══════════════════════════════════════════════════════════════════
+# Ruff — Linter & Formatter
+# ═══════════════════════════════════════════════════════════════════
+# https://docs.astral.sh/ruff/
+#
+# Ruff replaces: black, flake8, isort, pyupgrade, pydocstyle, and more.
+# A single tool that's 10-100x faster than the alternatives combined.
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    "build/dist",
+    "build/WireTrace.build",
+    "build/WireTrace.dist",
+    "deployment",
+    ".venv",
+]
+
+[tool.ruff.lint]
+# Selected rule families:
+#   E, W  — pycodestyle (PEP 8 style errors & warnings)
+#   F     — pyflakes (unused imports, undefined names)
+#   I     — isort (import ordering)
+#   B     — flake8-bugbear (likely bugs)
+#   UP    — pyupgrade (modern syntax)
+#   SIM   — flake8-simplify (simplification hints)
+#   RUF   — ruff-specific rules
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+
+ignore = [
+    # Line too long — handled by formatter; leftover long lines are usually
+    # string literals, URLs, or comments where wrapping hurts readability.
+    "E501",
+    # Unused function arguments — many Qt slot signatures take arguments
+    # we don't use; renaming all to _ hurts readability.
+    "B007",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Build scripts use print() as the CLI interface — not a bug.
+"build/build.py" = ["E402"]
+# __init__.py files intentionally re-export.
+"**/__init__.py" = ["F401"]
+# Splash screen docstring uses "×" to denote pixel dimensions
+# (480 × 320px) — a conventional typographic choice.
+"ui/splash_screen.py" = ["RUF002"]
+# Toast icon glyphs (ℹ, ✓, ⚠, ✕) are intentional single-character
+# unicode symbols rendered in the UI.
+"ui/widgets/toast.py" = ["RUF001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "core", "ui", "updater"]
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+# ═══════════════════════════════════════════════════════════════════
+# Pytest
+# ═══════════════════════════════════════════════════════════════════
+# https://docs.pytest.org/
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",              # Show summary of all non-passing tests
+    "--strict-markers", # Error on unknown markers
+    "--strict-config",  # Error on unknown config keys
+]
+filterwarnings = [
+    "error",                               # Treat warnings as errors
+    "ignore::DeprecationWarning:PySide6",  # Qt internal deprecations — not ours
+]
+
+# ═══════════════════════════════════════════════════════════════════
+# Mypy — Optional Type Checking (opt-in)
+# ═══════════════════════════════════════════════════════════════════
+# https://mypy.readthedocs.io/
+#
+# Run manually: `mypy app core updater`
+# Not enforced in CI yet — Qt typing stubs are incomplete.
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+# PySide6's typing stubs are spotty; don't fail on Qt-specific gaps.
+[[tool.mypy.overrides]]
+module = "PySide6.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "serial.*"
+ignore_missing_imports = true

@@ -1,0 +1,84 @@
+name: Bug report
+description: Something in WireTrace is broken or behaving unexpectedly.
+title: "[Bug] "
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. A good report saves everyone
+        time — please fill in as much of this form as you reasonably can.
+
+        Before you submit, please check the [existing issues](https://github.com/TheNuanceProject/WireTrace/issues?q=is%3Aissue)
+        to avoid duplicates.
+
+  - type: input
+    id: version
+    attributes:
+      label: WireTrace version
+      description: Find this in Help → About (or check the window title).
+      placeholder: "e.g., 1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (built from source)
+        - Linux (built from source)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      description: Specific version (e.g., Windows 11 23H2, macOS 14.4, Ubuntu 22.04).
+      placeholder: "e.g., Windows 11 23H2"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect to happen, and what actually happened?
+      placeholder: |
+        1. Connected two devices on COM3 and COM7
+        2. Started logging on both
+        3. Expected both logs to write in parallel
+        4. Instead, COM7's log file stopped updating after ~30 seconds
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps that reproduce the issue. If you can't reproduce it reliably, describe what you were doing when it happened.
+      placeholder: |
+        1. Open WireTrace
+        2. Connect to a device at 115200 baud
+        3. Click "Log On"
+        4. ...
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: |
+        Paste any crash logs, error messages, or screenshots. Log locations:
+        - Windows: `%APPDATA%\WireTrace\Logs\`
+        - macOS: `~/Library/Application Support/WireTrace/Logs/`
+        - Linux: `~/.config/WireTrace/Logs/`
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Hardware details, unusual setup, workarounds you've tried, any context that might help.

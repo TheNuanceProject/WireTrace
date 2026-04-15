@@ -1,0 +1,52 @@
+name: Feature request
+description: Suggest an improvement to WireTrace.
+title: "[Feature] "
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature. Before you submit, please check
+        [existing feature requests](https://github.com/TheNuanceProject/WireTrace/issues?q=is%3Aissue+label%3Aenhancement)
+        to avoid duplicates.
+
+        The best feature requests describe the **problem you're trying to solve**,
+        not just the solution you have in mind. That lets the maintainer and other
+        contributors think about the best way to address it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: What's the underlying need? What are you trying to accomplish that WireTrace makes difficult or impossible today?
+      placeholder: |
+        I'm capturing logs from three sensors that each emit 5,000 lines/sec.
+        I need to separate them into three CSV files for downstream analysis.
+        Right now I run three WireTrace windows, which is clumsy.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How are you working around it today?
+      description: What do you do now? Use a different tool? A script? Accept the limitation?
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (if you have one)
+      description: If you've thought about how to solve it, describe it here. Don't worry about being prescriptive — suggestions are welcome but not required.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Other solutions you thought about, and why you ruled them out.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Links, screenshots, references to how other tools handle this, examples of the data format, etc.

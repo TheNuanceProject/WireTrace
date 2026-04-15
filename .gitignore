@@ -1,0 +1,100 @@
+# ─── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# ─── Virtual environments ──────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ─── Nuitka build artefacts ────────────────────────────────────────────
+build/dist/
+build/WireTrace.build/
+build/WireTrace.dist/
+build/WireTrace.onefile-build/
+*.nuitka-stamp
+*.build/
+*.dist/
+
+# ─── Deployment artefacts ──────────────────────────────────────────────
+deployment/
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.msi
+
+# ─── Generated files ───────────────────────────────────────────────────
+# These are produced by the build script; source copies live elsewhere
+version_info.txt
+build_info.txt
+wiretrace-update.json
+
+# ─── Qt / PySide6 ──────────────────────────────────────────────────────
+*.pyproject.user
+resources/resources_rc.py
+
+# ─── Logs and runtime data ─────────────────────────────────────────────
+*.log
+logs/
+WireTrace-Logs/
+crashes/
+
+# ─── Testing ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ─── Type checking ─────────────────────────────────────────────────────
+.mypy_cache/
+.pyre/
+.pytype/
+
+# ─── IDE and editor ────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*.sw?
+*.iml
+.spyderproject
+.spyproject
+*~
+
+# ─── Operating system ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+
+# ─── Secrets ───────────────────────────────────────────────────────────
+# Never commit credentials, signing certs, or private keys
+*.pfx
+*.p12
+*.key
+*.pem
+.env
+.env.local
+secrets.json
+
+# ─── Temporary files ───────────────────────────────────────────────────
+*.tmp
+*.temp
+*.bak
+*.backup
+.cache/

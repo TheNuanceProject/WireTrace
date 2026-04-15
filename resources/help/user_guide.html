@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WireTrace — User Guide</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --accent: #1976D2;
+    --accent-light: #E3F2FD;
+    --text: #212121;
+    --text-secondary: #616161;
+    --text-muted: #9E9E9E;
+    --bg: #FFFFFF;
+    --bg-alt: #F8F9FA;
+    --border: #E0E0E0;
+    --sidebar-bg: #FAFAFA;
+    --sidebar-w: 260px;
+    --kbd-bg: #F5F5F5;
+    --kbd-border: #D0D0D0;
+    --code-bg: #F5F7F9;
+    --tag-critical: #B71C1C;
+    --tag-error: #C62828;
+    --tag-warning: #E65100;
+    --tag-info: #1565C0;
+    --tag-debug: #757575;
+    --tag-command: #0D47A1;
+    --tag-data: #424242;
+  }
+  html { font-size: 15px; scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text); background: var(--bg); line-height: 1.65;
+    display: flex; min-height: 100vh;
+  }
+  .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0;
+    width: var(--sidebar-w); background: var(--sidebar-bg);
+    border-right: 1px solid var(--border); overflow-y: auto; padding: 24px 0; z-index: 100;
+  }
+  .sidebar-brand { padding: 0 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .sidebar-brand h1 { font-size: 1.15rem; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
+  .sidebar-brand span { font-size: 0.75rem; color: var(--text-muted); display: block; margin-top: 2px; }
+  .sidebar nav { padding: 0 12px; }
+  .sidebar nav a {
+    display: block; padding: 7px 12px; color: var(--text-secondary); text-decoration: none;
+    font-size: 0.87rem; border-radius: 6px; transition: background 0.15s, color 0.15s;
+  }
+  .sidebar nav a:hover { background: var(--accent-light); color: var(--accent); }
+  .sidebar nav a.section-head {
+    font-weight: 600; color: var(--text); margin-top: 16px; font-size: 0.8rem;
+    text-transform: uppercase; letter-spacing: 0.04em; pointer-events: none; padding-bottom: 4px;
+  }
+  .content { margin-left: var(--sidebar-w); flex: 1; max-width: 780px; padding: 40px 48px 80px; }
+  h2 {
+    font-size: 1.55rem; font-weight: 700; color: var(--text); margin: 48px 0 12px;
+    padding-bottom: 8px; border-bottom: 2px solid var(--accent); letter-spacing: -0.01em;
+  }
+  h2:first-of-type { margin-top: 0; }
+  h3 { font-size: 1.1rem; font-weight: 600; color: var(--text); margin: 28px 0 8px; }
+  p { margin: 8px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 20px; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 9px 14px; border: 1px solid var(--border); }
+  th {
+    background: var(--bg-alt); font-weight: 600; font-size: 0.82rem;
+    text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary);
+  }
+  tr:nth-child(even) td { background: var(--bg-alt); }
+  kbd {
+    display: inline-block; padding: 2px 7px; font-family: "SF Mono", "Consolas", "Menlo", monospace;
+    font-size: 0.82rem; background: var(--kbd-bg); border: 1px solid var(--kbd-border);
+    border-radius: 4px; box-shadow: 0 1px 0 var(--kbd-border); line-height: 1.5;
+  }
+  code {
+    font-family: "SF Mono", "Consolas", "Menlo", monospace; font-size: 0.88em;
+    background: var(--code-bg); padding: 2px 6px; border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 18px; overflow-x: auto; font-size: 0.85rem; line-height: 1.55;
+    margin: 12px 0 16px; font-family: "SF Mono", "Consolas", "Menlo", monospace;
+  }
+  .tag {
+    display: inline-block; padding: 1px 8px; border-radius: 3px;
+    font-family: "SF Mono", "Consolas", "Menlo", monospace;
+    font-size: 0.8rem; font-weight: 600; color: #FFFFFF;
+  }
+  .tag-critical { background: var(--tag-critical); }
+  .tag-error    { background: var(--tag-error); }
+  .tag-warning  { background: var(--tag-warning); }
+  .tag-info     { background: var(--tag-info); }
+  .tag-debug    { background: var(--tag-debug); }
+  .tag-command  { background: var(--tag-command); }
+  .tag-data     { background: var(--tag-data); }
+  .callout {
+    padding: 14px 18px; border-radius: 6px; margin: 16px 0;
+    font-size: 0.92rem; border-left: 4px solid;
+  }
+  .callout-tip  { background: #E8F5E9; border-color: #43A047; }
+  .callout-note { background: var(--accent-light); border-color: var(--accent); }
+  .callout-warn { background: #FFF3E0; border-color: #EF6C00; }
+  .callout strong { display: block; margin-bottom: 4px; }
+  ol, ul { margin: 8px 0 12px 22px; }
+  li { margin: 4px 0; }
+  .muted { color: var(--text-muted); font-size: 0.85rem; }
+  @media print {
+    .sidebar { display: none; }
+    .content { margin-left: 0; max-width: 100%; padding: 20px; }
+    h2 { break-before: page; }
+    h2:first-of-type { break-before: auto; }
+  }
+  @media (max-width: 860px) {
+    .sidebar { display: none; }
+    .content { margin-left: 0; padding: 24px 20px 60px; }
+  }
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-brand">
+    <h1>WireTrace</h1>
+    <span>User Guide</span>
+  </div>
+  <nav>
+    <a href="#getting-started" class="section-head">Getting Started</a>
+    <a href="#overview">Overview</a>
+    <a href="#first-connection">Your First Connection</a>
+    <a href="#first-log">Your First Log</a>
+
+    <a href="#interface" class="section-head">Interface</a>
+    <a href="#multi-device-tabs">Multi-Device Tabs</a>
+    <a href="#console">Console Display</a>
+    <a href="#connection-panel">Connection Panel</a>
+    <a href="#command-bar">Command Bar</a>
+    <a href="#status-bar">Status Bar</a>
+
+    <a href="#logging" class="section-head">Logging &amp; Export</a>
+    <a href="#logging-controls">Logging Controls</a>
+    <a href="#export">Export</a>
+    <a href="#quick-save">Quick Save</a>
+    <a href="#csv-modes">CSV Modes</a>
+    <a href="#file-naming">File Naming</a>
+
+    <a href="#search-filter" class="section-head">Search &amp; Filter</a>
+    <a href="#search">Search</a>
+    <a href="#filter">Filter</a>
+
+    <a href="#display" class="section-head">Display Options</a>
+    <a href="#themes">Themes</a>
+    <a href="#classification">Message Classification</a>
+    <a href="#timestamps">Timestamps</a>
+    <a href="#display-mode">Text &amp; HEX Mode</a>
+    <a href="#font">Font Size</a>
+
+    <a href="#reference" class="section-head">Reference</a>
+    <a href="#keyboard-shortcuts">Keyboard Shortcuts</a>
+    <a href="#preferences">Preferences</a>
+    <a href="#auto-update">Auto-Update</a>
+    <a href="#file-locations">File Locations</a>
+
+    <a href="#troubleshooting" class="section-head">Troubleshooting</a>
+    <a href="#troubleshooting">Common Issues</a>
+  </nav>
+</aside>
+
+<main class="content">
+
+<!-- ── GETTING STARTED ───────────────────────────────────────────────────── -->
+<h2 id="getting-started">Getting Started</h2>
+
+<h3 id="overview">Overview</h3>
+<p>
+  WireTrace is a professional serial data monitor and logger designed for
+  embedded engineers. It captures, classifies, and exports data from serial
+  devices in real time.
+</p>
+<p>Key capabilities:</p>
+<ul>
+  <li>Monitor multiple serial ports simultaneously in separate tabs</li>
+  <li>Sustained throughput of 10,000+ lines per second</li>
+  <li>Automatic severity-based message classification (7 tags)</li>
+  <li>Real-time search and line filtering</li>
+  <li>Export to <code>.txt</code> and <code>.csv</code> with structured column detection</li>
+  <li>Light and Dark themes</li>
+  <li>Cross-platform — Windows, macOS, and Linux</li>
+</ul>
+
+<h3 id="first-connection">Your First Connection</h3>
+<ol>
+  <li>Connect your serial device (USB, FTDI, etc.) to the computer.</li>
+  <li>Launch WireTrace. You'll see the welcome screen with a single button: <strong>Connect a Device</strong>.</li>
+  <li>Click it. A new tab opens with the connection panel.</li>
+  <li>Select your port from the <strong>Port</strong> dropdown. Click <strong>Refresh</strong> if your device doesn't appear.</li>
+  <li>Select the baud rate (default: 115200). You can type a custom rate directly.</li>
+  <li>Click <strong>Connect</strong>.</li>
+</ol>
+<p>Data from the device appears immediately in the console.</p>
+
+<div class="callout callout-tip">
+  <strong>Tip</strong>
+  The port dropdown shows the device description and manufacturer (e.g., "COM3 — Arduino Uno (Arduino LLC)") to help you identify the correct port.
+</div>
+
+<h3 id="first-log">Your First Log</h3>
+<ol>
+  <li>Once connected, click <strong>Log On</strong> in the toolbar.</li>
+  <li>The New Log dialog opens. Enter a session name (e.g., "MotorTest").</li>
+  <li>Choose a save directory and export format (.txt, .csv, or both).</li>
+  <li>Optionally add a description.</li>
+  <li>Click <strong>Start Logging</strong>. All incoming data is now written to disk.</li>
+  <li>Click <strong>Log Off</strong> to stop and close the log files.</li>
+</ol>
+
+<div class="callout callout-note">
+  <strong>Note</strong>
+  Logging captures every line from the serial port, regardless of any active
+  filters on the console display. Your log files are always complete.
+</div>
+
+
+<!-- ── INTERFACE ─────────────────────────────────────────────────────────── -->
+<h2 id="interface">Interface</h2>
+
+<h3 id="multi-device-tabs">Multi-Device Tabs</h3>
+<p>
+  WireTrace supports multiple simultaneous serial connections. Each device
+  runs in its own tab with completely isolated data, threads, and log files.
+</p>
+<ul>
+  <li>Click the <strong>+</strong> button (or <kbd>Ctrl</kbd>+<kbd>T</kbd>) to create a new tab.</li>
+  <li>Each tab has its own connection panel, console, log engine, and status bar.</li>
+  <li>Closing a tab with active logging prompts for confirmation, then performs an ordered shutdown — data is flushed before the port is released.</li>
+  <li>Right-click a tab header to <strong>Rename</strong> or <strong>Close</strong> it.</li>
+  <li>When all tabs are closed, the welcome screen reappears.</li>
+</ul>
+
+<h3 id="console">Console Display</h3>
+<p>
+  The console is a high-performance virtual viewport. It renders only the
+  visible lines, keeping memory usage constant regardless of total data volume.
+  The full log is always on disk.
+</p>
+<ul>
+  <li><strong>Auto-scroll</strong> — Enabled by default. New lines scroll into view as they arrive. Scrolling up manually pauses auto-scroll; scrolling back to the bottom re-enables it.</li>
+  <li><strong>Color mode</strong> — Messages are color-coded by severity (see <a href="#classification">Message Classification</a>).</li>
+  <li><strong>Clear</strong> — Clears the console display. Does not affect log files.</li>
+</ul>
+
+<h3 id="connection-panel">Connection Panel</h3>
+<table>
+  <tr><th>Control</th><th>Description</th></tr>
+  <tr><td>Port</td><td>Dropdown listing all detected serial ports with device description.</td></tr>
+  <tr><td>Baud Rate</td><td>Editable dropdown. Select from the list or type any rate from 50 to 4,000,000. Invalid values show a red border.</td></tr>
+  <tr><td>Connect / Disconnect</td><td>Opens or closes the serial port.</td></tr>
+  <tr><td>Refresh</td><td>Re-scans for available serial ports.</td></tr>
+</table>
+
+<div class="callout callout-warn">
+  <strong>Custom Baud Rates</strong>
+  While any integer between 50 and 4,000,000 is accepted, the device must
+  also support the selected rate. Mismatched baud rates produce garbled data.
+</div>
+
+<h3 id="command-bar">Command Bar</h3>
+<p>
+  The command input at the bottom of each tab sends data to the connected
+  device. Type a command and press <kbd>Enter</kbd> or click <strong>Send</strong>.
+</p>
+<ul>
+  <li>Command history is accessible with <kbd>↑</kbd> and <kbd>↓</kbd> arrow keys.</li>
+  <li>Sent commands appear in the console tagged as <span class="tag tag-command">COMMAND</span>.</li>
+</ul>
+
+<h3 id="status-bar">Status Bar</h3>
+<p>
+  The status bar at the bottom of each tab displays real-time session metrics:
+</p>
+<table>
+  <tr><th>Indicator</th><th>Description</th></tr>
+  <tr><td>● COM3 @ 115200</td><td>Connection status, port, and baud rate.</td></tr>
+  <tr><td>1,247 lines/sec</td><td>Current data ingestion rate.</td></tr>
+  <tr><td>45,230 lines</td><td>Total lines received in this session.</td></tr>
+  <tr><td>🕐 Timestamp / Δt Elapsed</td><td>Timestamp format indicator. Click to toggle between Timestamp and Elapsed mode.</td></tr>
+</table>
+
+
+<!-- ── LOGGING & EXPORT ──────────────────────────────────────────────────── -->
+<h2 id="logging">Logging &amp; Export</h2>
+
+<h3 id="logging-controls">Logging Controls</h3>
+<table>
+  <tr><th>Button</th><th>Action</th></tr>
+  <tr><td>Log On</td><td>Opens the New Log dialog to configure and start a log session.</td></tr>
+  <tr><td>Pause / Resume</td><td>Temporarily pauses disk writing. Data continues to display in the console.</td></tr>
+  <tr><td>Log Off</td><td>Stops logging, flushes buffers, and closes all log files.</td></tr>
+</table>
+
+<p>
+  Logging writes data directly from the serial reader to disk through a
+  high-performance buffered engine. This is independent of what you see in the
+  console — filters, search, and display settings have no effect on logged data.
+</p>
+
+<h3 id="export">Export</h3>
+<p>
+  Use <strong>File → Export…</strong> (<kbd>Ctrl</kbd>+<kbd>E</kbd>) to save the
+  current console contents to a file. This is useful when you forgot to start
+  logging and want to capture what's on screen.
+</p>
+<ol>
+  <li>Enter a file name.</li>
+  <li>Choose a directory.</li>
+  <li>Select the format: <code>.txt</code>, <code>.csv</code>, or both.</li>
+  <li>Click <strong>Export</strong>.</li>
+</ol>
+
+<table>
+  <tr><th></th><th>Logging (Log On/Off)</th><th>Export (Ctrl+E)</th></tr>
+  <tr><td><strong>Data source</strong></td><td>Direct from serial port</td><td>Current console buffer</td></tr>
+  <tr><td><strong>When to use</strong></td><td>Plan ahead — captures every line</td><td>After the fact — saves what's on screen</td></tr>
+  <tr><td><strong>Formats</strong></td><td>.txt and/or .csv</td><td>.txt and/or .csv</td></tr>
+</table>
+
+<h3 id="quick-save">Quick Save</h3>
+<p>
+  Press <kbd>Ctrl</kbd>+<kbd>S</kbd> to instantly save the console contents to a
+  <code>.txt</code> file. No dialog — the file is auto-named and saved to your
+  default log directory. A notification confirms the save.
+</p>
+
+<h3 id="csv-modes">CSV Modes</h3>
+<p>WireTrace detects the structure of your serial data and applies one of two CSV modes:</p>
+
+<table>
+  <tr><th>Mode</th><th>Detection</th><th>Output</th></tr>
+  <tr>
+    <td><strong>Auto-detect</strong></td>
+    <td>Data contains <code>key:value</code>, <code>key=value</code> pairs, or JSON objects.</td>
+    <td>Keys become column headers. Values are placed in the correct columns.</td>
+  </tr>
+  <tr>
+    <td><strong>Raw</strong></td>
+    <td>Unstructured data (no consistent pattern detected).</td>
+    <td>Two columns: <code>Timestamp</code> and <code>Data</code>.</td>
+  </tr>
+</table>
+
+<p>Auto-detect examines the first 50 lines of data. Example structured output:</p>
+<pre>Timestamp,Temperature,Humidity,Pressure
+2026-02-25 14:30:01.123,25.3,60.1,1013.2
+2026-02-25 14:30:01.456,25.4,60.0,1013.1</pre>
+
+<h3 id="file-naming">File Naming</h3>
+<p>Log and export files follow a consistent naming convention:</p>
+<pre>{Name}_{Port}_{YYYY-MM-DD}_{HH-MM-SS}.{ext}</pre>
+<p>Examples:</p>
+<pre>MotorTest_COM3_2026-02-25_14-30-00.txt
+SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
+
+
+<!-- ── SEARCH & FILTER ───────────────────────────────────────────────────── -->
+<h2 id="search-filter">Search &amp; Filter</h2>
+
+<p>
+  Search and Filter controls sit on the same row at the bottom of the console
+  area. The filter is always visible; the search appears to its right when
+  activated.
+</p>
+
+<h3 id="search">Search</h3>
+<p>
+  Press <kbd>Ctrl</kbd>+<kbd>F</kbd> to activate the search field. Type a term
+  to highlight all matching occurrences in the console.
+</p>
+<ul>
+  <li><kbd>F3</kbd> — Jump to next match.</li>
+  <li><kbd>Shift</kbd>+<kbd>F3</kbd> — Jump to previous match.</li>
+  <li><kbd>Escape</kbd> — Close search and clear highlights.</li>
+  <li>The match counter shows your position (e.g., "3/47").</li>
+</ul>
+
+<h3 id="filter">Filter</h3>
+<p>
+  The filter field is always visible. Type a term to hide all non-matching
+  lines from the console in real time. Press <kbd>Ctrl</kbd>+<kbd>L</kbd> to
+  focus the filter field quickly.
+</p>
+
+<table>
+  <tr><th>Feature</th><th>Search</th><th>Filter</th></tr>
+  <tr><td>Purpose</td><td>Find positions in existing content</td><td>Hide non-matching lines</td></tr>
+  <tr><td>Highlights</td><td>Yes (yellow background)</td><td>No</td></tr>
+  <tr><td>Navigation</td><td>Prev / Next buttons</td><td>N/A</td></tr>
+  <tr><td>Console effect</td><td>Scrolls to match</td><td>Hides non-matching lines</td></tr>
+  <tr><td>Affects disk log</td><td>No</td><td>No</td></tr>
+</table>
+
+<div class="callout callout-note">
+  <strong>Note</strong>
+  Filtering is case-insensitive. New incoming lines are filtered in real time.
+  The disk log always contains every line regardless of the active filter.
+</div>
+
+
+<!-- ── DISPLAY OPTIONS ───────────────────────────────────────────────────── -->
+<h2 id="display">Display Options</h2>
+
+<h3 id="themes">Themes</h3>
+<p>WireTrace includes two professionally designed themes:</p>
+<table>
+  <tr><th>Theme</th><th>Description</th></tr>
+  <tr><td><strong>Studio Light</strong></td><td>Clean light theme with a white console. Optimized for well-lit environments.</td></tr>
+  <tr><td><strong>Midnight Dark</strong></td><td>Dark theme with reduced eye strain. Optimized for low-light environments and extended sessions.</td></tr>
+</table>
+<p>Switch themes from the <strong>Themes</strong> menu. The change is instant and your preference is saved.</p>
+
+<h3 id="classification">Message Classification</h3>
+<p>
+  WireTrace automatically classifies incoming serial messages into 7 severity
+  levels based on keyword detection. Each tag is displayed with a distinct color.
+</p>
+<table>
+  <tr><th>Tag</th><th>Trigger Keywords</th><th>Example</th></tr>
+  <tr>
+    <td><span class="tag tag-critical">CRITICAL</span></td>
+    <td><code>fatal</code>, <code>critical</code>, <code>panic</code>, <code>crash</code></td>
+    <td>CRITICAL: Watchdog reset — system halted</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-error">ERROR</span></td>
+    <td><code>error</code>, <code>fail</code>, <code>exception</code>, <code>fault</code></td>
+    <td>ERROR: I2C timeout on sensor 0x48</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-warning">WARNING</span></td>
+    <td><code>warn</code>, <code>warning</code>, <code>caution</code></td>
+    <td>WARNING: Battery voltage below threshold</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-info">INFO</span></td>
+    <td><code>info</code>, <code>connected</code>, <code>ready</code>, <code>success</code>, <code>ok</code>, <code>initialized</code>, <code>complete</code></td>
+    <td>INFO: WiFi connected to AP</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-debug">DEBUG</span></td>
+    <td><code>debug</code>, <code>trace</code>, <code>verbose</code></td>
+    <td>DEBUG: Buffer utilization at 23%</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-command">COMMAND</span></td>
+    <td>Lines sent from the command bar</td>
+    <td>>>> AT+RST</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-data">DATA</span></td>
+    <td>Everything else</td>
+    <td>Temperature: 25.3°C</td>
+  </tr>
+</table>
+<p>
+  Classification uses priority ordering — the most severe matching tag wins.
+</p>
+
+<h3 id="timestamps">Timestamps</h3>
+<p>WireTrace supports two timestamp display modes. Toggle by clicking the timestamp indicator in the status bar, or via <strong>View → Timestamp Format</strong>.</p>
+<table>
+  <tr><th>Mode</th><th>Indicator</th><th>Console Display</th></tr>
+  <tr>
+    <td><strong>Timestamp</strong></td>
+    <td>🕐 Timestamp</td>
+    <td><code>[2026-02-25 14:30:01.123]</code></td>
+  </tr>
+  <tr>
+    <td><strong>Elapsed</strong></td>
+    <td>Δt Elapsed</td>
+    <td><code>[+Δ 0.003s]</code> (time since previous line)</td>
+  </tr>
+</table>
+<p>This setting affects the console display only. Log files always use full timestamps.</p>
+
+<h3 id="display-mode">Text &amp; HEX Mode</h3>
+<p>
+  Switch between Text and HEX display modes from <strong>View → Display Mode</strong>.
+  Text mode decodes incoming bytes as UTF-8. HEX mode displays raw byte values,
+  which is useful for debugging binary protocols.
+</p>
+
+<h3 id="font">Font Size</h3>
+<table>
+  <tr><th>Action</th><th>Shortcut</th></tr>
+  <tr><td>Increase font size</td><td><kbd>Ctrl</kbd>+<kbd>+</kbd></td></tr>
+  <tr><td>Decrease font size</td><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td></tr>
+  <tr><td>Reset font size</td><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td></tr>
+</table>
+
+
+<!-- ── REFERENCE ─────────────────────────────────────────────────────────── -->
+<h2 id="reference">Reference</h2>
+
+<h3 id="keyboard-shortcuts">Keyboard Shortcuts</h3>
+<table>
+  <tr><th>Shortcut</th><th>Action</th></tr>
+  <tr><td><kbd>F1</kbd></td><td>Open this User Guide</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>New tab</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>W</kbd></td><td>Close current tab</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd></td><td>Start logging (current tab)</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Quick save (.txt)</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>Export dialog</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Open search</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td><td>Focus filter</td></tr>
+  <tr><td><kbd>F3</kbd></td><td>Next search result</td></tr>
+  <tr><td><kbd>Shift</kbd>+<kbd>F3</kbd></td><td>Previous search result</td></tr>
+  <tr><td><kbd>Escape</kbd></td><td>Clear search / filter</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd></td><td>Increase font size</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>Decrease font size</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Reset font size</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Preferences</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>Q</kbd></td><td>Exit</td></tr>
+  <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>Command history (when command bar is focused)</td></tr>
+</table>
+
+<h3 id="preferences">Preferences</h3>
+<p>
+  Open preferences with <kbd>Ctrl</kbd>+<kbd>,</kbd> or <strong>File → Preferences</strong>.
+  Settings include default baud rate, default log directory, export format,
+  theme, font size, display options, and performance tuning. All preferences
+  persist across sessions.
+</p>
+
+<h3 id="auto-update">Auto-Update</h3>
+<p>
+  WireTrace checks for updates automatically on startup. When a new version is
+  available, a dialog presents three options:
+</p>
+<ul>
+  <li><strong>Update Now</strong> — Downloads the installer with a live progress bar, verifies its integrity (SHA-256), then prompts to install. Clicking <strong>Install &amp; Restart</strong> launches the installer and closes WireTrace.</li>
+  <li><strong>Remind Later</strong> — Snoozes the notification for 24 hours.</li>
+  <li><strong>Skip This Version</strong> — Suppresses the notification for this specific version.</li>
+</ul>
+<p>You can also check manually via <strong>Help → Check for Updates</strong>.</p>
+
+<h3 id="file-locations">File Locations</h3>
+<table>
+  <tr><th>File</th><th>Windows</th><th>macOS</th><th>Linux</th></tr>
+  <tr>
+    <td>Preferences</td>
+    <td><code>%APPDATA%\WireTrace\Config\preferences.ini</code></td>
+    <td><code>~/Library/Application Support/WireTrace/preferences.ini</code></td>
+    <td><code>~/.config/WireTrace/preferences.ini</code></td>
+  </tr>
+  <tr>
+    <td>Default logs</td>
+    <td><code>Documents\WireTrace\Logs</code></td>
+    <td><code>~/Documents/WireTrace/Logs</code></td>
+    <td><code>~/Documents/WireTrace/Logs</code></td>
+  </tr>
+</table>
+
+
+<!-- ── TROUBLESHOOTING ───────────────────────────────────────────────────── -->
+<h2 id="troubleshooting">Troubleshooting</h2>
+
+<h3>Port not listed</h3>
+<p>
+  Click <strong>Refresh</strong> to re-scan. Ensure the device is plugged in and
+  drivers are installed. On Linux, your user may need to be in the
+  <code>dialout</code> group: <code>sudo usermod -aG dialout $USER</code> (then log out and back in).
+</p>
+
+<h3>Garbled or unreadable data</h3>
+<p>
+  This almost always indicates a baud rate mismatch. Confirm the correct rate
+  in your device's documentation. Try common rates: 9600, 115200.
+</p>
+
+<h3>Data appears to lag or stutter</h3>
+<p>
+  At very high data rates (>5,000 lines/sec), ensure no other application is
+  competing for the same serial port. Close any other serial monitors.
+  WireTrace batches GUI updates at 50ms intervals to maintain responsiveness.
+</p>
+
+<h3>Log file is empty</h3>
+<p>
+  Log files are buffered for performance. Data is flushed every second and on
+  <strong>Log Off</strong>. If the application is terminated unexpectedly, the
+  last second of data may be lost. Always use <strong>Log Off</strong> or close
+  the tab properly.
+</p>
+
+<h3>CSV has only two columns</h3>
+<p>
+  This means your serial data was not detected as structured. Auto-detect
+  requires consistent <code>key:value</code>, <code>key=value</code>, or JSON
+  formatting. If your data is unstructured, the Raw mode (<code>Timestamp, Data</code>)
+  is the correct output.
+</p>
+
+<h3>Resetting preferences</h3>
+<p>
+  If WireTrace behaves unexpectedly, you can reset all settings by deleting
+  the preferences file (see <a href="#file-locations">File Locations</a>) and
+  restarting the application.
+</p>
+
+<hr style="margin-top: 48px; border: none; border-top: 1px solid var(--border);">
+<p class="muted" style="margin-top: 16px; text-align: center;">
+  WireTrace — Professional Serial Data Monitor<br>
+  © 2026 The Nuance Project
+</p>
+
+</main>
+</body>
+</html>

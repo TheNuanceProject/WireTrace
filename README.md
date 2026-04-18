@@ -14,6 +14,33 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
 
 ---
 
+![WireTrace — connected to a device, light theme](docs/screenshots/dev-connect.png)
+
+![WireTrace — dark theme](docs/screenshots/dev-connect-dark.png)
+
+<details>
+<summary>More screenshots</summary>
+
+**Welcome screen — before connecting a device:**
+
+![Welcome screen](docs/screenshots/home.png)
+
+**New log session — choose format, directory, and description:**
+
+![New log session dialog](docs/screenshots/log-session.png)
+
+**Preferences — performance tuning and update settings:**
+
+![Preferences dialog](docs/screenshots/pref-dark.png)
+
+**Splash screen:**
+
+![Splash screen](docs/screenshots/splash.png)
+
+</details>
+
+---
+
 ## What it does
 
 - **Multi-device tabs.** Each connected device runs in its own tab,

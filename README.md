@@ -14,9 +14,9 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
 
 ---
 
-![WireTrace — connected to a device, light theme](docs/screenshots/dev-connect.png)
+![WireTrace — multiple device tabs, live telemetry with severity tags, dark theme](docs/screenshots/wiretrace-demo-board-multi-tab-dark.png)
 
-![WireTrace — dark theme](docs/screenshots/dev-connect-dark.png)
+![WireTrace — single device tab with live telemetry, dark theme](docs/screenshots/wiretrace-demo-board-dark.png)
 
 <details>
 <summary>More screenshots</summary>
@@ -24,6 +24,10 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
 **Welcome screen — before connecting a device:**
 
 ![Welcome screen](docs/screenshots/home.png)
+
+**Connected to a device, light theme:**
+
+![Connected state in light theme](docs/screenshots/dev-connect.png)
 
 **New log session — choose format, directory, and description:**
 

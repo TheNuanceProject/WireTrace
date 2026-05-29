@@ -14,6 +14,8 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
 
 ---
 
+![WireTrace — live data plotter with auto-detected traces, dark theme](docs/screenshots/wiretrace-plot-dark.png)
+
 ![WireTrace — multiple device tabs, live telemetry with severity tags, dark theme](docs/screenshots/wiretrace-demo-board-multi-tab-dark.png)
 
 ![WireTrace — single device tab with live telemetry, dark theme](docs/screenshots/wiretrace-demo-board-dark.png)
@@ -56,6 +58,15 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
 - **Search and live filter.** Search captured data with forward and
   backward navigation. Filter the live view by substring without
   affecting what is written to disk.
+- **Live data plotter.** Auto-detects numeric structure (JSON
+  objects, `key: value` pairs, or positional delimited values) from
+  the first fifty data lines and renders them as time-series traces
+  in a docked panel below the console. When auto-detect is not
+  enough, a Configure Plot dialog lets you declare a regex with
+  named groups, save it as a profile, and set a per-tab default —
+  for firmware that emits its own timestamped or log-prefixed
+  format. Theme-aware, cross-platform colourblind-safe palette,
+  per-trace toggle from the legend.
 - **Structured CSV export.** Two modes. Auto-detect identifies common
   patterns (`key: value` pairs and JSON-shaped lines) and pivots them
   into named columns. Raw mode writes a two-column file with
@@ -141,13 +152,13 @@ To build a distributable installer locally:
 
 ```bash
 # Windows
-python build/build.py --platform windows --version 1.0.0
+python build/build.py --platform windows --version 1.1.0
 
 # macOS
-python build/build.py --platform macos --version 1.0.0
+python build/build.py --platform macos --version 1.1.0
 
 # Linux
-python build/build.py --platform linux --version 1.0.0
+python build/build.py --platform linux --version 1.1.0
 ```
 
 See [BUILD_GUIDE.md](./BUILD_GUIDE.md) for detailed prerequisites and

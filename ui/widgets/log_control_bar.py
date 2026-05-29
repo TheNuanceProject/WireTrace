@@ -26,6 +26,7 @@ class LogControlBar(QWidget):
     pause_clicked = Signal()
     clear_clicked = Signal()
     export_clicked = Signal()
+    plot_toggled = Signal(bool)  # True = show plot, False = hide
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -39,6 +40,21 @@ class LogControlBar(QWidget):
         self._is_logging = is_logging
         self._is_paused = is_paused
         self._update_button_states()
+
+    def set_plot_open(self, open_: bool) -> None:
+        """Sync the Plot toggle's checked state without firing toggled.
+
+        Used by the host (DeviceTab / MainWindow) when the plot panel
+        is shown or hidden through a path other than the toolbar
+        button itself — e.g. the View menu, or auto-hide on disconnect.
+        """
+        if self._plot_btn.isChecked() != open_:
+            self._plot_btn.blockSignals(True)
+            self._plot_btn.setChecked(open_)
+            self._plot_btn.blockSignals(False)
+
+    def is_plot_open(self) -> bool:
+        return self._plot_btn.isChecked()
 
     def set_connected(self, connected: bool) -> None:
         self._log_on_btn.setEnabled(connected and not self._is_logging)
@@ -74,11 +90,23 @@ class LogControlBar(QWidget):
         self._export_btn.setToolTip("Export log data (Ctrl+E)")
         self._export_btn.clicked.connect(self.export_clicked)
 
+        # Plot toggle — placed RIGHT next to Export rather than at the
+        # far right after a stretch. With its own object name and a
+        # checked-state stylesheet rule it reads as a discoverable
+        # primary control.
+        self._plot_btn = self._make_btn("Plot", "plotToggleBtn", "plot")
+        self._plot_btn.setCheckable(True)
+        self._plot_btn.setToolTip(
+            "Show or hide the live plot panel (Ctrl+Shift+P)",
+        )
+        self._plot_btn.toggled.connect(self.plot_toggled)
+
         layout.addWidget(self._log_on_btn)
         layout.addWidget(self._pause_btn)
         layout.addWidget(self._log_off_btn)
         layout.addWidget(self._clear_btn)
         layout.addWidget(self._export_btn)
+        layout.addWidget(self._plot_btn)
         layout.addStretch()
 
     def _make_btn(self, text: str, obj_name: str, icon_name: str) -> QPushButton:

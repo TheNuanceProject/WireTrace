@@ -18,6 +18,7 @@
     <file alias="add_tab.svg">icons/add_tab.svg</file>
     <file alias="close_tab.svg">icons/close_tab.svg</file>
     <file alias="refresh.svg">icons/refresh.svg</file>
+    <file alias="plot.svg">icons/plot.svg</file>
   </qresource>
   <qresource prefix="/themes">
     <!-- QSS themes loaded from file system at runtime, not embedded -->

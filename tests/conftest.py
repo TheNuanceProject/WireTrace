@@ -12,6 +12,7 @@ as a pytest-qt test instead — don't extend these stubs further.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import types
 from pathlib import Path
@@ -40,19 +41,34 @@ def _install_pyside6_stubs() -> None:
             return lambda *a, **k: None
 
     class _Signal:
-        """Stand-in for Qt's Signal descriptor."""
+        """Stand-in for Qt's Signal descriptor.
+
+        Real Qt signals dispatch to connected slots; the original stub
+        was a no-op which made signal-emission assertions impossible.
+        This minimal implementation invokes connected callables on
+        emit, matching the observable behaviour of Qt for tests.
+        """
 
         def __init__(self, *args, **kwargs):
-            pass
+            self._slots = []
 
         def emit(self, *args, **kwargs):
-            pass
+            for slot in list(self._slots):
+                # Tests assert on state; swallow callback errors so
+                # one bad slot doesn't mask the rest of the suite.
+                with contextlib.suppress(Exception):
+                    slot(*args, **kwargs)
 
-        def connect(self, *args, **kwargs):
-            pass
+        def connect(self, slot, *args, **kwargs):
+            if callable(slot):
+                self._slots.append(slot)
 
-        def disconnect(self, *args, **kwargs):
-            pass
+        def disconnect(self, slot=None, *args, **kwargs):
+            if slot is None:
+                self._slots.clear()
+            else:
+                with contextlib.suppress(ValueError):
+                    self._slots.remove(slot)
 
     def _signal_factory(*args, **kwargs):
         return _Signal()
@@ -76,22 +92,38 @@ def _install_pyside6_stubs() -> None:
     qtcore.Signal = _signal_factory
     qtcore.Slot = _slot_decorator
 
-    # QtWidgets — update_manager's UpdateDialog uses these
+    # QtWidgets — update_manager's UpdateDialog and PlotConfigDialog use these
     qtwidgets = types.ModuleType("PySide6.QtWidgets")
     for name in (
         "QApplication", "QDialog", "QHBoxLayout", "QLabel",
         "QMessageBox", "QProgressBar", "QPushButton", "QTextEdit",
         "QVBoxLayout", "QWidget", "QProxyStyle", "QStyle",
+        # PlotConfigDialog
+        "QButtonGroup", "QComboBox", "QFrame", "QInputDialog",
+        "QListWidget", "QListWidgetItem", "QPlainTextEdit",
+        "QRadioButton", "QSizePolicy", "QStackedLayout",
+        # Preferences
+        "QCheckBox", "QFileDialog", "QLineEdit", "QScrollArea",
+        "QSpinBox",
     ):
         setattr(qtwidgets, name, _Base)
 
     # QtGui — some modules transitively reference this
     qtgui = types.ModuleType("PySide6.QtGui")
     qtgui.QFont = _Base
+    qtgui.QFontDatabase = _Base
     qtgui.QIcon = _Base
     qtgui.QPixmap = _Base
     qtgui.QAction = _Base
     qtgui.QKeySequence = _Base
+    # ConsoleView and friends
+    qtgui.QColor = _Base
+    qtgui.QTextCharFormat = _Base
+    qtgui.QTextCursor = _Base
+    qtgui.QPalette = _Base
+    qtgui.QBrush = _Base
+    qtgui.QGuiApplication = _Base
+    qtgui.QDesktopServices = _Base
 
     # QtSerialPort — serial_manager uses this
     qtserial = types.ModuleType("PySide6.QtSerialPort")

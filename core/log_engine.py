@@ -11,7 +11,10 @@ Buffer architecture (spec section 5.3):
   - collections.deque(maxlen=50,000) — automatic O(1) overflow protection
   - Atomic buffer swap: old, self._buffer = self._buffer, deque(maxlen=N)
   - File writes use buffering=65536 (64KB OS buffer)
-  - fsync() ONLY on stop_logging(), not on every flush
+  - fsync() on stop_logging() AND every PERIODIC_FSYNC_INTERVAL_MS so
+    that worst-case data loss on a hard kill (power cut, kernel panic,
+    Task Manager force-quit) is bounded to that interval rather than
+    the entire session.
 
 CRITICAL RULE: LogEngine receives ALL lines. Filtering only affects
 the console display. The disk log is always complete.
@@ -40,6 +43,12 @@ from app.constants import (
 from version import APP_NAME, APP_VERSION
 
 logger = logging.getLogger(__name__)
+
+
+#: Interval at which the QThread's run loop forces a full fsync of all
+#: open log files. Bounds worst-case data loss on a hard kill to this
+#: window. 30 seconds balances data safety against disk activity.
+PERIODIC_FSYNC_INTERVAL_MS = 30_000
 
 
 # ── Log Configuration ────────────────────────────────────────────────────────
@@ -201,9 +210,20 @@ class LogEngine(QThread):
     def stop_logging(self) -> None:
         """Stop logging and perform guaranteed final flush.
 
-        Flushes all remaining buffered entries, finalizes the CSV engine
-        (which flushes any rows held for auto-detection sampling), calls
-        fsync() on all open files, then closes file handles.
+        Order matters here. The sequence is:
+          1. Mark logging stopped so no new entries enter the buffer.
+          2. Flush every buffered LogEntry to the file streams (no
+             fsync yet — the CSV engine may still emit rows below).
+          3. Finalize the CSV engine, which writes any rows it was
+             holding for auto-detection sampling. These rows must be
+             produced BEFORE the fsync so they survive a power loss
+             on a normal shutdown.
+          4. Now fsync everything to physical disk.
+          5. Close file handles.
+
+        Previously fsync ran inside step 2, leaving the CSV finalize
+        rows in OS buffers and exposing them to a power-loss data
+        loss window between steps 3 and 5.
         """
         if not self._is_logging:
             return
@@ -211,18 +231,23 @@ class LogEngine(QThread):
         self._is_logging = False
         self._is_paused = False
 
-        # Final flush — guaranteed to write every buffered LogEntry.
-        self._flush(final=True)
+        # Step 2: Flush every buffered entry. No fsync — the CSV
+        # engine may still emit rows in step 3.
+        self._flush()
 
-        # Finalize the CSV engine — if auto-detection never reached its
-        # sample threshold, buffered rows would otherwise be lost.
+        # Step 3: Finalize the CSV engine. If auto-detection never
+        # reached its sample threshold, buffered rows would otherwise
+        # be lost.
         if self._csv_engine and self._csv_file and not self._csv_file.closed:
             try:
                 self._csv_engine.finalize(self._csv_file)
             except OSError as exc:
                 logger.warning("CSV finalize error: %s", exc)
 
-        # Close files
+        # Step 4: fsync now — including everything CSV finalize wrote.
+        self._sync_files()
+
+        # Step 5: Close files.
         self._close_files()
         logger.info("Logging stopped")
 
@@ -261,10 +286,15 @@ class LogEngine(QThread):
     # ── QThread Entry Point ──────────────────────────────────────────────
 
     def run(self) -> None:
-        """Thread entry point. Runs periodic flush timer.
+        """Thread entry point. Runs periodic flush and fsync timers.
 
-        The flush timer fires every flush_interval_ms to ensure data
-        is written to disk even during low-throughput periods.
+        The flush timer fires every flush_interval_ms (1 s) to drain
+        the in-memory deque to OS buffers — this protects against
+        process crash. The fsync timer fires every
+        PERIODIC_FSYNC_INTERVAL_MS (30 s) to push OS buffers all the
+        way to physical disk — this protects against power loss and
+        kernel panic. The two together bound worst-case loss on hard
+        kill to the fsync interval, instead of the entire session.
         """
         self._running = True
 
@@ -273,11 +303,17 @@ class LogEngine(QThread):
         flush_timer.timeout.connect(self._flush)
         flush_timer.start()
 
+        fsync_timer = QTimer()
+        fsync_timer.setInterval(PERIODIC_FSYNC_INTERVAL_MS)
+        fsync_timer.timeout.connect(self._sync_files)
+        fsync_timer.start()
+
         # Run event loop
         self.exec()
 
         # Cleanup
         flush_timer.stop()
+        fsync_timer.stop()
         self._running = False
 
     def stop(self) -> None:
@@ -286,14 +322,15 @@ class LogEngine(QThread):
 
     # ── Internal: Flush ──────────────────────────────────────────────────
 
-    def _flush(self, final: bool = False) -> None:
+    def _flush(self) -> None:
         """Flush buffered entries to disk.
 
         Uses atomic buffer swap to minimize lock hold time:
         the mutex is held only for the swap, not during file I/O.
 
-        Args:
-            final: If True, perform fsync() after writing (only on stop).
+        Does NOT call fsync — fsync is driven separately by the
+        periodic fsync timer in ``run()`` and explicitly by
+        ``stop_logging()``.
         """
         # Atomic swap — grab all pending entries, give buffer a fresh deque
         with QMutexLocker(self._buffer_mutex):
@@ -313,10 +350,6 @@ class LogEngine(QThread):
             logger.error(error_msg)
             self.error_occurred.emit(error_msg)
 
-        # fsync only on final flush (stop_logging)
-        if final:
-            self._sync_files()
-
         if count > 0:
             self.flush_completed.emit(count)
 
@@ -330,7 +363,7 @@ class LogEngine(QThread):
         if self._csv_file and not self._csv_file.closed:
             if self._csv_engine:
                 self._csv_engine.write_row(self._csv_file, entry.timestamp,
-                                           entry.line)
+                                           entry.line, entry.tag)
             else:
                 # Raw CSV fallback: Timestamp,Data
                 # Escape any commas or quotes in the data
@@ -340,9 +373,10 @@ class LogEngine(QThread):
                 self._csv_file.write(f"{entry.timestamp},{escaped}\n")
 
     def _sync_files(self) -> None:
-        """Flush OS buffers and fsync all open files.
+        """Flush OS buffers and fsync all open files to physical disk.
 
-        Called ONLY during stop_logging() — never on periodic flushes.
+        Called periodically by the fsync timer in ``run()`` and
+        explicitly by ``stop_logging()`` after CSV finalize.
         """
         for f in (self._txt_file, self._csv_file):
             if f and not f.closed:

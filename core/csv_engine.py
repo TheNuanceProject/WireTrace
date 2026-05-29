@@ -13,6 +13,20 @@ Mode 1 — Auto-detect (for structured data):
 Mode 2 — Raw (for everything else):
   Output: Timestamp,Data
 
+Tag-aware sampling and writing:
+  Every row is accompanied by the severity tag the TagDetector already
+  produced upstream (CRITICAL/ERROR/WARNING/INFO/DEBUG/COMMAND/DATA).
+
+  - Detection sample: only DATA-tagged lines feed column detection.
+    Severity messages (boot logs, INFO/WARNING/ERROR output) cannot
+    pollute the column intersection and collapse it to RAW.
+  - AUTO-mode writes: severity- and command-tagged rows are excluded
+    from the .csv to keep the structured export rectangular for
+    downstream consumers (Excel, pandas, plotting tools). The full
+    .txt log preserves every line verbatim regardless.
+  - RAW-mode writes: every row is written verbatim — there is no
+    structured schema to protect, so the .csv mirrors the .txt.
+
 Architecture note for v2.1 plotter:
   The structure detection output (column names + parsed values) is exposed
   via the structure_detected signal. The future plotter subscribes to this
@@ -31,7 +45,7 @@ from typing import IO
 
 from PySide6.QtCore import QObject, Signal
 
-from app.constants import CSV_AUTODETECT_SAMPLE_SIZE, CSVMode
+from app.constants import CSV_AUTODETECT_SAMPLE_SIZE, TAG_DATA, CSVMode
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +96,16 @@ class CSVEngine(QObject):
 
         self._mode: CSVMode = CSVMode.RAW
         self._columns: list[str] = []
-        # Buffer of (timestamp, line) pairs collected during detection.
-        # Pairs preserve each row's original timestamp for re-write after
-        # detection completes — using a single "current" timestamp for
-        # all buffered rows corrupts the log (see audit C2).
-        self._sample_buffer: list[tuple[str, str]] = []
+        # Buffer of (timestamp, line, tag) triples collected during
+        # detection. The tag is carried so detection can filter the
+        # sample to DATA-tagged lines only (severity/command lines
+        # would pollute the column intersection), and so the replay
+        # can apply Option C — exclude severity from AUTO-mode CSV.
+        # Tuples preserve each row's original timestamp for re-write
+        # after detection completes; using a single "current"
+        # timestamp for all buffered rows would corrupt the log
+        # (regression guard for audit finding C2).
+        self._sample_buffer: list[tuple[str, str, str]] = []
         self._sample_size = CSV_AUTODETECT_SAMPLE_SIZE
         self._detection_complete = False
         self._header_written = False
@@ -185,32 +204,51 @@ class CSVEngine(QObject):
         file_handle: IO[str],
         timestamp: str,
         line: str,
+        tag: str,
     ) -> None:
         """Write a single data row to the CSV file.
 
-        During the first :attr:`_sample_size` rows, the timestamp/line
-        pair is buffered — nothing is written to disk. Once the buffer
-        is full, auto-detection runs, the column header is written,
-        then all buffered rows are flushed in the detected mode.
+        During the first :attr:`_sample_size` rows, the
+        ``(timestamp, line, tag)`` triple is buffered — nothing is
+        written to disk. Once the buffer is full, auto-detection runs
+        on the DATA-tagged subset of the buffer, the column header is
+        written, and every buffered row is replayed under the active
+        mode's write rules.
 
-        After detection completes, rows are written directly.
+        After detection completes, rows are written directly:
+          - AUTO mode: only ``tag == "DATA"`` rows are written. Severity
+            and command rows are excluded so the structured CSV stays
+            rectangular for downstream consumers (Option C). The .txt
+            log preserves them.
+          - RAW mode: every row is written verbatim regardless of tag.
+            There is no structured schema to protect.
 
         Args:
             file_handle: Open file handle for the .csv file.
             timestamp: Formatted timestamp string for this row.
             line: The decoded serial line.
+            tag: Severity tag from TagDetector — one of "CRITICAL",
+                "ERROR", "WARNING", "INFO", "DEBUG", "COMMAND", or
+                "DATA". Drives both detection-sample filtering and
+                AUTO-mode write filtering (see above).
         """
-        # Auto-detection phase: buffer (timestamp, line) pairs. Nothing
-        # is written to disk yet — we must know the column structure
-        # before committing the header, and writing raw rows first
-        # would corrupt the CSV's structural consistency.
+        # Auto-detection phase: buffer (timestamp, line, tag) triples.
+        # Nothing is written to disk yet — we must know the column
+        # structure before committing the header, and writing raw rows
+        # first would corrupt the CSV's structural consistency.
         if not self._detection_complete:
-            self._sample_buffer.append((timestamp, line))
+            self._sample_buffer.append((timestamp, line, tag))
             if len(self._sample_buffer) >= self._sample_size:
                 self._flush_sample_buffer(file_handle)
             return
 
-        # Detection has already completed — write directly.
+        # Option C: in AUTO mode, exclude severity- and command-tagged
+        # rows from the structured CSV. The .txt log is the canonical
+        # complete record; the .csv is for tabular consumers.
+        if self._mode == CSVMode.AUTO and tag != TAG_DATA:
+            return
+
+        # RAW mode, or AUTO mode with a DATA-tagged row.
         self._write_header_once(file_handle)
         self._write_single_row(file_handle, timestamp, line)
 
@@ -233,23 +271,41 @@ class CSVEngine(QObject):
     def _flush_sample_buffer(self, file_handle: IO[str]) -> None:
         """Run detection on the buffered samples and flush them to disk.
 
-        Writes the column header (if not already written) using the
-        detected mode, then writes every buffered row with its original
-        timestamp. Clears the buffer.
+        Detection only considers DATA-tagged lines from the buffer —
+        severity messages (boot logs, INFO/WARNING/ERROR output) and
+        user commands cannot pollute the column intersection. The tag
+        detector has already classified every line upstream; this just
+        consumes that classification.
 
-        Safe to call with an empty buffer — it runs detection on an
-        empty sample (producing RAW mode) and writes just the header.
+        After detection runs, the column header is written (if not
+        already), then every buffered row is replayed with its original
+        timestamp under the active mode's write rules:
+          - AUTO mode: severity- and command-tagged rows are skipped
+            (Option C); the .txt log preserves them.
+          - RAW mode: every row is written verbatim.
+
+        Safe to call with an empty buffer — detection runs on an empty
+        sample (producing RAW mode) and writes just the header.
         """
-        # Extract the raw line strings for detection while preserving
-        # the (timestamp, line) pairs for replay.
-        sample_lines = [line for _, line in self._sample_buffer]
-        self.detect_mode(sample_lines)
+        # Detection input: DATA-tagged lines only. If the buffer holds
+        # only severity (e.g. a device that boots and emits nothing
+        # but log messages), the filtered sample is empty and
+        # detect_mode correctly returns RAW.
+        data_lines = [
+            line for _, line, tag in self._sample_buffer
+            if tag == TAG_DATA
+        ]
+        self.detect_mode(data_lines)
 
         # Write the header now that we know the mode.
         self._write_header_once(file_handle)
 
-        # Replay every buffered row with its original timestamp.
-        for original_timestamp, original_line in self._sample_buffer:
+        # Replay every buffered row with its original timestamp,
+        # applying the active mode's tag-filtering rule.
+        for original_timestamp, original_line, original_tag in self._sample_buffer:
+            if self._mode == CSVMode.AUTO and original_tag != TAG_DATA:
+                # Option C: severity stays out of the structured CSV.
+                continue
             self._write_single_row(
                 file_handle, original_timestamp, original_line,
             )
@@ -370,19 +426,33 @@ class CSVEngine(QObject):
         timestamp: str,
         line: str,
     ) -> None:
-        """Write a single row in the detected mode."""
+        """Write a single row in the detected mode.
+
+        AUTO mode invariant: every row written has exactly the column
+        count of the header. A DATA-tagged line that does not parse to
+        the detected schema (e.g. a boot banner that slipped past the
+        tag detector, or a one-off message with a different shape) is
+        skipped from the .csv — the .txt log preserves it. This keeps
+        the structured CSV rectangular for downstream consumers.
+
+        RAW mode: every row is written verbatim as ``Timestamp,Data``.
+        """
         if self._mode == CSVMode.AUTO and self._columns:
             values = self._extract_values(line)
             if values:
                 row_values = [values.get(col, "") for col in self._columns]
-                row = ",".join([timestamp] + [self._csv_escape(v) for v in row_values])
+                row = ",".join(
+                    [timestamp] + [self._csv_escape(v) for v in row_values],
+                )
                 file_handle.write(row + "\n")
 
                 # Emit for plotter hook (v2.1)
                 self.row_parsed.emit(values)
-                return
+            # AUTO + unparseable: skip the row to preserve the
+            # rectangular-CSV invariant. The .txt log retains the line.
+            return
 
-        # Fall back to raw
+        # RAW mode: write verbatim.
         self._write_raw_row(file_handle, timestamp, line)
 
     def _write_raw_row(

@@ -261,6 +261,22 @@ class MainWindow(QMainWindow):
         self._act_dm_hex.setCheckable(True)
         self._act_dm_hex.triggered.connect(lambda: self._set_display_mode("hex"))
 
+        view_menu.addSeparator()
+
+        # Live plot panel toggle. Checkable so the menu reflects the
+        # current state of the active tab. Updated on tab switch via
+        # _refresh_view_menu_state().
+        self._act_plot_panel = view_menu.addAction("Live Plot")
+        self._act_plot_panel.setCheckable(True)
+        self._act_plot_panel.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self._act_plot_panel.triggered.connect(self._on_menu_toggle_plot)
+
+        # Configure Plot opens the manual-mode dialog. Useful when
+        # auto-detect doesn't fit the firmware's format, or when the
+        # engineer wants to declare an exact regex up front.
+        self._act_plot_configure = view_menu.addAction("Configure Plot\u2026")
+        self._act_plot_configure.triggered.connect(self._on_menu_configure_plot)
+
         # ── Themes ──
         themes_menu = menu_bar.addMenu("&Themes")
         self._themes_menu = themes_menu
@@ -320,6 +336,14 @@ class MainWindow(QMainWindow):
             lambda title, t=tab: self._on_tab_title_changed(t, title)
         )
         tab.timestamp_mode_changed.connect(self._sync_timestamp_menu)
+        # View → Live Plot checkmark must reflect actual plot visibility
+        # regardless of how visibility changed (toolbar button, menu,
+        # or disconnect tear-down). The signal is the single source of
+        # truth; the handler ignores emissions from non-current tabs
+        # so cross-tab activity doesn't perturb the menu.
+        tab.plot_visibility_changed.connect(
+            lambda visible, t=tab: self._on_tab_plot_visibility_changed(t, visible)
+        )
         idx = self._tab_widget.addTab(tab, "New Tab")
         self._tab_widget.setCurrentIndex(idx)
         self._update_view()
@@ -331,6 +355,15 @@ class MainWindow(QMainWindow):
             if not tab.confirm_close():
                 return
             tab.ordered_shutdown()
+            # Final teardown of the plot view's redraw timer. This is
+            # the ONLY place shutdown() is called — per-disconnect
+            # cycles use reset_session() (timer keeps running) so a
+            # subsequent reconnect renders properly.
+            plot_view = getattr(tab, "_plot_view", None)
+            if plot_view is not None:
+                shutdown = getattr(plot_view, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
 
         self._tab_widget.removeTab(index)
         if tab:
@@ -346,6 +379,7 @@ class MainWindow(QMainWindow):
         """Update window title and sync View menu state when tab changes."""
         if index < 0:
             self.setWindowTitle(WINDOW_TITLE)
+            self._act_plot_panel.setChecked(False)
             return
         title = self._tab_widget.tabText(index)
         self.setWindowTitle(f"{WINDOW_TITLE} — {title}")
@@ -354,6 +388,7 @@ class MainWindow(QMainWindow):
         tab = self._current_tab()
         if tab:
             self._sync_timestamp_menu(tab._session.timestamp_mode)
+            self._act_plot_panel.setChecked(tab.is_plot_visible())
 
     def _on_tab_title_changed(self, tab: DeviceTab, title: str) -> None:
         """Update tab text when DeviceTab emits title_changed."""
@@ -362,6 +397,18 @@ class MainWindow(QMainWindow):
             self._tab_widget.setTabText(idx, title)
             if idx == self._tab_widget.currentIndex():
                 self.setWindowTitle(f"{WINDOW_TITLE} — {title}")
+
+    def _on_tab_plot_visibility_changed(
+        self, tab: DeviceTab, visible: bool,
+    ) -> None:
+        """Sync the View → Live Plot menu check to a tab's state.
+
+        Only acts on emissions from the currently-active tab.
+        Background tabs changing their plot state must not perturb
+        the menu — the menu always shows the current tab's view.
+        """
+        if tab is self._current_tab():
+            self._act_plot_panel.setChecked(visible)
 
     def _on_tab_context_menu(self, pos) -> None:
         """Context menu on tab right-click."""
@@ -497,18 +544,38 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_menu_user_guide(self) -> None:
-        """Open the User Guide HTML file in the system default browser."""
-        from pathlib import Path
+        """Open the User Guide HTML in the system default browser.
 
+        Resolution, version-stamping, and per-user cache placement
+        are handled by ``app.help_loader``. If the source asset is
+        missing (e.g. an incomplete install), we surface a clear
+        toast rather than silently failing.
+        """
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
 
-        guide_path = Path(__file__).parent.parent / "resources" / "help" / "user_guide.html"
-        if guide_path.is_file():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(guide_path.resolve())))
-        else:
-            from ui.widgets.toast import Toast
-            Toast.error(self, "User Guide not found")
+        from app.help_loader import UserGuideNotFoundError, prepare_user_guide
+        from ui.widgets.toast import Toast
+
+        try:
+            stamped_path = prepare_user_guide()
+        except UserGuideNotFoundError:
+            logger.exception("User guide source not found")
+            Toast.error(
+                self,
+                "User Guide is not installed. Please reinstall WireTrace.",
+            )
+            return
+        except OSError:
+            logger.exception("Failed to write stamped user guide to cache")
+            Toast.error(
+                self,
+                "Could not prepare the User Guide. Please check disk permissions.",
+            )
+            return
+
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(stamped_path))):
+            Toast.error(self, "No default browser configured to open the User Guide.")
 
     # ══════════════════════════════════════════════════════════════════════
     # SHORTCUT HANDLERS (delegate to current tab)
@@ -586,6 +653,38 @@ class MainWindow(QMainWindow):
         tab = self._current_tab()
         if tab:
             tab.set_display_mode(dm)
+
+    def _on_menu_toggle_plot(self) -> None:
+        """Toggle the live-plot panel on the current tab.
+
+        The action is checkable; ``triggered`` carries the new checked
+        state via the action itself. We dispatch to the active tab's
+        public ``toggle_plot()`` API. If no tab is active, revert the
+        menu check so the UI doesn't lie about state.
+        """
+        tab = self._current_tab()
+        if tab is None:
+            self._act_plot_panel.setChecked(False)
+            return
+        tab.toggle_plot()
+        # Sync the menu's check to whatever the tab actually decided.
+        self._act_plot_panel.setChecked(tab.is_plot_visible())
+
+    def _on_menu_configure_plot(self) -> None:
+        """Open the Configure Plot dialog rooted on the active tab.
+
+        Configuration is per-tab — each tab's engine gets its own
+        applied PlotConfig — but profiles are shared across tabs via
+        the PlotProfileStore.
+        """
+        tab = self._current_tab()
+        if tab is None:
+            QMessageBox.information(
+                self, "Configure Plot",
+                "Open a tab first \u2014 plot configuration is per-tab.",
+            )
+            return
+        tab.open_plot_config_dialog()
 
     # ══════════════════════════════════════════════════════════════════════
     # WINDOW STATE

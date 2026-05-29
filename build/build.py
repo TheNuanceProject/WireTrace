@@ -243,6 +243,35 @@ def compile_nuitka(plat: str, version: str) -> Path:
         f"--include-data-dir={PROJECT_ROOT / 'resources'}=resources",
         # QSS themes — loaded by theme_manager.py via open()
         f"--include-data-dir={PROJECT_ROOT / 'ui' / 'themes'}=ui/themes",
+
+        # ── Bundle lazy-imported third-party packages ──
+        # CRITICAL: pyqtgraph and numpy are imported lazily from
+        # device_tab.py → plot_view.py (only when the Plot panel is
+        # first opened). Nuitka's static analyzer does not reliably
+        # follow lazy chains into third-party packages with internal
+        # dynamic imports — pyqtgraph in particular uses runtime
+        # configuration loaders and optional OpenGL bindings that
+        # static analysis cannot resolve. Without these flags, the
+        # built .exe shows the Plot button as enabled but the panel
+        # silently fails to construct because pyqtgraph isn't there.
+        # The Step 5.5 smoke test (see run_smoke_test below) catches
+        # any regression of this — do NOT remove these flags.
+        "--include-package=pyqtgraph",
+        "--include-package=numpy",
+
+        # ── PySide6 optional submodules used by pyqtgraph ──
+        # pyqtgraph imports these internally for hardware-accelerated
+        # rendering (QtOpenGL/QtOpenGLWidgets) and vector-graphics
+        # icons (QtSvg). The Nuitka --enable-plugin=pyside6 flag only
+        # bundles the core Qt modules our own code touches directly
+        # (QtCore, QtGui, QtWidgets, QtSerialPort, ...) — optional
+        # submodules require explicit --include-module flags. If
+        # any of these is missing, pyqtgraph either fails to import
+        # outright (QtOpenGL) or silently falls back to a degraded
+        # renderer with broken SVG / no GL acceleration.
+        "--include-module=PySide6.QtOpenGL",
+        "--include-module=PySide6.QtOpenGLWidgets",
+        "--include-module=PySide6.QtSvg",
     ]
 
     # Platform-specific flags
@@ -363,6 +392,74 @@ def validate_build(final_dir: Path, plat: str) -> None:
         log("Themes directory NOT found in build output", "WARN")
 
     log("Build validation passed ✓")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 5.5: SMOKE TEST — verify the binary's lazy-import chains
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_smoke_test(final_dir: Path, plat: str) -> None:
+    """Run the binary in --smoke-test mode and require a clean exit.
+
+    Why this exists:
+        Nuitka's static analyzer cannot always follow lazy imports
+        into third-party packages with internal dynamic loading
+        (pyqtgraph being the canonical example). The result is a
+        binary that *looks* fine — Step 5 validation passes, all
+        data dirs are bundled — but the Plot panel silently fails
+        to construct because pyqtgraph was never included.
+
+        This step runs the compiled binary in a headless self-check
+        mode (`--smoke-test`) that imports every lazy entry point.
+        If any import fails, the binary exits non-zero and we abort
+        the build BEFORE the installer is built and shipped.
+
+    Raises:
+        RuntimeError: if the smoke test process exits non-zero or
+            times out. The build halts here.
+    """
+    log_section("Step 5.5: Smoke Test")
+
+    exe = final_dir / f"{APP_NAME}.exe" if plat == "windows" else final_dir / APP_NAME.lower()
+    if not exe.exists():
+        raise RuntimeError(f"Executable not found for smoke test: {exe}")
+
+    log("Running --smoke-test on the built binary (verifies lazy imports)...")
+    log(f"  $ {exe} --smoke-test")
+
+    try:
+        result = subprocess.run(
+            [str(exe), "--smoke-test"],
+            cwd=str(final_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "Smoke test timed out after 60s. The binary may be hanging "
+            "on a missing dependency or initialisation error.",
+        ) from exc
+
+    # Echo the smoke-test output so the operator can see what passed
+    # and what failed. stderr typically holds the logging messages.
+    output = result.stderr or result.stdout
+    for line in output.splitlines():
+        log(f"  {line}")
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Smoke test FAILED (exit code {result.returncode}). "
+            "The built binary cannot resolve one or more lazy imports — "
+            "see lines above for the specific module. "
+            "Common cause: a third-party package needs an explicit "
+            "--include-package=<name> flag in compile_nuitka(). "
+            "Fix the build script and rebuild. Do NOT package or "
+            "ship this binary."
+        )
+
+    log("Smoke test passed ✓ — all lazy imports resolve in the binary")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -592,6 +689,7 @@ def build_platform(plat: str, version: str) -> list[Path]:
     dist_dir = compile_nuitka(plat, version)
     final_dir = post_process(plat, dist_dir, version)
     validate_build(final_dir, plat)
+    run_smoke_test(final_dir, plat)
     artifacts = package_installer(plat, final_dir, version)
     sign_artifacts(plat, artifacts)
 

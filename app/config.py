@@ -69,6 +69,13 @@ _DEFAULTS = {
         "log_flush_interval_ms": str(LOG_FLUSH_INTERVAL_MS),
         "max_console_lines": str(MAX_CONSOLE_LINES),
     },
+    "Plot": {
+        # Persisted by app.plot_config.PlotProfileStore. Default values
+        # ensure a fresh install boots with the built-in Auto-detect
+        # profile selected.
+        "default_profile": "Auto-detect",
+        "profiles_json": '[{"name":"Auto-detect","mode":"auto"}]',
+    },
     "Colors": {
         "critical": "#B71C1C",
         "error": "#C62828",

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WireTrace — User Guide</title>
+<title>WireTrace {{WIRETRACE_VERSION}} — User Guide</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -52,7 +52,7 @@
     font-weight: 600; color: var(--text); margin-top: 16px; font-size: 0.8rem;
     text-transform: uppercase; letter-spacing: 0.04em; pointer-events: none; padding-bottom: 4px;
   }
-  .content { margin-left: var(--sidebar-w); flex: 1; max-width: 780px; padding: 40px 48px 80px; }
+  .content { margin-left: var(--sidebar-w); flex: 1; max-width: 820px; padding: 40px 48px 80px; }
   h2 {
     font-size: 1.55rem; font-weight: 700; color: var(--text); margin: 48px 0 12px;
     padding-bottom: 8px; border-bottom: 2px solid var(--accent); letter-spacing: -0.01em;
@@ -61,7 +61,7 @@
   h3 { font-size: 1.1rem; font-weight: 600; color: var(--text); margin: 28px 0 8px; }
   p { margin: 8px 0; }
   table { width: 100%; border-collapse: collapse; margin: 14px 0 20px; font-size: 0.9rem; }
-  th, td { text-align: left; padding: 9px 14px; border: 1px solid var(--border); }
+  th, td { text-align: left; padding: 9px 14px; border: 1px solid var(--border); vertical-align: top; }
   th {
     background: var(--bg-alt); font-weight: 600; font-size: 0.82rem;
     text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary);
@@ -81,6 +81,7 @@
     padding: 14px 18px; overflow-x: auto; font-size: 0.85rem; line-height: 1.55;
     margin: 12px 0 16px; font-family: "SF Mono", "Consolas", "Menlo", monospace;
   }
+  pre code { background: transparent; padding: 0; font-size: 1em; }
   .tag {
     display: inline-block; padding: 1px 8px; border-radius: 3px;
     font-family: "SF Mono", "Consolas", "Menlo", monospace;
@@ -104,6 +105,11 @@
   ol, ul { margin: 8px 0 12px 22px; }
   li { margin: 4px 0; }
   .muted { color: var(--text-muted); font-size: 0.85rem; }
+  .version-pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    background: var(--accent-light); color: var(--accent);
+    font-size: 0.78rem; font-weight: 600; letter-spacing: 0.01em;
+  }
   @media print {
     .sidebar { display: none; }
     .content { margin-left: 0; max-width: 100%; padding: 20px; }
@@ -121,7 +127,7 @@
 <aside class="sidebar">
   <div class="sidebar-brand">
     <h1>WireTrace</h1>
-    <span>User Guide</span>
+    <span>User Guide &middot; <span class="version-pill">v{{WIRETRACE_VERSION}}</span></span>
   </div>
   <nav>
     <a href="#getting-started" class="section-head">Getting Started</a>
@@ -135,6 +141,24 @@
     <a href="#connection-panel">Connection Panel</a>
     <a href="#command-bar">Command Bar</a>
     <a href="#status-bar">Status Bar</a>
+
+    <a href="#plot" class="section-head">Live Plotter</a>
+    <a href="#plot-overview">Plot Overview</a>
+    <a href="#plot-toolbar">Plot Toolbar</a>
+    <a href="#plot-auto-detect">Auto-Detect Formats</a>
+    <a href="#plot-prefix">Prefix Routing (plt:)</a>
+    <a href="#plot-legend">Legend &amp; Trace Toggling</a>
+    <a href="#plot-pan-zoom">Pan &amp; Zoom</a>
+    <a href="#plot-multi-tab">Plot per Tab</a>
+
+    <a href="#configure-plot" class="section-head">Configure Plot</a>
+    <a href="#configure-overview">When to Configure</a>
+    <a href="#configure-modes">Auto vs Manual Mode</a>
+    <a href="#configure-regex">Manual Regex</a>
+    <a href="#configure-capture">Capture from Sample</a>
+    <a href="#configure-test">Tiered Test Result</a>
+    <a href="#configure-profiles">Saving Profiles</a>
+    <a href="#configure-default">Default Profile</a>
 
     <a href="#logging" class="section-head">Logging &amp; Export</a>
     <a href="#logging-controls">Logging Controls</a>
@@ -154,6 +178,10 @@
     <a href="#display-mode">Text &amp; HEX Mode</a>
     <a href="#font">Font Size</a>
 
+    <a href="#sessions" class="section-head">Sessions</a>
+    <a href="#disconnect-reconnect">Disconnect &amp; Reconnect</a>
+    <a href="#data-integrity">Data Integrity</a>
+
     <a href="#reference" class="section-head">Reference</a>
     <a href="#keyboard-shortcuts">Keyboard Shortcuts</a>
     <a href="#preferences">Preferences</a>
@@ -172,51 +200,65 @@
 
 <h3 id="overview">Overview</h3>
 <p>
-  WireTrace is a professional serial data monitor and logger designed for
-  embedded engineers. It captures, classifies, and exports data from serial
-  devices in real time.
+  WireTrace is a professional serial data monitor for embedded and IoT
+  engineers. It captures, classifies, plots, and exports serial data in
+  real time, with no configuration required for most devices.
 </p>
-<p>Key capabilities:</p>
+<p>Capabilities at a glance:</p>
 <ul>
-  <li>Monitor multiple serial ports simultaneously in separate tabs</li>
-  <li>Sustained throughput of 10,000+ lines per second</li>
-  <li>Automatic severity-based message classification (7 tags)</li>
-  <li>Real-time search and line filtering</li>
-  <li>Export to <code>.txt</code> and <code>.csv</code> with structured column detection</li>
-  <li>Light and Dark themes</li>
+  <li>Monitor multiple serial ports simultaneously, each in its own tab</li>
+  <li>Sustained throughput of 10,000+ lines per second per tab</li>
+  <li>Automatic severity classification across 7 tags
+      (<span class="tag tag-critical">CRITICAL</span>,
+      <span class="tag tag-error">ERROR</span>,
+      <span class="tag tag-warning">WARNING</span>,
+      <span class="tag tag-info">INFO</span>,
+      <span class="tag tag-debug">DEBUG</span>,
+      <span class="tag tag-command">COMMAND</span>,
+      <span class="tag tag-data">DATA</span>)</li>
+  <li>Live data plotter with auto-detected JSON / key:value / delimited formats</li>
+  <li>Manual plot configuration with named, persistent profiles</li>
+  <li>Buffered logging to <code>.txt</code> and <code>.csv</code> with
+      automatic column detection</li>
+  <li>Real-time search and line filtering — disk log always remains complete</li>
+  <li>Studio Light and Midnight Dark themes</li>
   <li>Cross-platform — Windows, macOS, and Linux</li>
 </ul>
 
 <h3 id="first-connection">Your First Connection</h3>
 <ol>
   <li>Connect your serial device (USB, FTDI, etc.) to the computer.</li>
-  <li>Launch WireTrace. You'll see the welcome screen with a single button: <strong>Connect a Device</strong>.</li>
+  <li>Launch WireTrace. The welcome screen offers a single action: <strong>Connect a Device</strong>.</li>
   <li>Click it. A new tab opens with the connection panel.</li>
-  <li>Select your port from the <strong>Port</strong> dropdown. Click <strong>Refresh</strong> if your device doesn't appear.</li>
-  <li>Select the baud rate (default: 115200). You can type a custom rate directly.</li>
+  <li>Select your port from the <strong>Port</strong> dropdown. Click <strong>Refresh</strong> if the device isn't listed.</li>
+  <li>Pick the baud rate (default <code>115200</code>). You can also type a custom rate directly.</li>
   <li>Click <strong>Connect</strong>.</li>
 </ol>
-<p>Data from the device appears immediately in the console.</p>
+<p>Incoming data appears immediately in the console.</p>
 
 <div class="callout callout-tip">
   <strong>Tip</strong>
-  The port dropdown shows the device description and manufacturer (e.g., "COM3 — Arduino Uno (Arduino LLC)") to help you identify the correct port.
+  The port dropdown shows the device description and manufacturer
+  (e.g. <em>"COM3 — Arduino Uno (Arduino LLC)"</em>) to help you pick
+  the right one when several USB serial adapters are connected.
 </div>
 
 <h3 id="first-log">Your First Log</h3>
 <ol>
   <li>Once connected, click <strong>Log On</strong> in the toolbar.</li>
-  <li>The New Log dialog opens. Enter a session name (e.g., "MotorTest").</li>
-  <li>Choose a save directory and export format (.txt, .csv, or both).</li>
+  <li>The <em>New Log</em> dialog opens. Enter a session name (e.g. <code>MotorTest</code>).</li>
+  <li>Choose a save directory and export format (<code>.txt</code>, <code>.csv</code>, or both).</li>
   <li>Optionally add a description.</li>
-  <li>Click <strong>Start Logging</strong>. All incoming data is now written to disk.</li>
-  <li>Click <strong>Log Off</strong> to stop and close the log files.</li>
+  <li>Click <strong>Start Logging</strong>. Every incoming line is now written to disk.</li>
+  <li>Click <strong>Log Off</strong> to stop. WireTrace flushes buffers and closes the files cleanly.</li>
 </ol>
 
 <div class="callout callout-note">
-  <strong>Note</strong>
-  Logging captures every line from the serial port, regardless of any active
-  filters on the console display. Your log files are always complete.
+  <strong>Disk log is always complete</strong>
+  Logging captures every line from the serial port. Console filters,
+  search highlights, and display settings have no effect on what is
+  written to disk. See <a href="#data-integrity">Data Integrity</a>
+  for the buffering and durability guarantees.
 </div>
 
 
@@ -225,27 +267,28 @@
 
 <h3 id="multi-device-tabs">Multi-Device Tabs</h3>
 <p>
-  WireTrace supports multiple simultaneous serial connections. Each device
-  runs in its own tab with completely isolated data, threads, and log files.
+  WireTrace supports multiple simultaneous serial connections. Each
+  device runs in its own tab with completely isolated data, threads,
+  log engines, and plot engines.
 </p>
 <ul>
   <li>Click the <strong>+</strong> button (or <kbd>Ctrl</kbd>+<kbd>T</kbd>) to create a new tab.</li>
-  <li>Each tab has its own connection panel, console, log engine, and status bar.</li>
-  <li>Closing a tab with active logging prompts for confirmation, then performs an ordered shutdown — data is flushed before the port is released.</li>
-  <li>Right-click a tab header to <strong>Rename</strong> or <strong>Close</strong> it.</li>
-  <li>When all tabs are closed, the welcome screen reappears.</li>
+  <li>Each tab maintains its own connection panel, console, log engine, plot engine, and status bar.</li>
+  <li>Closing a tab while logging is active prompts for confirmation, then performs an ordered shutdown: flush &rarr; finalise CSV &rarr; fsync &rarr; close &rarr; release the port.</li>
+  <li>Right-click a tab header to <strong>Rename</strong> or <strong>Close</strong>.</li>
+  <li>When all tabs close, the welcome screen returns.</li>
 </ul>
 
 <h3 id="console">Console Display</h3>
 <p>
-  The console is a high-performance virtual viewport. It renders only the
-  visible lines, keeping memory usage constant regardless of total data volume.
-  The full log is always on disk.
+  The console is a high-performance virtual viewport: only the visible
+  lines are painted, so memory remains bounded regardless of total
+  data volume. The complete log is always on disk.
 </p>
 <ul>
-  <li><strong>Auto-scroll</strong> — Enabled by default. New lines scroll into view as they arrive. Scrolling up manually pauses auto-scroll; scrolling back to the bottom re-enables it.</li>
-  <li><strong>Color mode</strong> — Messages are color-coded by severity (see <a href="#classification">Message Classification</a>).</li>
-  <li><strong>Clear</strong> — Clears the console display. Does not affect log files.</li>
+  <li><strong>Auto-scroll</strong> &mdash; enabled by default. New lines scroll into view as they arrive. Scrolling up manually pauses auto-scroll; scrolling back to the bottom re-enables it.</li>
+  <li><strong>Color mode</strong> &mdash; messages are colour-coded by severity (see <a href="#classification">Message Classification</a>).</li>
+  <li><strong>Clear</strong> &mdash; clears the console display. Does <em>not</em> affect log files or the plot.</li>
 </ul>
 
 <h3 id="connection-panel">Connection Panel</h3>
@@ -259,31 +302,334 @@
 
 <div class="callout callout-warn">
   <strong>Custom Baud Rates</strong>
-  While any integer between 50 and 4,000,000 is accepted, the device must
-  also support the selected rate. Mismatched baud rates produce garbled data.
+  Any integer between 50 and 4,000,000 is accepted, but the device
+  must support the rate too. Mismatched rates produce garbled data
+  (see <a href="#troubleshooting">Troubleshooting</a>).
 </div>
 
 <h3 id="command-bar">Command Bar</h3>
 <p>
-  The command input at the bottom of each tab sends data to the connected
-  device. Type a command and press <kbd>Enter</kbd> or click <strong>Send</strong>.
+  The command input at the bottom of each tab sends data to the
+  connected device. Type a command and press <kbd>Enter</kbd> or click
+  <strong>Send</strong>.
 </p>
 <ul>
-  <li>Command history is accessible with <kbd>↑</kbd> and <kbd>↓</kbd> arrow keys.</li>
-  <li>Sent commands appear in the console tagged as <span class="tag tag-command">COMMAND</span>.</li>
+  <li>Command history is accessible via <kbd>&uarr;</kbd> and <kbd>&darr;</kbd>.</li>
+  <li>Sent commands appear in the console tagged
+      <span class="tag tag-command">COMMAND</span>.</li>
 </ul>
 
 <h3 id="status-bar">Status Bar</h3>
 <p>
-  The status bar at the bottom of each tab displays real-time session metrics:
+  The status bar at the bottom of each tab displays session metrics in
+  real time:
 </p>
 <table>
-  <tr><th>Indicator</th><th>Description</th></tr>
-  <tr><td>● COM3 @ 115200</td><td>Connection status, port, and baud rate.</td></tr>
-  <tr><td>1,247 lines/sec</td><td>Current data ingestion rate.</td></tr>
-  <tr><td>45,230 lines</td><td>Total lines received in this session.</td></tr>
-  <tr><td>🕐 Timestamp / Δt Elapsed</td><td>Timestamp format indicator. Click to toggle between Timestamp and Elapsed mode.</td></tr>
+  <tr><th>Indicator</th><th>Meaning</th></tr>
+  <tr><td>&bull; COM3 @ 115200</td><td>Connection status, port, and baud rate. Resets to <code>Disconnected</code> when the port is closed.</td></tr>
+  <tr><td>1,247 lines/sec</td><td>Current data ingestion rate, averaged over the last second.</td></tr>
+  <tr><td>45,230 lines</td><td>Total lines received in this session. Resets to <code>0</code> on disconnect.</td></tr>
+  <tr><td>Timestamp / Elapsed</td><td>Timestamp format indicator. Click to toggle between absolute timestamp and elapsed-time modes (see <a href="#timestamps">Timestamps</a>).</td></tr>
 </table>
+
+
+<!-- ── LIVE PLOTTER ──────────────────────────────────────────────────────── -->
+<h2 id="plot">Live Plotter</h2>
+
+<h3 id="plot-overview">Plot Overview</h3>
+<p>
+  The Live Plotter renders incoming numeric data as time-series traces
+  in real time. It opens in a panel below the console, with a draggable
+  splitter between them.
+</p>
+<p>To open the plot:</p>
+<ul>
+  <li>Click the <strong>Plot</strong> button on the toolbar, or</li>
+  <li>Choose <strong>View &rarr; Live Plot</strong>, or</li>
+  <li>Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>.</li>
+</ul>
+<p>
+  The plotter samples the first 50 DATA-tagged lines after connection
+  and tries to detect numeric structure automatically. If detection
+  succeeds, traces appear with a legend. If detection fails after 200
+  lines, the placeholder shows a <strong>Configure manually&hellip;</strong>
+  button so you can declare your own regex (see <a href="#configure-plot">Configure Plot</a>).
+</p>
+
+<div class="callout callout-note">
+  <strong>Per-tab independence</strong>
+  Each tab has its own plot engine and its own buffers. Toggling the
+  plot panel on one tab does not affect any other tab. Profiles
+  (described under <a href="#configure-profiles">Saving Profiles</a>)
+  <em>are</em> shared across tabs, since they live in your preferences.
+</div>
+
+<h3 id="plot-toolbar">Plot Toolbar</h3>
+<table>
+  <tr><th>Control</th><th>What it does</th></tr>
+  <tr>
+    <td><strong>Pause</strong></td>
+    <td>Pauses the plot's redraw. The underlying engine keeps buffering data, so resuming picks up at the current sample &mdash; nothing is lost.</td>
+  </tr>
+  <tr>
+    <td><strong>Clear</strong></td>
+    <td>Clears plotted history. The detected column structure is preserved, so newly arriving data continues to plot under the same trace names.</td>
+  </tr>
+  <tr>
+    <td><strong>Reset View</strong></td>
+    <td>Returns to the scrolling time window after manual pan or zoom.</td>
+  </tr>
+  <tr>
+    <td><strong>Window</strong> dropdown</td>
+    <td>How much recent history to <em>display</em>: 10&nbsp;s, 30&nbsp;s, 60&nbsp;s (default), 5&nbsp;min, or All. This is a view filter only &mdash; the engine keeps buffering all data regardless of this setting.</td>
+  </tr>
+  <tr>
+    <td><strong>Configure&hellip;</strong></td>
+    <td>Opens the <a href="#configure-plot">Configure Plot</a> dialog to switch between Auto and Manual modes and manage saved profiles.</td>
+  </tr>
+  <tr>
+    <td><strong>Legend</strong> checkbox</td>
+    <td>Show or hide the legend overlay. Defaults to on.</td>
+  </tr>
+</table>
+
+<div class="callout callout-tip">
+  <strong>Pause is not the same as Log Pause</strong>
+  The plot's <strong>Pause</strong> button only freezes the plot's
+  redraw. The serial reader, log engine, and CSV writer continue
+  normally. To pause writing to disk, use <strong>Log Pause</strong>
+  in the main toolbar.
+</div>
+
+<h3 id="plot-auto-detect">Auto-Detect Formats</h3>
+<p>
+  Auto-detect examines the first 50 DATA-tagged lines and matches them
+  against three parsers, in order:
+</p>
+<table>
+  <tr><th>Format</th><th>Example line</th><th>Detected columns</th></tr>
+  <tr>
+    <td><strong>JSON</strong></td>
+    <td><code>{"temp":25.3,"hum":60.1}</code></td>
+    <td><code>temp</code>, <code>hum</code></td>
+  </tr>
+  <tr>
+    <td><strong>Key:Value</strong></td>
+    <td><code>Temperature: 25.3, Humidity: 60.1</code></td>
+    <td><code>Temperature</code>, <code>Humidity</code></td>
+  </tr>
+  <tr>
+    <td><strong>Delimited</strong></td>
+    <td><code>25.3, 60.1, 1013.2</code></td>
+    <td><code>ch0</code>, <code>ch1</code>, <code>ch2</code></td>
+  </tr>
+</table>
+<p>
+  A column is accepted only if it appears in at least 70% of the
+  matching sample lines. This threshold ignores boot banners and
+  one-off debug spam that happen to look like KV pairs.
+</p>
+<p>
+  Only <span class="tag tag-data">DATA</span>-tagged lines are sampled.
+  Severity and command lines reach the disk log but never pollute the
+  plot's column detection.
+</p>
+
+<h3 id="plot-prefix">Prefix Routing (<code>plt:</code>)</h3>
+<p>
+  When your firmware emits mixed traffic and you want to plot only
+  specific lines, prefix them with <code>plt:</code>. Other lines still
+  appear in the console and the disk log but are excluded from the
+  plot.
+</p>
+<pre>plt: 25.3, 60.1, 1013.2
+DEBUG: i2c transfer ok
+plt: 25.4, 60.0, 1013.1</pre>
+<p>
+  Numbered variants <code>plt0:</code>, <code>plt1:</code>,
+  <code>plt2:</code> &hellip; are also accepted and route to the same
+  plot. They are useful when your firmware classifies its output
+  streams numerically (e.g. one task emits <code>plt0:</code> and
+  another emits <code>plt1:</code>); both are plotted on the same axes
+  under the same column structure.
+</p>
+<p>
+  To declare explicit column names with positional (delimited) data,
+  emit a one-time configuration line:
+</p>
+<pre>plt!Vbat,Iload,Tcase
+plt: 3.71, 0.85, 42.1
+plt: 3.70, 0.86, 42.2</pre>
+<p>
+  Without the <code>plt!</code> line, positional columns are auto-named
+  <code>ch0</code>, <code>ch1</code>, &hellip; The <code>plt!</code>
+  line is consumed by the plotter and does not appear as a data point.
+  The column count in <code>plt!</code> must match the count in the
+  data lines &mdash; otherwise the names are ignored and auto-naming
+  applies.
+</p>
+
+<h3 id="plot-legend">Legend &amp; Trace Toggling</h3>
+<p>
+  The legend lists each detected column with its trace colour. Click
+  any legend entry's coloured sample to hide or show that trace &mdash;
+  useful for inspecting one channel without recompiling firmware or
+  re-launching.
+</p>
+<p>
+  Theme switches (Studio Light &harr; Midnight Dark) rebuild the
+  legend so trace labels remain readable in either theme.
+</p>
+
+<h3 id="plot-pan-zoom">Pan &amp; Zoom</h3>
+<table>
+  <tr><th>Gesture</th><th>Effect</th></tr>
+  <tr><td>Click and drag inside the plot</td><td>Pan in both axes</td></tr>
+  <tr><td>Scroll wheel inside the plot</td><td>Zoom both axes around the cursor</td></tr>
+  <tr><td>Scroll wheel on the X axis only</td><td>Zoom the time axis only</td></tr>
+  <tr><td>Scroll wheel on the Y axis only</td><td>Zoom the value axis only</td></tr>
+  <tr><td>Right-click inside the plot</td><td>Context menu: auto-range, export image, &hellip;</td></tr>
+  <tr><td>Click <strong>Reset View</strong></td><td>Return to the scrolling window view</td></tr>
+</table>
+
+<h3 id="plot-multi-tab">Plot per Tab</h3>
+<p>
+  Open as many tabs as you have devices. Each tab maintains its own
+  plot engine, ring buffers, and detected column set. Plot toolbar
+  state, splitter ratio, and pause state are all per-tab.
+</p>
+
+
+<!-- ── CONFIGURE PLOT ────────────────────────────────────────────────────── -->
+<h2 id="configure-plot">Configure Plot</h2>
+
+<h3 id="configure-overview">When to Configure</h3>
+<p>
+  Auto-detect works for most well-structured serial data, but real
+  firmware often emits formats it cannot parse: timestamped prefixes,
+  log-level prefixes, custom delimiters, embedded units. When you need
+  precise control over what gets plotted, open <strong>Configure
+  Plot</strong>.
+</p>
+<p>Three ways to open it:</p>
+<ul>
+  <li><strong>View &rarr; Configure Plot&hellip;</strong></li>
+  <li><strong>Configure&hellip;</strong> button on the plot toolbar</li>
+  <li>The <strong>Configure manually&hellip;</strong> button that
+      appears in the plot placeholder when auto-detect gives up</li>
+</ul>
+
+<h3 id="configure-modes">Auto vs Manual Mode</h3>
+<table>
+  <tr><th>Mode</th><th>When to use</th></tr>
+  <tr>
+    <td><strong>Auto-detect</strong></td>
+    <td>Default. Use this whenever your firmware emits JSON, key:value pairs, or simple delimited numbers.</td>
+  </tr>
+  <tr>
+    <td><strong>Manual (regex)</strong></td>
+    <td>Use this when the auto-detect pipeline can't recognise your format. You declare a regex with named groups; each <code>(?P&lt;name&gt;&hellip;)</code> becomes a plot column.</td>
+  </tr>
+</table>
+
+<h3 id="configure-regex">Manual Regex</h3>
+<p>
+  Manual mode uses Python's regular expression syntax with
+  <strong>named groups</strong>. Each named group becomes one trace.
+  Values must parse as floats &mdash; non-numeric captures cause that
+  line to be rejected.
+</p>
+<p>Example. For this firmware output:</p>
+<pre>[2026-05-24 14:30:01.123] RPM: 1461, Current: 3.31, Voltage: 12.20, MotorTemp: 49.7</pre>
+<p>A pattern that captures all four values:</p>
+<pre>RPM:\s*(?P&lt;RPM&gt;\d+),\s*Current:\s*(?P&lt;Current&gt;[\d.]+),\s*Voltage:\s*(?P&lt;Voltage&gt;[\d.]+),\s*MotorTemp:\s*(?P&lt;MotorTemp&gt;[\d.]+)</pre>
+<p>
+  The pattern uses <em>search</em> semantics, not full-line match
+  &mdash; surrounding text such as the timestamp prefix doesn't break
+  the match. You only need to write the part you care about.
+</p>
+
+<div class="callout callout-warn">
+  <strong>Use named groups</strong>
+  Unnamed groups (e.g. <code>(\d+)</code>) are ignored. Every value
+  you want to plot must be wrapped in
+  <code>(?P&lt;name&gt;&hellip;)</code> where <em>name</em> is the
+  trace label that will appear in the legend.
+</div>
+
+<h3 id="configure-capture">Capture from Sample</h3>
+<p>
+  Writing regex by hand is optional. The <strong>Capture from
+  sample&hellip;</strong> button opens an assistant that does it for
+  you:
+</p>
+<ol>
+  <li>Select a recent line from the list in the dialog.</li>
+  <li>Click <strong>Capture from sample&hellip;</strong>.</li>
+  <li>The sample line opens in a sub-dialog with each numeric value highlighted as a yellow chip.</li>
+  <li>Click each chip you want to plot. Give it a name (the dialog suggests one based on the surrounding text).</li>
+  <li>Click <strong>Use this pattern</strong>.</li>
+</ol>
+<p>
+  The generated regex appears in the pattern field, ready to test or
+  save.
+</p>
+
+<h3 id="configure-test">Tiered Test Result</h3>
+<p>
+  Clicking <strong>Test pattern</strong> runs your regex against the
+  last 200 lines from the engine and shows one of three tiers:
+</p>
+<table>
+  <tr><th>Tier</th><th>Meaning</th><th>Apply enabled?</th></tr>
+  <tr>
+    <td><span style="color: #2E7D32; font-weight: 700;">&#x2713; Green</span></td>
+    <td>Pattern compiled and matched at least one recent line. Columns and a preview are shown.</td>
+    <td>Yes</td>
+  </tr>
+  <tr>
+    <td><span style="color: #E65100; font-weight: 700;">&#x26A0; Amber</span></td>
+    <td>Pattern is structurally valid but didn't match any recent line. Useful if the firmware happens to be quiet right now &mdash; the pattern will still apply to new data.</td>
+    <td>Yes</td>
+  </tr>
+  <tr>
+    <td><span style="color: #C62828; font-weight: 700;">&#x2717; Red</span></td>
+    <td>Pattern is broken: compile error, no named groups, or empty. The error message is shown inline.</td>
+    <td>No</td>
+  </tr>
+</table>
+
+<h3 id="configure-profiles">Saving Profiles</h3>
+<p>
+  Patterns can be saved as named profiles for reuse across sessions
+  and devices. Inside the dialog:
+</p>
+<ul>
+  <li><strong>Save As&hellip;</strong> &mdash; create a new profile with a name of your choice. The profile must be in a structurally valid state to save (Test result Green or Amber).</li>
+  <li><strong>Rename</strong> &mdash; rename a user profile.</li>
+  <li><strong>Delete</strong> &mdash; remove a user profile.</li>
+</ul>
+<p>
+  Profiles are stored in your <code>preferences.ini</code> and persist
+  across application restarts. The exact location is listed under
+  <a href="#file-locations">File Locations</a>.
+</p>
+<div class="callout callout-note">
+  <strong>Built-in Auto-detect is protected</strong>
+  The built-in <em>Auto-detect</em> profile cannot be renamed or
+  deleted &mdash; the Rename and Delete buttons are disabled while it
+  is selected.
+</div>
+
+<h3 id="configure-default">Default Profile</h3>
+<p>
+  The default profile is the one applied automatically when a new tab
+  opens and when an existing tab reconnects. Change it in two places:
+</p>
+<ul>
+  <li><strong>File &rarr; Preferences &rarr; Plot &rarr; Default profile</strong> for the persistent choice that survives application restarts.</li>
+  <li>Inside <strong>Configure Plot&hellip;</strong> at any time, by selecting a profile and clicking <strong>Apply</strong>. This affects the current tab only.</li>
+</ul>
 
 
 <!-- ── LOGGING & EXPORT ──────────────────────────────────────────────────── -->
@@ -293,21 +639,21 @@
 <table>
   <tr><th>Button</th><th>Action</th></tr>
   <tr><td>Log On</td><td>Opens the New Log dialog to configure and start a log session.</td></tr>
-  <tr><td>Pause / Resume</td><td>Temporarily pauses disk writing. Data continues to display in the console.</td></tr>
-  <tr><td>Log Off</td><td>Stops logging, flushes buffers, and closes all log files.</td></tr>
+  <tr><td>Log Pause / Log Resume</td><td>Temporarily pauses disk writing. Data continues to display in the console and the plot.</td></tr>
+  <tr><td>Log Off</td><td>Stops logging, flushes buffers, finalises CSV (if any), and closes the file handles.</td></tr>
 </table>
-
 <p>
-  Logging writes data directly from the serial reader to disk through a
-  high-performance buffered engine. This is independent of what you see in the
-  console — filters, search, and display settings have no effect on logged data.
+  Logging writes data directly from the serial reader to disk through
+  a buffered engine. Console filters, search, and display settings
+  have no effect on what is written.
 </p>
 
 <h3 id="export">Export</h3>
 <p>
-  Use <strong>File → Export…</strong> (<kbd>Ctrl</kbd>+<kbd>E</kbd>) to save the
-  current console contents to a file. This is useful when you forgot to start
-  logging and want to capture what's on screen.
+  Use <strong>File &rarr; Export&hellip;</strong>
+  (<kbd>Ctrl</kbd>+<kbd>E</kbd>) to save the current console contents
+  to a file. Useful when you forgot to start logging and want to
+  capture what's already on screen.
 </p>
 <ol>
   <li>Enter a file name.</li>
@@ -315,30 +661,32 @@
   <li>Select the format: <code>.txt</code>, <code>.csv</code>, or both.</li>
   <li>Click <strong>Export</strong>.</li>
 </ol>
-
 <table>
-  <tr><th></th><th>Logging (Log On/Off)</th><th>Export (Ctrl+E)</th></tr>
-  <tr><td><strong>Data source</strong></td><td>Direct from serial port</td><td>Current console buffer</td></tr>
-  <tr><td><strong>When to use</strong></td><td>Plan ahead — captures every line</td><td>After the fact — saves what's on screen</td></tr>
+  <tr><th></th><th>Logging (Log On / Off)</th><th>Export (Ctrl+E)</th></tr>
+  <tr><td><strong>Data source</strong></td><td>Direct from the serial port</td><td>Current console buffer</td></tr>
+  <tr><td><strong>When to use</strong></td><td>Plan ahead &mdash; captures every line</td><td>After the fact &mdash; saves what's on screen</td></tr>
   <tr><td><strong>Formats</strong></td><td>.txt and/or .csv</td><td>.txt and/or .csv</td></tr>
 </table>
 
 <h3 id="quick-save">Quick Save</h3>
 <p>
-  Press <kbd>Ctrl</kbd>+<kbd>S</kbd> to instantly save the console contents to a
-  <code>.txt</code> file. No dialog — the file is auto-named and saved to your
-  default log directory. A notification confirms the save.
+  Press <kbd>Ctrl</kbd>+<kbd>S</kbd> to instantly save the console
+  contents to a <code>.txt</code> file. No dialog appears &mdash; the
+  file is auto-named and saved to your default log directory. A toast
+  notification confirms the save.
 </p>
 
 <h3 id="csv-modes">CSV Modes</h3>
-<p>WireTrace detects the structure of your serial data and applies one of two CSV modes:</p>
-
+<p>
+  WireTrace detects the structure of your serial data and applies one
+  of two CSV modes:
+</p>
 <table>
   <tr><th>Mode</th><th>Detection</th><th>Output</th></tr>
   <tr>
     <td><strong>Auto-detect</strong></td>
-    <td>Data contains <code>key:value</code>, <code>key=value</code> pairs, or JSON objects.</td>
-    <td>Keys become column headers. Values are placed in the correct columns.</td>
+    <td>Data contains key:value or key=value pairs, or JSON objects, in &ge;70% of the first 50 DATA-tagged lines.</td>
+    <td>Keys become column headers. Values are placed in the matching columns. Severity and command lines go to the <code>.txt</code> file only.</td>
   </tr>
   <tr>
     <td><strong>Raw</strong></td>
@@ -346,48 +694,53 @@
     <td>Two columns: <code>Timestamp</code> and <code>Data</code>.</td>
   </tr>
 </table>
-
-<p>Auto-detect examines the first 50 lines of data. Example structured output:</p>
+<p>Example structured output:</p>
 <pre>Timestamp,Temperature,Humidity,Pressure
-2026-02-25 14:30:01.123,25.3,60.1,1013.2
-2026-02-25 14:30:01.456,25.4,60.0,1013.1</pre>
+2026-05-24 14:30:01.123,25.3,60.1,1013.2
+2026-05-24 14:30:01.456,25.4,60.0,1013.1</pre>
+
+<div class="callout callout-note">
+  <strong>Sampling excludes severity lines</strong>
+  The 50-line CSV detection sample uses only
+  <span class="tag tag-data">DATA</span>-tagged lines. Boot banners
+  and warning messages reach the <code>.txt</code> log but cannot
+  pollute the CSV schema.
+</div>
 
 <h3 id="file-naming">File Naming</h3>
-<p>Log and export files follow a consistent naming convention:</p>
+<p>Log and export files follow a consistent convention:</p>
 <pre>{Name}_{Port}_{YYYY-MM-DD}_{HH-MM-SS}.{ext}</pre>
 <p>Examples:</p>
-<pre>MotorTest_COM3_2026-02-25_14-30-00.txt
-SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
+<pre>MotorTest_COM3_2026-05-24_14-30-00.txt
+SensorCalibration_COM7_2026-05-24_09-15-30.csv</pre>
 
 
 <!-- ── SEARCH & FILTER ───────────────────────────────────────────────────── -->
 <h2 id="search-filter">Search &amp; Filter</h2>
-
 <p>
-  Search and Filter controls sit on the same row at the bottom of the console
-  area. The filter is always visible; the search appears to its right when
-  activated.
+  Search and Filter controls sit on the same row at the bottom of the
+  console area. The filter is always visible; the search appears to
+  its right when activated.
 </p>
 
 <h3 id="search">Search</h3>
 <p>
-  Press <kbd>Ctrl</kbd>+<kbd>F</kbd> to activate the search field. Type a term
-  to highlight all matching occurrences in the console.
+  Press <kbd>Ctrl</kbd>+<kbd>F</kbd> to activate the search field.
+  Type a term to highlight all matching occurrences in the console.
 </p>
 <ul>
-  <li><kbd>F3</kbd> — Jump to next match.</li>
-  <li><kbd>Shift</kbd>+<kbd>F3</kbd> — Jump to previous match.</li>
-  <li><kbd>Escape</kbd> — Close search and clear highlights.</li>
-  <li>The match counter shows your position (e.g., "3/47").</li>
+  <li><kbd>F3</kbd> &mdash; jump to next match.</li>
+  <li><kbd>Shift</kbd>+<kbd>F3</kbd> &mdash; jump to previous match.</li>
+  <li><kbd>Escape</kbd> &mdash; close search and clear highlights.</li>
+  <li>The match counter shows your position (e.g. <em>3/47</em>).</li>
 </ul>
 
 <h3 id="filter">Filter</h3>
 <p>
-  The filter field is always visible. Type a term to hide all non-matching
-  lines from the console in real time. Press <kbd>Ctrl</kbd>+<kbd>L</kbd> to
-  focus the filter field quickly.
+  The filter field is always visible. Type a term to hide all
+  non-matching lines from the console in real time. Press
+  <kbd>Ctrl</kbd>+<kbd>L</kbd> to focus the filter quickly.
 </p>
-
 <table>
   <tr><th>Feature</th><th>Search</th><th>Filter</th></tr>
   <tr><td>Purpose</td><td>Find positions in existing content</td><td>Hide non-matching lines</td></tr>
@@ -395,12 +748,13 @@ SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
   <tr><td>Navigation</td><td>Prev / Next buttons</td><td>N/A</td></tr>
   <tr><td>Console effect</td><td>Scrolls to match</td><td>Hides non-matching lines</td></tr>
   <tr><td>Affects disk log</td><td>No</td><td>No</td></tr>
+  <tr><td>Affects plot</td><td>No</td><td>No</td></tr>
 </table>
-
 <div class="callout callout-note">
   <strong>Note</strong>
-  Filtering is case-insensitive. New incoming lines are filtered in real time.
-  The disk log always contains every line regardless of the active filter.
+  Filtering is case-insensitive. New incoming lines are filtered in
+  real time. The disk log and the plot always see every line
+  regardless of the active filter.
 </div>
 
 
@@ -408,25 +762,31 @@ SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
 <h2 id="display">Display Options</h2>
 
 <h3 id="themes">Themes</h3>
-<p>WireTrace includes two professionally designed themes:</p>
+<p>WireTrace ships with two themes:</p>
 <table>
   <tr><th>Theme</th><th>Description</th></tr>
-  <tr><td><strong>Studio Light</strong></td><td>Clean light theme with a white console. Optimized for well-lit environments.</td></tr>
-  <tr><td><strong>Midnight Dark</strong></td><td>Dark theme with reduced eye strain. Optimized for low-light environments and extended sessions.</td></tr>
+  <tr><td><strong>Studio Light</strong></td><td>Clean light theme with a white console. Optimised for well-lit environments.</td></tr>
+  <tr><td><strong>Midnight Dark</strong></td><td>Dark theme with reduced eye strain. Optimised for low-light environments and extended sessions.</td></tr>
 </table>
-<p>Switch themes from the <strong>Themes</strong> menu. The change is instant and your preference is saved.</p>
+<p>
+  Switch from the <strong>Themes</strong> menu. The change is instant
+  across the console, plot, legend, and chrome, and your preference is
+  saved.
+</p>
 
 <h3 id="classification">Message Classification</h3>
 <p>
-  WireTrace automatically classifies incoming serial messages into 7 severity
-  levels based on keyword detection. Each tag is displayed with a distinct color.
+  WireTrace classifies incoming lines into 7 severity levels by
+  keyword detection. Each tag is displayed with a distinct colour.
+  Classification uses priority ordering &mdash; the most severe
+  matching tag wins.
 </p>
 <table>
-  <tr><th>Tag</th><th>Trigger Keywords</th><th>Example</th></tr>
+  <tr><th>Tag</th><th>Trigger keywords</th><th>Example</th></tr>
   <tr>
     <td><span class="tag tag-critical">CRITICAL</span></td>
     <td><code>fatal</code>, <code>critical</code>, <code>panic</code>, <code>crash</code></td>
-    <td>CRITICAL: Watchdog reset — system halted</td>
+    <td>CRITICAL: Watchdog reset &mdash; system halted</td>
   </tr>
   <tr>
     <td><span class="tag tag-error">ERROR</span></td>
@@ -446,45 +806,52 @@ SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
   <tr>
     <td><span class="tag tag-debug">DEBUG</span></td>
     <td><code>debug</code>, <code>trace</code>, <code>verbose</code></td>
-    <td>DEBUG: Buffer utilization at 23%</td>
+    <td>DEBUG: Buffer utilisation at 23%</td>
   </tr>
   <tr>
     <td><span class="tag tag-command">COMMAND</span></td>
     <td>Lines sent from the command bar</td>
-    <td>>>> AT+RST</td>
+    <td>&gt;&gt;&gt; AT+RST</td>
   </tr>
   <tr>
     <td><span class="tag tag-data">DATA</span></td>
     <td>Everything else</td>
-    <td>Temperature: 25.3°C</td>
+    <td>Temperature: 25.3&deg;C</td>
   </tr>
 </table>
-<p>
-  Classification uses priority ordering — the most severe matching tag wins.
-</p>
+<div class="callout callout-note">
+  <strong>Word-boundary matching</strong>
+  Keywords match at a left word boundary, so a keyword embedded
+  <em>inside</em> another word does not trigger a match:
+  <code>"default"</code> will not be misclassified as
+  <span class="tag tag-error">ERROR</span> because <code>fault</code>
+  is in the middle of the word. Common suffixes <em>are</em> matched
+  by design &mdash; <code>"failed"</code>, <code>"failing"</code>, and
+  <code>"warnings"</code> all classify correctly. Words that begin
+  with a keyword (such as <code>"information"</code>) will match the
+  underlying tag; this is intentional, since suffix tolerance for
+  <code>"failed"</code>/<code>"warning"</code>/<code>"connected"</code>
+  is more useful in practice than strict whole-word matching.
+</div>
 
 <h3 id="timestamps">Timestamps</h3>
-<p>WireTrace supports two timestamp display modes. Toggle by clicking the timestamp indicator in the status bar, or via <strong>View → Timestamp Format</strong>.</p>
+<p>
+  WireTrace supports two timestamp display modes. Toggle by clicking
+  the timestamp indicator in the status bar, or via <strong>View &rarr;
+  Timestamp Format</strong>.
+</p>
 <table>
-  <tr><th>Mode</th><th>Indicator</th><th>Console Display</th></tr>
-  <tr>
-    <td><strong>Timestamp</strong></td>
-    <td>🕐 Timestamp</td>
-    <td><code>[2026-02-25 14:30:01.123]</code></td>
-  </tr>
-  <tr>
-    <td><strong>Elapsed</strong></td>
-    <td>Δt Elapsed</td>
-    <td><code>[+Δ 0.003s]</code> (time since previous line)</td>
-  </tr>
+  <tr><th>Mode</th><th>Indicator</th><th>Console display</th></tr>
+  <tr><td><strong>Timestamp</strong></td><td>Timestamp</td><td><code>[2026-05-24 14:30:01.123]</code></td></tr>
+  <tr><td><strong>Elapsed</strong></td><td>Elapsed</td><td><code>[+&Delta; 0.003s]</code> (since the previous line)</td></tr>
 </table>
 <p>This setting affects the console display only. Log files always use full timestamps.</p>
 
 <h3 id="display-mode">Text &amp; HEX Mode</h3>
 <p>
-  Switch between Text and HEX display modes from <strong>View → Display Mode</strong>.
-  Text mode decodes incoming bytes as UTF-8. HEX mode displays raw byte values,
-  which is useful for debugging binary protocols.
+  Switch between Text and HEX display from <strong>View &rarr; Display
+  Mode</strong>. Text mode decodes incoming bytes as UTF-8. HEX mode
+  shows raw byte values, useful when debugging binary protocols.
 </p>
 
 <h3 id="font">Font Size</h3>
@@ -494,6 +861,65 @@ SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
   <tr><td>Decrease font size</td><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td></tr>
   <tr><td>Reset font size</td><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td></tr>
 </table>
+
+
+<!-- ── SESSIONS ──────────────────────────────────────────────────────────── -->
+<h2 id="sessions">Sessions</h2>
+
+<h3 id="disconnect-reconnect">Disconnect &amp; Reconnect</h3>
+<p>
+  Engineers running long tests with intermittent USB connections need
+  predictable behaviour across disconnect / reconnect cycles. Here is
+  exactly what survives, and what resets, when you disconnect and
+  reconnect on the same tab.
+</p>
+<table>
+  <tr><th>What</th><th>On disconnect</th><th>On reconnect</th></tr>
+  <tr><td>Console contents</td><td>Cleared</td><td>Starts empty</td></tr>
+  <tr><td>Disk log</td><td>Finalised: flushed, fsynced, closed</td><td>A new log is not started automatically</td></tr>
+  <tr><td>Plot panel</td><td>Hidden, traces cleared</td><td>Resumes detection from the new session</td></tr>
+  <tr><td>Plot mode (Auto / Manual)</td><td>Preserved on the tab</td><td>Applies immediately to new data</td></tr>
+  <tr><td>Plot ring buffers</td><td>Cleared</td><td>Refill as new data arrives</td></tr>
+  <tr><td>Splitter ratio between console and plot</td><td>Resets to 50&nbsp;/&nbsp;50</td><td>Drag to your preferred ratio; remembered until next disconnect</td></tr>
+  <tr><td>Status bar metrics</td><td>Reset to zero</td><td>Update with new session data</td></tr>
+  <tr><td>Command history</td><td>Preserved</td><td>Available via <kbd>&uarr;</kbd> / <kbd>&darr;</kbd></td></tr>
+  <tr><td>Tab title</td><td>Preserved</td><td>Updates with new port if changed</td></tr>
+</table>
+
+<div class="callout callout-tip">
+  <strong>Reusing a tab is faster than opening a new one</strong>
+  Disconnect, swap the cable or device, reconnect &mdash; the same
+  tab keeps your plot mode, manual regex, and command history. You
+  only need a new tab when monitoring multiple devices simultaneously.
+</div>
+
+<h3 id="data-integrity">Data Integrity</h3>
+<p>
+  WireTrace's logging path is designed so that an unexpected
+  termination (power cut, kernel panic, force-quit) loses only a
+  bounded amount of recent data &mdash; not the entire session.
+</p>
+<p>The buffering model:</p>
+<ol>
+  <li>Incoming lines enter a <code>collections.deque</code> with a 50,000-line cap (automatic O(1) overflow protection).</li>
+  <li>An OS-level 64&nbsp;KB write buffer batches actual writes.</li>
+  <li>Three flush triggers:
+    <ul>
+      <li>Buffer reaches 5,000 entries</li>
+      <li>1-second flush timer fires</li>
+      <li><strong>Log Off</strong> or tab close runs the final flush</li>
+    </ul>
+  </li>
+  <li>A 30-second <code>fsync()</code> timer additionally hands the OS buffer to disk hardware, so a power cut bounds worst-case loss to 30 seconds of in-flight data &mdash; not the entire session.</li>
+  <li>On <strong>Log Off</strong>: flush &rarr; finalise CSV &rarr; fsync &rarr; close, in that order.</li>
+</ol>
+<div class="callout callout-note">
+  <strong>Worst-case loss is bounded to ~30 seconds</strong>
+  In the absolute worst case &mdash; a power cut between two fsync
+  cycles with the deque holding the maximum buffered data &mdash; you
+  lose at most the last 30 seconds before the cut. Properly closing
+  the log via <strong>Log Off</strong> guarantees zero loss.
+</div>
 
 
 <!-- ── REFERENCE ─────────────────────────────────────────────────────────── -->
@@ -512,40 +938,50 @@ SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
   <tr><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td><td>Focus filter</td></tr>
   <tr><td><kbd>F3</kbd></td><td>Next search result</td></tr>
   <tr><td><kbd>Shift</kbd>+<kbd>F3</kbd></td><td>Previous search result</td></tr>
-  <tr><td><kbd>Escape</kbd></td><td>Clear search / filter</td></tr>
+  <tr><td><kbd>Escape</kbd></td><td>Close search / clear filter</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></td><td>Toggle Live Plot panel</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd></td><td>Increase font size</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>Decrease font size</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Reset font size</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Preferences</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>Q</kbd></td><td>Exit</td></tr>
-  <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>Command history (when command bar is focused)</td></tr>
+  <tr><td><kbd>&uarr;</kbd> / <kbd>&darr;</kbd></td><td>Command history (when the command bar is focused)</td></tr>
 </table>
 
 <h3 id="preferences">Preferences</h3>
 <p>
-  Open preferences with <kbd>Ctrl</kbd>+<kbd>,</kbd> or <strong>File → Preferences</strong>.
-  Settings include default baud rate, default log directory, export format,
-  theme, font size, display options, and performance tuning. All preferences
-  persist across sessions.
+  Open with <kbd>Ctrl</kbd>+<kbd>,</kbd> or
+  <strong>File &rarr; Preferences</strong>. Settings are organised
+  into the following sections, each persisted across sessions:
 </p>
+<table>
+  <tr><th>Section</th><th>Controls</th></tr>
+  <tr><td>Appearance</td><td>Theme (Studio Light / Midnight Dark)</td></tr>
+  <tr><td>Display</td><td>Font family, font size, timestamp mode, colour mode, auto-scroll</td></tr>
+  <tr><td>Serial</td><td>Default baud rate for new connections</td></tr>
+  <tr><td>Storage</td><td>Default log directory, default export format</td></tr>
+  <tr><td>Plot</td><td>Default profile (Auto-detect or any saved profile), button to open Configure Plot for profile management</td></tr>
+  <tr><td>Performance</td><td>GUI update interval, log buffer size, flush interval, max console lines</td></tr>
+  <tr><td>Updates</td><td>Check for updates on startup</td></tr>
+</table>
 
 <h3 id="auto-update">Auto-Update</h3>
 <p>
-  WireTrace checks for updates automatically on startup. When a new version is
-  available, a dialog presents three options:
+  WireTrace checks for updates automatically on startup. When a new
+  version is available, a dialog presents three options:
 </p>
 <ul>
-  <li><strong>Update Now</strong> — Downloads the installer with a live progress bar, verifies its integrity (SHA-256), then prompts to install. Clicking <strong>Install &amp; Restart</strong> launches the installer and closes WireTrace.</li>
-  <li><strong>Remind Later</strong> — Snoozes the notification for 24 hours.</li>
-  <li><strong>Skip This Version</strong> — Suppresses the notification for this specific version.</li>
+  <li><strong>Update Now</strong> &mdash; downloads the installer with a live progress bar, verifies its integrity (SHA-256 hash from the signed update manifest at <code>https://thenuanceproject.com</code>), then prompts to install. <strong>Install &amp; Restart</strong> launches the installer and closes WireTrace.</li>
+  <li><strong>Remind Later</strong> &mdash; snoozes the notification for 24 hours.</li>
+  <li><strong>Skip This Version</strong> &mdash; suppresses the notification for that specific version.</li>
 </ul>
-<p>You can also check manually via <strong>Help → Check for Updates</strong>.</p>
+<p>You can also check manually via <strong>Help &rarr; Check for Updates</strong>.</p>
 
 <h3 id="file-locations">File Locations</h3>
 <table>
   <tr><th>File</th><th>Windows</th><th>macOS</th><th>Linux</th></tr>
   <tr>
-    <td>Preferences</td>
+    <td>Preferences<br>(includes saved plot profiles)</td>
     <td><code>%APPDATA%\WireTrace\Config\preferences.ini</code></td>
     <td><code>~/Library/Application Support/WireTrace/preferences.ini</code></td>
     <td><code>~/.config/WireTrace/preferences.ini</code></td>
@@ -556,7 +992,19 @@ SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
     <td><code>~/Documents/WireTrace/Logs</code></td>
     <td><code>~/Documents/WireTrace/Logs</code></td>
   </tr>
+  <tr>
+    <td>Cached User Guide<br>(version-stamped)</td>
+    <td><code>%LOCALAPPDATA%\WireTrace\Cache\help\</code></td>
+    <td><code>~/Library/Caches/WireTrace/help/</code></td>
+    <td><code>~/.cache/WireTrace/help/</code></td>
+  </tr>
 </table>
+<p>
+  Saved plot profiles live inside <code>preferences.ini</code> under
+  the <code>[Plot]</code> section as a JSON-encoded list. The built-in
+  <em>Auto-detect</em> profile is always present and cannot be
+  removed.
+</p>
 
 
 <!-- ── TROUBLESHOOTING ───────────────────────────────────────────────────── -->
@@ -564,51 +1012,85 @@ SensorCalibration_COM7_2026-02-25_09-15-30.csv</pre>
 
 <h3>Port not listed</h3>
 <p>
-  Click <strong>Refresh</strong> to re-scan. Ensure the device is plugged in and
-  drivers are installed. On Linux, your user may need to be in the
-  <code>dialout</code> group: <code>sudo usermod -aG dialout $USER</code> (then log out and back in).
+  Click <strong>Refresh</strong> to re-scan. Confirm the device is
+  plugged in and drivers are installed. On Linux, your user may need
+  to be in the <code>dialout</code> group:
+  <code>sudo usermod -aG dialout $USER</code> (then log out and back
+  in).
 </p>
 
 <h3>Garbled or unreadable data</h3>
 <p>
-  This almost always indicates a baud rate mismatch. Confirm the correct rate
-  in your device's documentation. Try common rates: 9600, 115200.
+  Almost always a baud rate mismatch. Confirm the correct rate in
+  your device's documentation. Common rates: 9600, 38400, 57600,
+  115200, 230400.
 </p>
 
 <h3>Data appears to lag or stutter</h3>
 <p>
-  At very high data rates (>5,000 lines/sec), ensure no other application is
-  competing for the same serial port. Close any other serial monitors.
-  WireTrace batches GUI updates at 50ms intervals to maintain responsiveness.
+  At very high data rates (&gt;5,000 lines/sec), make sure no other
+  application is competing for the same serial port. Close any other
+  serial monitors. WireTrace batches GUI updates at 50&nbsp;ms
+  intervals to keep the interface responsive while disk and plot
+  pipelines stay fully real-time.
 </p>
 
-<h3>Log file is empty</h3>
+<h3>Log file appears empty mid-session</h3>
 <p>
-  Log files are buffered for performance. Data is flushed every second and on
-  <strong>Log Off</strong>. If the application is terminated unexpectedly, the
-  last second of data may be lost. Always use <strong>Log Off</strong> or close
-  the tab properly.
+  Log files are buffered for performance and visibility may lag the
+  on-disk state by up to one second (flush interval) or 30&nbsp;seconds
+  (fsync interval). On <strong>Log Off</strong>, all buffers are
+  flushed and the file becomes immediately visible at its full size.
+  See <a href="#data-integrity">Data Integrity</a>.
 </p>
 
 <h3>CSV has only two columns</h3>
 <p>
-  This means your serial data was not detected as structured. Auto-detect
-  requires consistent <code>key:value</code>, <code>key=value</code>, or JSON
-  formatting. If your data is unstructured, the Raw mode (<code>Timestamp, Data</code>)
-  is the correct output.
+  Your serial data was not detected as structured. Auto-detect
+  requires consistent key:value, key=value, or JSON formatting in
+  &ge;70% of the first 50 <span class="tag tag-data">DATA</span>-tagged
+  lines. If your firmware emits a mixed stream, consider prefixing
+  data lines with <code>plt:</code> (the same prefix that controls
+  plotting routing applies here) or switch to manual plot
+  configuration to declare your format explicitly.
+</p>
+
+<h3>Plot stays empty even though console is scrolling</h3>
+<p>
+  Auto-detect couldn't find numeric structure within 200 lines and
+  has given up. The plot placeholder shows a
+  <strong>Configure manually&hellip;</strong> button &mdash; click it
+  to open the Configure Plot dialog and declare your format using
+  the <a href="#configure-capture">Capture from sample assistant</a>
+  or a hand-written regex.
+</p>
+
+<h3>Plot legend shows a trace but no line is visible</h3>
+<p>
+  That trace's visibility was toggled off. Click the coloured sample
+  to the left of its legend label to bring it back. The same click
+  hides any trace you want to remove from view without affecting the
+  underlying data.
 </p>
 
 <h3>Resetting preferences</h3>
 <p>
-  If WireTrace behaves unexpectedly, you can reset all settings by deleting
-  the preferences file (see <a href="#file-locations">File Locations</a>) and
-  restarting the application.
+  If WireTrace behaves unexpectedly, you can reset all settings by
+  deleting the preferences file (see <a href="#file-locations">File
+  Locations</a>) and restarting the application.
 </p>
+<div class="callout callout-warn">
+  <strong>Deleting preferences also deletes saved plot profiles</strong>
+  Saved plot profiles live inside <code>preferences.ini</code>. If you
+  want to keep them, copy the <code>[Plot]</code> section out of the
+  file before deleting, or back the entire file up first.
+</div>
+
 
 <hr style="margin-top: 48px; border: none; border-top: 1px solid var(--border);">
 <p class="muted" style="margin-top: 16px; text-align: center;">
-  WireTrace — Professional Serial Data Monitor<br>
-  © 2026 The Nuance Project
+  WireTrace v{{WIRETRACE_VERSION}} &mdash; Professional Serial Data Monitor<br>
+  &copy; The Nuance Project
 </p>
 
 </main>

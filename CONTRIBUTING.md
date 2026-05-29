@@ -55,10 +55,28 @@ agree on the approach before you write the code.
   - Windows: `python build/build.py --platform windows --version 1.0.0`
   - macOS: `python build/build.py --platform macos --version 1.0.0`
   - Linux: `python build/build.py --platform linux --version 1.0.0`
+- Tests and lints are green (see "Running tests" below)
 - No new runtime dependencies unless we've discussed it
 - Code style matches the surrounding file (PEP 8, type hints on
   public functions, clear module boundaries)
 - A short description of what you changed and why
+
+## Running tests
+
+WireTrace has a pytest suite that runs against headless Qt stubs, so
+it works on any machine without needing a display or a serial device.
+
+Install the dev tools (one-time):
+
+    pip install -r requirements-dev.txt
+
+Then from the repo root:
+
+    python -m pytest tests/ -q     # full test suite
+    python -m ruff check .         # lint + import-order check
+
+Both should be green before opening a PR. The CI workflow runs the
+same two commands; matching it locally saves a round-trip.
 
 **What gets merged quickly:**
 

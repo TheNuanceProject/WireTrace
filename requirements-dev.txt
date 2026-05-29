@@ -1,0 +1,14 @@
+# WireTrace Development Dependencies
+#
+# Tools used to test, lint, and verify WireTrace during development
+# and CI. NOT needed for end users running the application — see
+# requirements.txt for the runtime set.
+#
+# Install with:
+#   pip install -r requirements-dev.txt
+#
+# Or pull in everything (runtime + dev) at once:
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+pytest>=7.0             # Test runner (tests/ suite)
+ruff>=0.1               # Linter + import sorter

@@ -13,7 +13,7 @@ No other module defines version or identity constants.
 # ── Application Identity ─────────────────────────────────────────────────────
 
 APP_NAME = "WireTrace"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_DISPLAY_NAME = "WireTrace"
 APP_DESCRIPTION = "Professional Serial Data Monitor"
 APP_AUTHOR = "The Nuance Project"

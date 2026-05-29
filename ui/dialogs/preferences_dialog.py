@@ -92,6 +92,8 @@ class PreferencesDialog(QDialog):
         self._add_separator()
         self._build_storage_section()
         self._add_separator()
+        self._build_plot_section()
+        self._add_separator()
         self._build_performance_section()
         self._add_separator()
         self._build_updates_section()
@@ -216,6 +218,80 @@ class PreferencesDialog(QDialog):
         self._format_combo.addItem("CSV (.csv)", "csv")
         self._format_combo.addItem("Both (.txt + .csv)", "both")
         self._add_row("Default export", "Format for new log sessions", self._format_combo)
+
+    def _build_plot_section(self) -> None:
+        """Plot configuration: default profile + manage profiles button.
+
+        Profile editing happens in the dedicated Configure Plot dialog
+        (which is per-tab and has access to live recent lines for
+        pattern testing). This section sets the default that new tabs
+        boot with, and provides a quick path to the editor.
+        """
+        from app.plot_config import PlotProfileStore
+
+        self._add_section_header("Plot")
+
+        # Lazily build a store backed by our config so we can list
+        # existing profiles in the default-profile dropdown.
+        self._plot_store = PlotProfileStore(self._config)
+
+        self._plot_default_combo = QComboBox()
+        self._plot_default_combo.setFixedWidth(_CTRL_W)
+        self._refresh_plot_default_combo()
+        self._add_row(
+            "Default profile",
+            "Profile applied to new tabs and reconnections",
+            self._plot_default_combo,
+        )
+
+        manage_w = QWidget()
+        manage_lay = QHBoxLayout(manage_w)
+        manage_lay.setContentsMargins(0, 0, 0, 0)
+        manage_lay.setSpacing(6)
+        manage_btn = QPushButton("Open Configure Plot\u2026")
+        manage_btn.setObjectName("clearBtn")
+        manage_btn.setFixedHeight(26)
+        manage_btn.setMinimumWidth(180)
+        manage_btn.setToolTip(
+            "Edit the active tab's plot configuration and manage profiles "
+            "(save / rename / delete).",
+        )
+        manage_btn.clicked.connect(self._open_configure_plot)
+        manage_lay.addWidget(manage_btn)
+        manage_lay.addStretch()
+        self._add_row(
+            "Manage profiles",
+            "Add, rename, delete, or test plot profiles",
+            manage_w,
+        )
+
+    def _refresh_plot_default_combo(self) -> None:
+        """Populate the default-profile dropdown from the store."""
+        self._plot_default_combo.blockSignals(True)
+        try:
+            self._plot_default_combo.clear()
+            for name in self._plot_store.names():
+                self._plot_default_combo.addItem(name, name)
+        finally:
+            self._plot_default_combo.blockSignals(False)
+
+    def _open_configure_plot(self) -> None:
+        """Pass through to the active tab's Configure Plot dialog.
+
+        Profile editing is per-tab because the dialog needs access to
+        the engine's recent lines for pattern testing. From here we
+        find the parent MainWindow and delegate.
+        """
+        # Walk up to MainWindow via the parent chain. We don't import
+        # MainWindow directly to avoid a circular dependency.
+        win = self.parent()
+        while win is not None and not hasattr(win, "_on_menu_configure_plot"):
+            win = win.parent()
+        if win is None or not hasattr(win, "_on_menu_configure_plot"):
+            return
+        win._on_menu_configure_plot()
+        # Re-read profiles in case the user added/removed any
+        self._refresh_plot_default_combo()
 
     def _build_performance_section(self) -> None:
         self._add_section_header("Performance")
@@ -368,6 +444,17 @@ class PreferencesDialog(QDialog):
         if ei >= 0:
             self._format_combo.setCurrentIndex(ei)
 
+        # Plot — read the saved default profile name and select it in
+        # the combo. The combo is populated by _build_plot_section
+        # before _load_values runs, so this is a straightforward
+        # findText. If the saved default doesn't exist (corruption,
+        # or the profile was deleted), PlotProfileStore.default_name
+        # falls back to "Auto-detect" and we select that.
+        default_name = self._plot_store.default_name
+        pi = self._plot_default_combo.findText(default_name)
+        if pi >= 0:
+            self._plot_default_combo.setCurrentIndex(pi)
+
         # Performance
         self._gui_spin.setValue(c.gui_update_interval_ms)
         self._buffer_spin.setValue(c.log_buffer_max_entries)
@@ -399,6 +486,16 @@ class PreferencesDialog(QDialog):
         # Storage
         c.default_log_directory = self._dir_input.text().strip()
         c.default_export_format = self._format_combo.currentData()
+
+        # Plot — persist the user's chosen default profile so new tabs
+        # (and reconnects on existing tabs) boot with the right mode.
+        # Without this block, selecting a profile in the dropdown and
+        # clicking Save would silently discard the selection — the
+        # exact symptom seen in early reports where the combo always
+        # showed Auto-detect after reopening Preferences.
+        selected = self._plot_default_combo.currentData()
+        if selected:
+            self._plot_store.set_default(str(selected))
 
         # Performance
         c.set("Performance", "gui_update_interval_ms", self._gui_spin.value())

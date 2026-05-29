@@ -146,6 +146,7 @@ ICON_MAP = {
     "add_tab": ":/icons/add_tab.svg",
     "close_tab": ":/icons/close_tab.svg",
     "refresh": ":/icons/refresh.svg",
+    "plot": ":/icons/plot.svg",
 }
 
 # ── Performance / Low-End Device Thresholds ──────────────────────────────────

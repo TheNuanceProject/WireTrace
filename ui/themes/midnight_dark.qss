@@ -516,3 +516,106 @@ QProgressBar::chunk { background-color: #2979FF; border-radius: 4px; }
 QScrollArea { background-color: #1E1E1E; border: none; }
 QMessageBox { background-color: #1E1E1E; }
 QMessageBox QLabel { color: #CCCCCC; font-size: 12px; }
+
+/* ── Plot Toggle (in LogControlBar) ────────────────────────────────────── */
+/* Reads as a primary discoverable control — accent border in idle,
+   filled accent in checked. Sits next to the other log buttons. */
+
+QPushButton#plotToggleBtn {
+    background-color: #1E1E1E;
+    color: #56B4E9;
+    border: 1px solid #2979FF;
+}
+
+QPushButton#plotToggleBtn:hover {
+    background-color: #1E3A5F;
+    color: #9DC9F0;
+    border-color: #56B4E9;
+}
+
+QPushButton#plotToggleBtn:checked {
+    background-color: #2979FF;
+    color: #FFFFFF;
+    border-color: #2979FF;
+}
+
+QPushButton#plotToggleBtn:checked:hover {
+    background-color: #1E62D6;
+    border-color: #1E62D6;
+}
+
+/* ── Plot Panel ────────────────────────────────────────────────────────── */
+
+QWidget#plotView { background-color: #1E1E1E; }
+
+QWidget#plotContent { background-color: #1E1E1E; }
+
+QLabel#plotPlaceholder {
+    color: #6A6A6A;
+    font-size: 13px;
+    background-color: transparent;
+}
+
+QWidget#plotToolbar { background-color: transparent; }
+
+QLabel#plotWindowLabel { color: #BBBBBB; font-size: 12px; }
+
+QPushButton#plotPauseBtn,
+QPushButton#plotClearBtn,
+QPushButton#plotResetBtn {
+    background-color: #2A2A2A;
+    color: #BBBBBB;
+    border: 1px solid #444444;
+}
+
+QPushButton#plotPauseBtn:hover,
+QPushButton#plotClearBtn:hover,
+QPushButton#plotResetBtn:hover {
+    background-color: #333333;
+    border-color: #5A5A5A;
+    color: #DDDDDD;
+}
+
+QPushButton#plotPauseBtn:checked {
+    background-color: #4A2818;
+    color: #FFB088;
+    border-color: #FF8C42;
+}
+
+QComboBox#plotWindowCombo {
+    background-color: #2A2A2A;
+    color: #DDDDDD;
+    border: 1px solid #444444;
+    padding: 2px 8px;
+}
+
+QComboBox#plotWindowCombo:hover {
+    border-color: #5A5A5A;
+}
+
+QCheckBox#plotLegendCheck { color: #BBBBBB; font-size: 12px; }
+
+QSplitter#consolePlotSplitter::handle {
+    background-color: #2A2A2A;
+    border-top: 1px solid #444444;
+    border-bottom: 1px solid #444444;
+}
+
+QSplitter#consolePlotSplitter::handle:hover {
+    background-color: #2979FF;
+}
+
+/* ── Capture from sample dialog ────────────────────────────────────────
+   The source-line preview box. Background and border come from theme;
+   text color is the QLabel's `color` which the rich-text HTML inside
+   inherits for the interstitial (non-chip) text. Chip accents (blue
+   for selected, yellow for unselected) are baked into the HTML and
+   are intentionally theme-independent. */
+
+QLabel#captureSourceBox {
+    background-color: #232323;
+    color: #D4D4D4;
+    border: 1px solid #444444;
+    border-radius: 4px;
+    padding: 12px;
+}

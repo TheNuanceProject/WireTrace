@@ -51,9 +51,26 @@ class ConsoleView(QPlainTextEdit):
         self.setMaximumBlockCount(MAX_CONSOLE_LINES)
 
         # Font
-        font = QFont(DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE)
+        # CRITICAL: route the initial font through set_font_size()
+        # rather than setting it directly here, so the same code path
+        # owns the console font on launch and on every later action
+        # (Preferences save, Ctrl+0, Ctrl++, Ctrl+-).
+        #
+        # The global QSS rule `QWidget { font-size: 12px }` (px, not
+        # pt) applies to QPlainTextEdit on initial construction. Code
+        # set via QFont(family, size) uses points and is overridden
+        # by the QSS pixel rule for inheriting widgets. set_font_size
+        # routes through QFont.setPointSize on the widget's own font,
+        # which has higher specificity than the QSS class rule and
+        # therefore renders at the intended point size from launch.
+        # Without this, the initial console would render at 12px
+        # (small) and the first Preferences save or Ctrl+0 would
+        # jump it to 12pt (~16px equivalent) — the exact symptom in
+        # early reports.
+        font = QFont(DEFAULT_FONT_FAMILY)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(font)
+        self.set_font_size(DEFAULT_FONT_SIZE)
 
         # Performance: disable cursor blinking in read-only mode
         self.setCursorWidth(0)

@@ -21,6 +21,7 @@ from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -33,8 +34,14 @@ from app.constants import (
     ExportFormat,
     TimestampMode,
 )
+from app.plot_config import (
+    PlotConfig,
+    PlotProfileStore,
+)
 from core.csv_engine import CSVEngine
 from core.log_engine import LogConfig, LogEngine
+from core.plot_engine import PlotEngine
+from core.plot_parsers import RegexParserError
 from core.serial_manager import SerialManager
 from core.serial_reader import SerialReader
 from core.session import DeviceSession
@@ -56,15 +63,24 @@ class DeviceTab(QWidget):
     """A single device tab with all UI and core components.
 
     Signals:
-        title_changed(str):        Tab title should update.
-        connection_changed(bool):  Connection state changed.
-        close_requested():         User wants to close this tab.
+        title_changed(str):           Tab title should update.
+        connection_changed(bool):     Connection state changed.
+        close_requested():            User wants to close this tab.
+        timestamp_mode_changed(obj):  Timestamp display mode changed.
+        plot_visibility_changed(bool): Plot panel was shown or hidden.
+                                      MainWindow listens to this to
+                                      keep the View → Live Plot menu
+                                      check in sync with the actual
+                                      visibility, no matter which path
+                                      caused the change (toolbar
+                                      button, menu, or disconnect).
     """
 
     title_changed = Signal(str)
     connection_changed = Signal(bool)
     close_requested = Signal()
     timestamp_mode_changed = Signal(object)  # TimestampMode — bubbles to MainWindow
+    plot_visibility_changed = Signal(bool)
 
     def __init__(
         self,
@@ -84,6 +100,26 @@ class DeviceTab(QWidget):
         self._log_engine: LogEngine | None = None
         self._csv_engine: CSVEngine | None = None
         self._tag_detector = TagDetector()
+
+        # Plot subsystem.
+        # PlotEngine is eager so it can buffer data from session start
+        # even before the user opens the plot panel. PlotView is lazy
+        # — pyqtgraph imports are deferred until first toggle.
+        self._plot_engine: PlotEngine = PlotEngine(self)
+        self._plot_view: QWidget | None = None
+        self._plot_visible: bool = False
+
+        # Plot profile store — read-through to the shared ConfigManager.
+        # On first construction we apply the user's default profile so
+        # tabs open with the engineer's preferred mode rather than
+        # always starting in auto-detect.
+        self._plot_profile_store = PlotProfileStore(self._config_manager)
+        self._plot_active_config: PlotConfig = (
+            self._plot_profile_store.default_profile()
+        )
+        self._apply_plot_config_to_engine(
+            self._plot_active_config, emit_toast=False,
+        )
 
         # Build UI
         self._setup_ui()
@@ -144,7 +180,24 @@ class DeviceTab(QWidget):
         # 4. Close serial port
         self._serial_manager.close()
 
-        # 5. Update session
+        # 5. Per-connection-cycle reset of the plot view + engine.
+        #    CRITICAL: this is NOT a permanent teardown — the redraw
+        #    timer must keep running so a subsequent reconnect sees
+        #    fresh data render immediately. The view's reset_session()
+        #    clears traces/legend/buffers but leaves the timer alone.
+        #    The plot view's permanent shutdown happens only when this
+        #    tab is destroyed, via close_tab() below.
+        if self._plot_view is not None:
+            reset_session = getattr(
+                self._plot_view, "reset_session", None,
+            ) or getattr(self._plot_view, "reset", None)
+            if callable(reset_session):
+                reset_session()
+        else:
+            # No view yet — just clear engine state.
+            self._plot_engine.reset()
+
+        # 6. Update session
         self._session.reset_connection_state()
 
     def apply_theme(self) -> None:
@@ -154,6 +207,87 @@ class DeviceTab(QWidget):
         so existing data is immediately visible in the new theme.
         """
         self._console.set_tag_colors(self._theme_manager.get_tag_colors())
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PLOT CONFIGURATION API
+    # ══════════════════════════════════════════════════════════════════════
+
+    def plot_profile_store(self) -> PlotProfileStore:
+        """The shared profile store. Used by the Configure Plot dialog
+        and the Preferences dialog's Plot section."""
+        return self._plot_profile_store
+
+    def plot_recent_lines(self) -> list[str]:
+        """Most recent DATA lines from the live engine.
+
+        The Configure Plot dialog uses this as reference material and
+        as the corpus for its Test button. Always returns a list
+        (possibly empty) — never raises.
+        """
+        try:
+            return self._plot_engine.recent_lines()
+        except Exception:
+            logger.exception("plot_engine.recent_lines() failed")
+            return []
+
+    def active_plot_config(self) -> PlotConfig:
+        """The PlotConfig currently applied to this tab's engine."""
+        return self._plot_active_config
+
+    def open_plot_config_dialog(self) -> None:
+        """Open the Configure Plot dialog rooted on this tab.
+
+        The dialog is constructed lazily so its imports don't pay a
+        cost on tabs that never use it. The applied config is stored
+        on the tab so subsequent dialog opens preselect the right
+        profile.
+        """
+        from ui.dialogs.plot_config_dialog import PlotConfigDialog
+
+        dialog = PlotConfigDialog(
+            store=self._plot_profile_store,
+            recent_lines_provider=self.plot_recent_lines,
+            current_config=self._plot_active_config,
+            parent=self,
+        )
+        dialog.configChanged.connect(self._on_plot_config_changed)
+        dialog.exec()
+
+    @Slot(object)
+    def _on_plot_config_changed(self, config: PlotConfig) -> None:
+        """Apply a new PlotConfig from the dialog."""
+        if not isinstance(config, PlotConfig):
+            return
+        self._apply_plot_config_to_engine(config, emit_toast=True)
+
+    def _apply_plot_config_to_engine(
+        self, config: PlotConfig, *, emit_toast: bool = True,
+    ) -> None:
+        """Push a PlotConfig down to the engine.
+
+        Auto mode → engine.set_auto_config().
+        Manual mode → engine.set_manual_config(pattern). On invalid
+        pattern (shouldn't happen — dialog validates first), falls
+        back to auto and surfaces the error via Toast.
+        """
+        try:
+            if config.mode == "auto":
+                self._plot_engine.set_auto_config()
+            else:
+                self._plot_engine.set_manual_config(config.pattern)
+        except RegexParserError as exc:
+            logger.warning("Plot config rejected by engine: %s", exc)
+            if emit_toast:
+                Toast.error(self, f"Plot pattern rejected: {exc}")
+            # Fall back to auto so the engine isn't left in a half-state
+            self._plot_engine.set_auto_config()
+            self._plot_active_config = PlotConfig.auto()
+            return
+
+        self._plot_active_config = config
+        if emit_toast:
+            mode_label = "Auto-detect" if config.mode == "auto" else "manual"
+            Toast.info(self, f"Plot mode: {mode_label} ({config.name})")
 
     def set_display_mode(self, mode) -> None:
         """Switch between TEXT and HEX display modes."""
@@ -202,7 +336,10 @@ class DeviceTab(QWidget):
         self._placeholder = self._build_placeholder()
         layout.addWidget(self._placeholder, 1)
 
-        # Console (with padding so it doesn't touch edges)
+        # Console (with padding so it doesn't touch edges).
+        # The console_wrapper is the first pane of a vertical splitter
+        # so we can add the live-plot panel below it on demand without
+        # disturbing the existing layout.
         self._console = ConsoleView()
         self._console.set_tag_colors(self._theme_manager.get_tag_colors())
         console_wrapper = QWidget()
@@ -211,7 +348,32 @@ class DeviceTab(QWidget):
         cw_layout.setSpacing(0)
         cw_layout.addWidget(self._console)
         self._console_wrapper = console_wrapper
-        layout.addWidget(console_wrapper, 1)
+        # Floor on the console height — drags can shrink it but never
+        # to zero, so the user always has a console to type into.
+        console_wrapper.setMinimumHeight(120)
+
+        self._console_plot_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._console_plot_splitter.setObjectName("consolePlotSplitter")
+        # Children NOT collapsible — drag-to-collapse is confusing here
+        # because the user expects the toggle button to be the close
+        # mechanism. The toolbar's Plot button is the one true toggle.
+        self._console_plot_splitter.setChildrenCollapsible(False)
+        self._console_plot_splitter.setHandleWidth(6)
+        # Discoverability: the 6px handle between console and plot is
+        # easily mistaken for a static divider. A tooltip on the handle
+        # makes the resize affordance obvious without adding any chrome.
+        # We set it after addWidget calls (which create the handle),
+        # via the handle(1) accessor — handle 0 is the dummy at index 0.
+        self._console_plot_splitter.addWidget(console_wrapper)
+        # Console occupies all height until the plot is opened.
+        self._console_plot_splitter.setStretchFactor(0, 1)
+        with contextlib.suppress(Exception):
+            handle = self._console_plot_splitter.handle(1)
+            if handle is not None:
+                handle.setToolTip("Drag to resize console and plot panes")
+        # Remembered split ratio across toggles within a session.
+        self._splitter_ratio: tuple[int, int] = (1, 1)  # 50/50 default
+        layout.addWidget(self._console_plot_splitter, 1)
 
         # Command bar
         self._command_bar = CommandBar()
@@ -250,6 +412,7 @@ class DeviceTab(QWidget):
         self._log_control_bar.pause_clicked.connect(self._on_pause_toggle)
         self._log_control_bar.clear_clicked.connect(self._on_clear)
         self._log_control_bar.export_clicked.connect(self._on_export)
+        self._log_control_bar.plot_toggled.connect(self._on_plot_toggled)
 
         # Command bar
         self._command_bar.command_sent.connect(self._on_command_sent)
@@ -311,13 +474,30 @@ class DeviceTab(QWidget):
 
     def _set_connected_ui_visible(self, visible: bool) -> None:
         self._log_control_bar.setVisible(visible)
-        self._console_wrapper.setVisible(visible)
+        self._console_plot_splitter.setVisible(visible)
         self._command_bar.setVisible(visible)
         self._filter_bar.setVisible(visible)
         self._log_control_bar.set_connected(visible)
         self._command_bar.set_enabled(visible)
         # Toggle placeholder vs console
         self._placeholder.setVisible(not visible)
+
+        if not visible:
+            # Disconnect tear-down: the plot panel goes too. The view
+            # is destructively reset so a future reconnection starts
+            # from a clean slate.
+            if self._plot_view is not None:
+                self._plot_view.setVisible(False)
+                self._plot_view.reset()
+            # Route through the single setter so the toolbar button
+            # AND the View → Live Plot menu both reflect the new state.
+            # Bypassing this and setting _plot_visible directly was the
+            # cause of the menu showing a stale check after disconnect.
+            self._set_plot_visible(False)
+            # Splitter ratio resets to the 50/50 default for the
+            # next session — old ratios from a different device
+            # shouldn't carry over.
+            self._splitter_ratio = (1, 1)
 
     # ══════════════════════════════════════════════════════════════════════
     # CONNECTION
@@ -357,6 +537,10 @@ class DeviceTab(QWidget):
         self.ordered_shutdown()
         self._set_connected_ui_visible(False)
         self._connection_panel.set_connected(False)
+        # Reset status-bar metrics fully (port, baud, data rate, line
+        # count) — leaving stale numbers on the bar after a disconnect
+        # was confusing.
+        self._status_bar.set_disconnected()
         self._status_bar.set_status("Disconnected")
         self.title_changed.emit("New Tab")
         self.connection_changed.emit(False)
@@ -451,6 +635,10 @@ class DeviceTab(QWidget):
         if self._log_engine and self._log_engine.is_logging:
             self._log_engine.enqueue(ts, line, tag)
 
+        # Plot engine receives every line; it filters non-DATA tags
+        # internally, mirroring CSV Option C.
+        self._plot_engine.process(line, tag)
+
         # Metrics
         self._session.total_lines += 1
         self._session.total_bytes += len(line.encode("utf-8"))
@@ -464,6 +652,103 @@ class DeviceTab(QWidget):
     def _on_line_count_changed(self, count: int) -> None:
         self._status_bar.set_total_lines(count)
         self._filter_bar.update_counts(self._console.visible_count, self._console.total_count)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PLOT TOGGLE
+    # ══════════════════════════════════════════════════════════════════════
+
+    @Slot(bool)
+    def _on_plot_toggled(self, show: bool) -> None:
+        """Show or hide the live-plot panel below the console.
+
+        - Default split is 50/50 the first time the panel opens.
+        - Subsequent toggles within the session restore the user's
+          most recent ratio (so dragging the splitter is preserved
+          across hide-show cycles).
+        - Truly hides the plot widget on toggle-off (not just shrinks
+          to zero — Qt splitters with collapsible=False would refuse).
+
+        All state mutation goes through ``_set_plot_visible`` so the
+        toolbar button AND the View menu stay in sync via the
+        ``plot_visibility_changed`` signal.
+        """
+        if show:
+            self._ensure_plot_constructed()
+            assert self._plot_view is not None
+            self._plot_view.setVisible(True)
+
+            total_h = self._console_plot_splitter.size().height() or 600
+            # Honor the remembered ratio. Floor each pane at a sensible
+            # minimum so the user can always see both panes.
+            r_console, r_plot = self._splitter_ratio
+            ratio_total = r_console + r_plot
+            console_h = max(120, int(total_h * r_console / ratio_total))
+            plot_h = max(120, total_h - console_h)
+            self._console_plot_splitter.setSizes([console_h, plot_h])
+        else:
+            if self._plot_view is not None:
+                # Remember the user's current ratio for next open.
+                sizes = self._console_plot_splitter.sizes()
+                if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
+                    self._splitter_ratio = (sizes[0], sizes[1])
+                self._plot_view.setVisible(False)
+
+        self._set_plot_visible(show)
+
+    def _set_plot_visible(self, value: bool) -> None:
+        """Single source of truth for plot-visibility state.
+
+        Every code path that changes whether the plot panel is shown
+        must go through here. This guarantees:
+          1. ``self._plot_visible`` is the canonical state
+          2. The toolbar Plot button reflects it
+          3. ``plot_visibility_changed`` is emitted so MainWindow can
+             sync the View → Live Plot menu's checkmark
+
+        Without this single setter, the View menu could (and did) lag
+        behind reality — e.g. ``View → Live Plot`` showing checked
+        after disconnect had already hidden the panel.
+        """
+        if self._plot_visible == value:
+            # Idempotent — but still emit so external observers can
+            # re-sync defensively after a tab switch.
+            self._log_control_bar.set_plot_open(value)
+            self.plot_visibility_changed.emit(value)
+            return
+        self._plot_visible = value
+        self._log_control_bar.set_plot_open(value)
+        self.plot_visibility_changed.emit(value)
+
+    def is_plot_visible(self) -> bool:
+        """True when the plot panel is currently shown."""
+        return self._plot_visible
+
+    def toggle_plot(self) -> None:
+        """Public API for the View menu to flip the plot panel."""
+        self._on_plot_toggled(not self._plot_visible)
+
+    def _ensure_plot_constructed(self) -> None:
+        """Lazily construct the PlotView on first toggle.
+
+        Imports pyqtgraph only when the plot is actually opened, so
+        users who never use the plotter don't pay the import cost.
+        """
+        if self._plot_view is not None:
+            return
+        # Lazy import — pyqtgraph is loaded only here.
+        from ui.widgets.plot_view import PlotView
+        self._plot_view = PlotView(self._plot_engine, self._theme_manager)
+        # Floor on the plot height too — same reasoning as console.
+        self._plot_view.setMinimumHeight(120)
+        # Wire the toolbar's Configure… button and the placeholder's
+        # CTA to the dialog opener.
+        configure_signal = getattr(
+            self._plot_view, "configure_requested", None,
+        )
+        if configure_signal is not None:
+            configure_signal.connect(self.open_plot_config_dialog)
+        self._console_plot_splitter.addWidget(self._plot_view)
+        self._console_plot_splitter.setStretchFactor(1, 1)
 
     # ══════════════════════════════════════════════════════════════════════
     # LOGGING
@@ -671,17 +956,24 @@ class DeviceTab(QWidget):
                     )
                     f.write(f"# Exported: {now_str}\n")
 
-                    # Try auto-detect mode on first 50 lines
+                    # Try auto-detect mode on first 50 lines.
+                    # Filter the sample to DATA-tagged lines only —
+                    # severity messages would pollute the column
+                    # intersection and force a RAW fallback.
                     csv_engine = CSVEngine()
-                    sample = [line for _, line, _ in lines[:50]]
+                    sample = [
+                        ln for _, ln, tg in lines[:50] if tg == "DATA"
+                    ]
                     csv_engine.detect_mode(sample)
                     csv_engine.write_header(f)
 
-                    # Data rows
+                    # Data rows — write_row applies Option C internally:
+                    # in AUTO mode, severity/command rows are excluded
+                    # so the structured CSV stays rectangular.
                     for dt, line, tag in lines:
                         ts = dt.strftime(LOG_TIMESTAMP_FORMAT)
                         ms = f".{dt.microsecond // 1000:03d}"
-                        csv_engine.write_row(f, f"{ts}{ms}", line)
+                        csv_engine.write_row(f, f"{ts}{ms}", line, tag)
 
                 files_written.append(csv_path)
             except OSError as e:

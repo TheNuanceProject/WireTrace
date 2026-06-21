@@ -18,8 +18,9 @@ Read loop (per spec section 5.2):
   4. Split on \\n (keep incomplete last line in buffer)
   5. For each complete line:
      a. Decode (UTF-8 with replace)
-     b. Detect tag via TagDetector (7 severity tags)
-     c. Emit line_received(decoded, tag)
+     b. Strip ANSI/VT100 escape codes
+     c. Detect tag via TagDetector (7 severity tags)
+     d. Emit line_received(decoded, tag)
   6. Every 1 second: emit rate_updated(count)
 
 Signals are thread-safe via Qt Signal/Slot mechanism. No shared mutable state.
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import time
 
 from PySide6.QtCore import QThread, Signal
@@ -39,6 +41,22 @@ from app.constants import DisplayMode
 from core.tag_detector import TagDetector
 
 logger = logging.getLogger(__name__)
+
+
+# Matches ANSI/VT100 CSI escape sequences: ESC '[' then zero or more
+# digits/semicolons, then a single final letter. This covers the common
+# cases emitted by RTOS shells, U-Boot, and coloured firmware CLIs — SGR
+# colour codes (e.g. \x1b[31m, \x1b[0m, \x1b[1;33m), cursor positioning,
+# and screen control (\x1b[2J, \x1b[H). Rendering these is out of scope:
+# WireTrace is a serial monitor, not a terminal emulator. Stripping them
+# at the read layer keeps the console, disk log, CSV export, and plot
+# parsers free of control-character noise.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI/VT100 CSI escape sequences from decoded text."""
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 class SerialReader(QThread):
@@ -224,6 +242,13 @@ class SerialReader(QThread):
             # Decode with replacement for invalid bytes
             decoded = raw_line.decode("utf-8", errors="replace")
 
+            # Strip ANSI/VT100 escape codes before any downstream use so
+            # the console, disk log, CSV export, and plot parsers all see
+            # clean text. Done before the empty-line check below so a line
+            # that was only escape codes (e.g. a clear-screen sequence)
+            # collapses to "" and is skipped.
+            decoded = _strip_ansi(decoded)
+
             # Skip empty lines (pure whitespace)
             stripped = decoded.strip()
             if not stripped:
@@ -257,7 +282,7 @@ class SerialReader(QThread):
         if not raw_line:
             return
 
-        decoded = raw_line.decode("utf-8", errors="replace").strip()
+        decoded = _strip_ansi(raw_line.decode("utf-8", errors="replace")).strip()
         if decoded:
             tag = self._tag_detector.detect(decoded)
             self._total_lines += 1

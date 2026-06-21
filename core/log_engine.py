@@ -325,31 +325,40 @@ class LogEngine(QThread):
     def _flush(self) -> None:
         """Flush buffered entries to disk.
 
-        Uses atomic buffer swap to minimize lock hold time:
-        the mutex is held only for the swap, not during file I/O.
+        The mutex is held for the buffer swap AND the file-write loop, so
+        a flush from the periodic timer (engine thread) and a flush from
+        ``stop_logging`` (main thread) cannot interleave bytes in the same
+        file (bug B9). The mutex serialises ALL file I/O for this engine —
+        see ``_sync_files`` and ``_close_files``, which take the same lock.
 
-        Does NOT call fsync — fsync is driven separately by the
-        periodic fsync timer in ``run()`` and explicitly by
-        ``stop_logging()``.
+        Signal emission is done after the lock is released, so a connected
+        slot can never run while the lock is held.
+
+        Does NOT call fsync — fsync is driven separately by the periodic
+        fsync timer in ``run()`` and explicitly by ``stop_logging()``.
         """
-        # Atomic swap — grab all pending entries, give buffer a fresh deque
+        count = 0
+        error_msg: str | None = None
+
         with QMutexLocker(self._buffer_mutex):
             if not self._buffer:
                 return
+            # Atomic swap — take all pending entries, install a fresh deque.
             entries = self._buffer
             self._buffer = deque(maxlen=self._config.buffer_max_entries)
 
-        # Write entries to disk (outside the lock)
-        count = 0
-        try:
-            for entry in entries:
-                self._write_entry(entry)
-                count += 1
-        except OSError as e:
-            error_msg = f"Disk write error: {e}"
+            # Write inside the lock (see docstring): prevents interleaved
+            # output from concurrent flushes on the same file handle.
+            try:
+                for entry in entries:
+                    self._write_entry(entry)
+                    count += 1
+            except OSError as e:
+                error_msg = f"Disk write error: {e}"
+
+        if error_msg is not None:
             logger.error(error_msg)
             self.error_occurred.emit(error_msg)
-
         if count > 0:
             self.flush_completed.emit(count)
 
@@ -375,31 +384,39 @@ class LogEngine(QThread):
     def _sync_files(self) -> None:
         """Flush OS buffers and fsync all open files to physical disk.
 
-        Called periodically by the fsync timer in ``run()`` and
-        explicitly by ``stop_logging()`` after CSV finalize.
+        Called periodically by the fsync timer in ``run()`` (engine
+        thread) and explicitly by ``stop_logging()`` after CSV finalize.
+        Takes the buffer mutex so an fsync can never run concurrently with
+        a ``_flush`` write or a ``_close_files`` on the same handle (B9).
         """
-        for f in (self._txt_file, self._csv_file):
-            if f and not f.closed:
-                try:
-                    f.flush()
-                    os.fsync(f.fileno())
-                except OSError as e:
-                    logger.warning("fsync failed: %s", e)
+        with QMutexLocker(self._buffer_mutex):
+            for f in (self._txt_file, self._csv_file):
+                if f and not f.closed:
+                    try:
+                        f.flush()
+                        os.fsync(f.fileno())
+                    except OSError as e:
+                        logger.warning("fsync failed: %s", e)
 
     def _close_files(self) -> None:
-        """Close all file handles safely."""
-        for attr in ("_txt_file", "_csv_file"):
-            f = getattr(self, attr, None)
-            if f and not f.closed:
-                try:
-                    f.close()
-                except OSError as e:
-                    logger.warning("Error closing file: %s", e)
-            setattr(self, attr, None)
+        """Close all file handles safely.
 
-        self._txt_path = None
-        self._csv_path = None
-        self._csv_engine = None
+        Takes the buffer mutex so a close can never race a concurrent
+        ``_flush`` write or ``_sync_files`` fsync on the same handle (B9).
+        """
+        with QMutexLocker(self._buffer_mutex):
+            for attr in ("_txt_file", "_csv_file"):
+                f = getattr(self, attr, None)
+                if f and not f.closed:
+                    try:
+                        f.close()
+                    except OSError as e:
+                        logger.warning("Error closing file: %s", e)
+                setattr(self, attr, None)
+
+            self._txt_path = None
+            self._csv_path = None
+            self._csv_engine = None
 
     # ── Internal: Headers ────────────────────────────────────────────────
 

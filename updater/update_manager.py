@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import platform
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -139,6 +140,38 @@ def get_current_platform() -> str:
     return "linux"
 
 
+def _install_channel() -> str:
+    """Install channel for the update request.
+
+    Derived from runtime markers — never hardcoded:
+    - 'appimage' : the AppImage runtime exports the APPIMAGE env var.
+    - 'exe'/'deb'/'app' : a Nuitka standalone build (Nuitka sets the
+      module-level ``__compiled__`` marker) on Windows/Linux/macOS.
+    - 'source' : running from a Python interpreter (dev/source checkout).
+    """
+    if os.environ.get("APPIMAGE"):
+        return "appimage"
+    if "__compiled__" not in globals():
+        return "source"
+    return {"windows": "exe", "linux": "deb", "macos": "app"}.get(
+        get_current_platform(), "packaged",
+    )
+
+
+def _user_agent() -> str:
+    """Build the User-Agent header sent with update requests.
+
+    Identifies the application and the platform it runs on (version,
+    OS, CPU architecture, install channel). All fields are derived at
+    runtime — nothing hardcoded. Example:
+    ``WireTrace/1.2.0 (linux; x86_64; appimage)``.
+    """
+    return (
+        f"{APP_NAME}/{APP_VERSION} "
+        f"({get_current_platform()}; {platform.machine()}; {_install_channel()})"
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TEMP FILE MANAGEMENT
 # ══════════════════════════════════════════════════════════════════════════════
@@ -204,6 +237,64 @@ def cleanup_stale_downloads() -> None:
         logger.info("Cleaned up %d stale installer file(s) from temp", removed)
 
 
+def _replace_appimage(src: str, target: str) -> None:
+    """Atomically replace the running AppImage at *target* with *src*.
+
+    The new file is copied into the target's own directory first, so the
+    final swap is a same-filesystem ``os.replace`` (atomic; no torn file
+    if interrupted). The executable bit is set before the swap. Replacing
+    the path of a currently-running executable is safe on Linux — the
+    kernel keeps the old inode alive for the live process until it exits.
+
+    Raises ``OSError`` if the target directory is not writable (e.g. a
+    root-owned system location); the caller handles that as a fallback.
+    """
+    target_dir = os.path.dirname(target) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".wiretrace-update-", dir=target_dir)
+    os.close(fd)
+    try:
+        shutil.copyfile(src, tmp)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+
+
+def _apply_linux_update(installer_path: str) -> None:
+    """Apply a downloaded Linux update and close the app.
+
+    A real self-update is only possible when the app is itself running as
+    an AppImage: the runtime exports ``APPIMAGE`` (the absolute path of the
+    running image), which we replace with the freshly downloaded one and
+    then relaunch. Any other install type — a ``.deb`` or a source
+    checkout — cannot be replaced from user space (a ``.deb`` would need
+    root), so we open the downloaded file for the user to install manually.
+    """
+    appimage = os.environ.get("APPIMAGE")
+    if appimage and os.path.isfile(appimage):
+        try:
+            _replace_appimage(installer_path, appimage)
+            subprocess.Popen([appimage])
+            QApplication.quit()
+            return
+        except OSError as exc:
+            logger.error(
+                "AppImage self-update failed (%s); opening the download "
+                "for manual install", exc,
+            )
+    else:
+        logger.info(
+            "Not running as an AppImage; opening the download for manual "
+            "install",
+        )
+    # Fallback: hand the downloaded file to the desktop so the user can
+    # install/run it themselves.
+    subprocess.Popen(["xdg-open", installer_path])
+    QApplication.quit()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CHECK WORKER (runs in QThread — never blocks UI)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -226,7 +317,7 @@ class _CheckWorker(QThread):
             logger.info("Checking for updates at %s", url)
 
             req = Request(url)
-            req.add_header("User-Agent", f"{APP_NAME}/{APP_VERSION}")
+            req.add_header("User-Agent", _user_agent())
 
             with urlopen(req, timeout=15) as response:
                 data = json.loads(response.read().decode("utf-8"))
@@ -294,7 +385,7 @@ class _DownloadWorker(QThread):
 
             logger.info("Downloading update from %s", url)
             req = Request(url)
-            req.add_header("User-Agent", f"{APP_NAME}/{APP_VERSION}")
+            req.add_header("User-Agent", _user_agent())
 
             with urlopen(req, timeout=60) as response:
                 total = pu.file_size or int(
@@ -480,7 +571,12 @@ class UpdateManager(QObject):
 
     @staticmethod
     def launch_installer(installer_path: str) -> None:
-        """Launch the downloaded installer and close the application."""
+        """Apply the downloaded update and close the application.
+
+        Windows/macOS hand the file to the OS. Linux routes through the
+        AppImage self-update path (with a manual-install fallback for
+        non-AppImage installs); see _apply_linux_update.
+        """
         if not os.path.exists(installer_path):
             logger.error("Installer not found: %s", installer_path)
             return
@@ -491,6 +587,9 @@ class UpdateManager(QObject):
                 os.startfile(installer_path)  # type: ignore[attr-defined]
             elif system == "darwin":
                 subprocess.Popen(["open", installer_path])
+            elif system == "linux":
+                _apply_linux_update(installer_path)  # handles relaunch + quit
+                return
             else:
                 subprocess.Popen(["xdg-open", installer_path])
 

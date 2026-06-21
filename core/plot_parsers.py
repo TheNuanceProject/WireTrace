@@ -44,6 +44,10 @@ import re
 from collections import Counter
 from typing import ClassVar, Protocol
 
+import regex
+
+from app.constants import PLOT_REGEX_TIMEOUT_SECONDS
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _try_parse_float(s: str) -> float | None:
@@ -454,8 +458,13 @@ class RegexParser:
         if not isinstance(pattern, str) or not pattern.strip():
             raise RegexParserError("Pattern is empty.")
         try:
-            self._compiled = re.compile(pattern)
-        except re.error as exc:
+            # Compiled with the ``regex`` library (not stdlib ``re``) so
+            # ``search`` accepts a per-line ``timeout``. This is the ReDoS
+            # guard: the pattern is user-supplied, so a catastrophic-
+            # backtracking pattern must not be able to run unbounded. See
+            # ``_timed_search``.
+            self._compiled = regex.compile(pattern)
+        except regex.error as exc:
             raise RegexParserError(
                 f"Pattern failed to compile: {exc}",
             ) from exc
@@ -482,6 +491,31 @@ class RegexParser:
     def columns(self) -> list[str]:
         return list(self._columns)
 
+    def _timed_search(self, line: str) -> regex.Match | None:
+        """Run the compiled pattern against ``line`` with the per-line
+        time budget (``PLOT_REGEX_TIMEOUT_SECONDS``).
+
+        Returns the match object, or ``None`` if the pattern does not
+        match. Raises ``TimeoutError`` if the search exceeds the budget —
+        the signature of catastrophic backtracking on this line.
+        """
+        return self._compiled.search(line, timeout=PLOT_REGEX_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _match_to_values(
+        match: regex.Match, columns: list[str],
+    ) -> dict[str, float] | None:
+        """Reduce a match to its numeric named-group captures."""
+        out: dict[str, float] = {}
+        for name in columns:
+            captured = match.group(name)
+            if captured is None:
+                continue
+            v = _try_parse_float(captured.strip())
+            if v is not None:
+                out[name] = v
+        return out if out else None
+
     def extract(self, line: str) -> dict[str, float] | None:
         """Extract numeric named-group captures from ``line``.
 
@@ -490,19 +524,18 @@ class RegexParser:
         the columns that captured numerics) if some groups matched
         non-numerics — keeps plotting alive when one channel emits
         ``ERR`` while others stay healthy.
+
+        If the search exceeds the per-line time budget (catastrophic
+        backtracking), the line is skipped — exactly as a non-matching
+        line would be — so the live parsing thread never freezes (B3).
         """
-        match = self._compiled.search(line)
+        try:
+            match = self._timed_search(line)
+        except TimeoutError:
+            return None
         if match is None:
             return None
-        out: dict[str, float] = {}
-        for name in self._columns:
-            captured = match.group(name)
-            if captured is None:
-                continue
-            v = _try_parse_float(captured.strip())
-            if v is not None:
-                out[name] = v
-        return out if out else None
+        return self._match_to_values(match, self._columns)
 
     def test(self, sample: list[str]) -> dict[str, object]:
         """Run the pattern across a sample and report results.
@@ -515,12 +548,25 @@ class RegexParser:
                                 line in the sample
           - ``preview`` (list): first three matching extractions
                                 (line, dict[name, float])
+          - ``timed_out`` (int): count of lines whose search exceeded the
+                                per-line time budget (catastrophic
+                                backtracking). The dialog surfaces a
+                                non-zero count as a red result and
+                                disables Apply.
         """
         matched = 0
+        timed_out = 0
         seen_columns: set[str] = set()
         preview: list[tuple[str, dict[str, float]]] = []
         for line in sample:
-            values = self.extract(line)
+            try:
+                match = self._timed_search(line)
+            except TimeoutError:
+                timed_out += 1
+                continue
+            if match is None:
+                continue
+            values = self._match_to_values(match, self._columns)
             if values:
                 matched += 1
                 seen_columns.update(values.keys())
@@ -531,6 +577,7 @@ class RegexParser:
             "total": len(sample),
             "columns": [c for c in self._columns if c in seen_columns],
             "preview": preview,
+            "timed_out": timed_out,
         }
 
     def set_column_names(self, names: list[str]) -> None:

@@ -716,7 +716,7 @@ class PlotView(QWidget):
     reset = reset_session
 
     def shutdown(self) -> None:
-        """Stop the redraw timer permanently.
+        """Stop the redraw timer permanently and detach from the theme manager.
 
         Called only on tab close / final widget teardown. NOT called
         on disconnect — a per-connection cycle uses ``reset_session()``.
@@ -724,4 +724,16 @@ class PlotView(QWidget):
         every disconnect meant the next connection's data never
         rendered because the redraw never fired again.
         """
+        # B7: the theme manager outlives this widget. A lingering
+        # theme_changed → _on_theme_changed connection would keep this
+        # PlotView alive after the tab closes (a leak proportional to the
+        # number of tab cycles) and could invoke the slot on a
+        # partially-destroyed widget if the theme changes afterwards.
+        # Disconnect first, mirroring the defensive getattr used when the
+        # signal was connected in __init__.
+        change_signal = getattr(self._theme_manager, "theme_changed", None)
+        if change_signal is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                change_signal.disconnect(self._on_theme_changed)
+
         self._timer.stop()

@@ -50,6 +50,15 @@ from app.constants import CSV_AUTODETECT_SAMPLE_SIZE, TAG_DATA, CSVMode
 logger = logging.getLogger(__name__)
 
 
+# Leading characters that spreadsheet applications (Excel, LibreOffice
+# Calc) interpret as the start of a formula. A field beginning with any
+# of these is prefixed with a single quote on export so the value is
+# rendered as literal text rather than executed (OWASP CSV Injection
+# guidance). Tab and carriage return are included because they can also
+# introduce a formula/command context in some spreadsheet parsers.
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
 # ── Parsed Row ───────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True, slots=True)
@@ -498,13 +507,27 @@ class CSVEngine(QObject):
 
     @staticmethod
     def _csv_escape(value: str) -> str:
-        """Escape a value for CSV output (RFC 4180 compliant).
+        """Escape a value for CSV output, safe against formula injection.
 
-        Wraps in quotes if the value contains commas, quotes, or newlines.
-        Internal quotes are doubled.
+        Two layers, in order:
+
+          1. Formula-injection neutralisation (B2): a value whose first
+             character is one a spreadsheet treats as a formula start
+             (``=`` ``+`` ``-`` ``@`` tab CR) is prefixed with a single
+             quote, so Excel and LibreOffice render it as literal text
+             and never execute it. The quote is invisible in the cell.
+
+          2. RFC 4180 structural escaping: the (possibly prefixed) value
+             is wrapped in quotes if it contains a comma, quote, or
+             newline, with internal quotes doubled.
+
+        Both AUTO-mode and RAW-mode writes route through here, so device
+        payloads are neutralised in every export mode.
         """
         if not value:
             return ""
+        if value[0] in _CSV_FORMULA_TRIGGERS:
+            value = "'" + value
         if "," in value or '"' in value or "\n" in value or "\r" in value:
             return '"' + value.replace('"', '""') + '"'
         return value

@@ -46,6 +46,12 @@ FILE_WRITE_BUFFER_SIZE = 65_536  # 64 KB
 # Number of lines to sample for CSV auto-detect
 CSV_AUTODETECT_SAMPLE_SIZE = 50
 
+# Per-line time budget for a user-supplied plot regex (manual mode).
+# A pattern that exceeds this on a single line is treated as a non-match
+# and the line is skipped, so a catastrophic-backtracking pattern cannot
+# freeze the parsing thread or the UI (see core/plot_parsers RegexParser).
+PLOT_REGEX_TIMEOUT_SECONDS = 0.1
+
 # ── UI / Display ─────────────────────────────────────────────────────────────
 
 # GUI update interval (batched signal processing)

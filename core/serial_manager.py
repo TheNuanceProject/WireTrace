@@ -254,6 +254,18 @@ class SerialManager(QObject):
             return
         error_msg = self._port.errorString() or f"Serial error code: {error}"
         logger.error("Serial error on %s: %s", self._port_name, error_msg)
+
+        # B1: a ResourceError means the device became unavailable (USB
+        # cable pulled, adapter reset, remote close). Close the port now
+        # so the kernel releases the tty node immediately; otherwise the
+        # node stays locked and the device re-enumerates to a new path
+        # (e.g. /dev/ttyACM1 instead of /dev/ttyACM0) on reconnect,
+        # breaking automatic reconnection to the same port. Only
+        # ResourceError triggers the auto-close — every other error type
+        # keeps its existing behaviour (emit and let the user decide).
+        if error == QSerialPort.SerialPortError.ResourceError:
+            self.close()
+
         self.error_occurred.emit(error_msg)
 
     # ── pyserial Fallback ────────────────────────────────────────────────
@@ -310,7 +322,14 @@ class SerialManager(QObject):
                     if data:
                         if ser.in_waiting > 0:
                             data += ser.read(ser.in_waiting)
-                        self.data_received.emit(data)
+                        # B10: only emit if teardown has not begun. Without
+                        # this guard a read that completes during
+                        # _close_fallback would emit data_received after
+                        # _fallback_running went False — a signal delivered
+                        # after the manager considers the fallback stopped.
+                        # Mirrors the error_occurred guard below.
+                        if self._fallback_running:
+                            self.data_received.emit(data)
                 except Exception as e:
                     if self._fallback_running:
                         self.error_occurred.emit(str(e))

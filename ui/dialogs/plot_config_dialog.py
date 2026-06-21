@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.constants import PLOT_REGEX_TIMEOUT_SECONDS
 from app.plot_config import (
     AUTO_PROFILE_NAME,
     PROFILE_NAME_MAX,
@@ -120,6 +121,10 @@ class PlotConfigDialog(QDialog):
         self._store = store
         self._recent_lines_provider = recent_lines_provider
         self._editing_unsaved = False  # form has changes vs selected profile
+        # True when the most recent Test timed out (catastrophic
+        # backtracking). Gates Apply off until the pattern is changed or
+        # re-tested clean. Reset on every pattern edit and mode toggle.
+        self._last_test_timed_out = False
 
         self._setup_ui()
         self._populate_profiles()
@@ -387,6 +392,8 @@ class PlotConfigDialog(QDialog):
 
     def _on_pattern_changed(self) -> None:
         self._editing_unsaved = True
+        # The pattern changed, so any prior timeout verdict is stale.
+        self._last_test_timed_out = False
         # Don't auto-test on every keystroke — too noisy. The user can
         # click Test or just click Apply (Apply implicitly tests).
         # But we DO update Apply state in case the pattern just became
@@ -484,6 +491,25 @@ class PlotConfigDialog(QDialog):
         total = result["total"]
         cols = result["columns"]
         preview = result["preview"]
+        timed_out = result["timed_out"]
+
+        # Recompute the timeout verdict on every test.
+        self._last_test_timed_out = False
+
+        if timed_out:
+            # RED — catastrophic backtracking. Apply is disabled until the
+            # pattern is changed; running it on live data would freeze the
+            # parsing thread line after line.
+            self._last_test_timed_out = True
+            self._status_label.setText(
+                f"<span style='color:{_STATUS_RED};'>"
+                f"\u2717 Pattern timed out after "
+                f"{PLOT_REGEX_TIMEOUT_SECONDS:g}s on {timed_out} of {total} "
+                f"lines &mdash; possible catastrophic backtracking. "
+                f"Try simplifying it.</span>",
+            )
+            self._update_apply_state()
+            return
 
         if total == 0:
             # Pattern compiles but no sample to test against
@@ -534,7 +560,7 @@ class PlotConfigDialog(QDialog):
             self._apply_btn.setEnabled(True)
             return
         parser, _err = self._build_parser_or_none()
-        self._apply_btn.setEnabled(parser is not None)
+        self._apply_btn.setEnabled(parser is not None and not self._last_test_timed_out)
 
     @staticmethod
     def _html_escape(s: str) -> str:

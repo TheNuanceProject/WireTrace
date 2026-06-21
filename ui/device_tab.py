@@ -101,6 +101,22 @@ class DeviceTab(QWidget):
         self._csv_engine: CSVEngine | None = None
         self._tag_detector = TagDetector()
 
+        # Disconnect-flow state. ``disconnected`` from the SerialManager is
+        # the single authoritative trigger for tearing the tab down, so a
+        # user-clicked disconnect and a device-initiated drop (unplug, I/O
+        # error) converge on one code path. ``_disconnecting`` guards that
+        # path against re-entrancy (the user path closes the port, which
+        # emits ``disconnected`` and re-enters); ``_user_initiated`` lets
+        # the teardown choose a quiet toast vs. an unexpected-drop dialog.
+        self._disconnecting = False
+        self._user_initiated_disconnect = False
+        # Set while a programmatic teardown is running (tab close, app
+        # quit, or the ordered_shutdown invoked from within the disconnect
+        # teardown itself). It tells _on_disconnected to skip the
+        # live-disconnect UI/dialog, since closing the port during these
+        # paths still emits ``disconnected`` but is not a device drop.
+        self._suppress_disconnect_ui = False
+
         # Plot subsystem.
         # PlotEngine is eager so it can buffer data from session start
         # even before the user opens the plot panel. PlotView is lazy
@@ -154,7 +170,6 @@ class DeviceTab(QWidget):
     def ordered_shutdown(self) -> None:
         """Ordered shutdown per spec section 4.5."""
         logger.info("Ordered shutdown: %s", self._session.port_name)
-
         # 1. Disconnect data relay and stop reader
         if self._serial_reader is not None:
             # Stop data flow: disconnect relay signal first.
@@ -165,6 +180,21 @@ class DeviceTab(QWidget):
                     self._serial_reader.enqueue_data)
             self._serial_reader.stop()
             self._serial_reader.wait(2000)
+            # B8: disconnect the reader's outbound signals before dropping
+            # the reference. Done AFTER stop()/wait() so the thread's final
+            # flush (a trailing partial line and the final rate update)
+            # still reaches its slots; disconnecting here removes the
+            # connection records that would otherwise keep the dead
+            # SerialReader alive across every disconnect/reconnect cycle.
+            # Each disconnect is guarded independently so one already-gone
+            # connection doesn't skip the others.
+            for signal, slot in (
+                (self._serial_reader.line_received, self._on_line_received),
+                (self._serial_reader.rate_updated, self._on_rate_updated),
+                (self._serial_reader.error_occurred, self._on_serial_error),
+            ):
+                with contextlib.suppress(RuntimeError, TypeError):
+                    signal.disconnect(slot)
             self._serial_reader = None
 
         # 2-3. Stop logging (flush + close files)
@@ -173,12 +203,24 @@ class DeviceTab(QWidget):
                 self._log_engine.stop_logging()
             self._log_engine.stop()
             self._log_engine.wait(2000)
+            # B8: drop the log engine's error-signal connection too, for
+            # the same reason — it otherwise pins the dead LogEngine.
+            with contextlib.suppress(RuntimeError, TypeError):
+                self._log_engine.error_occurred.disconnect(self._on_log_error)
             self._log_engine = None
 
         self._csv_engine = None
 
-        # 4. Close serial port
-        self._serial_manager.close()
+        # 4. Close serial port. This emits ``disconnected``; suppress the
+        #    live-disconnect UI for it, since a programmatic shutdown (tab
+        #    close, app quit, or the disconnect teardown's own close) is
+        #    not a device drop and must not pop the unexpected-drop dialog.
+        prev_suppress = self._suppress_disconnect_ui
+        self._suppress_disconnect_ui = True
+        try:
+            self._serial_manager.close()
+        finally:
+            self._suppress_disconnect_ui = prev_suppress
 
         # 5. Per-connection-cycle reset of the plot view + engine.
         #    CRITICAL: this is NOT a permanent teardown — the redraw
@@ -530,22 +572,67 @@ class DeviceTab(QWidget):
 
     @Slot()
     def _on_disconnect(self) -> None:
+        # User-initiated. Mark intent, then request the port close. The
+        # manager's ``disconnected`` signal drives the actual teardown in
+        # _on_disconnected, so this path and a device-initiated drop share
+        # one implementation. If the port is somehow already closed (no
+        # signal would fire), tear down directly so the UI still resets.
+        self._user_initiated_disconnect = True
         port = self._session.port_name
-        was_logging = self._session.is_logging
+        if self._serial_manager.is_open():
+            self._serial_manager.close()
+        else:
+            self._teardown_after_disconnect(port, user_initiated=True)
+
+    def _teardown_after_disconnect(
+        self, port_name: str, *, user_initiated: bool,
+    ) -> None:
+        """Single authoritative teardown for any disconnect.
+
+        Re-entrancy guarded: the user path closes the port, which emits
+        ``disconnected`` and re-enters here; ``ordered_shutdown`` also
+        closes the port again. ``close()`` clears its port name before
+        emitting, so the second close does not re-emit — and the guard
+        makes any re-entry a no-op, so teardown runs exactly once.
+        """
+        if self._disconnecting:
+            return
+        self._disconnecting = True
+        try:
+            was_logging = self._session.is_logging
+            self.ordered_shutdown()  # also resets the session (step 6)
+            self._set_connected_ui_visible(False)
+            self._connection_panel.set_connected(False)
+            # Reset status-bar metrics fully (port, baud, data rate, line
+            # count) — leaving stale numbers after a disconnect is
+            # confusing.
+            self._status_bar.set_disconnected()
+            self._status_bar.set_status("Disconnected")
+            self.title_changed.emit("New Tab")
+            self.connection_changed.emit(False)
+            if user_initiated:
+                if port_name:
+                    Toast.info(self, f"Disconnected from {port_name}")
+            else:
+                self._show_unexpected_disconnect_dialog(port_name, was_logging)
+        finally:
+            self._user_initiated_disconnect = False
+            self._disconnecting = False
+
+    def _show_unexpected_disconnect_dialog(
+        self, port_name: str, was_logging: bool,
+    ) -> None:
+        msg = (
+            f"The connection to {port_name} was lost unexpectedly.\n\n"
+            "This typically happens when:\n"
+            "  • The device was unplugged\n"
+            "  • Another application took control of the port\n"
+            "  • The USB connection was interrupted\n"
+        )
         if was_logging:
-            self._on_log_off()
-        self.ordered_shutdown()
-        self._set_connected_ui_visible(False)
-        self._connection_panel.set_connected(False)
-        # Reset status-bar metrics fully (port, baud, data rate, line
-        # count) — leaving stale numbers on the bar after a disconnect
-        # was confusing.
-        self._status_bar.set_disconnected()
-        self._status_bar.set_status("Disconnected")
-        self.title_changed.emit("New Tab")
-        self.connection_changed.emit(False)
-        if port:
-            Toast.info(self, f"Disconnected from {port}")
+            msg += "\nYour log data has been saved and flushed to disk."
+        msg += "\n\nPlease reconnect when the device is available."
+        QMessageBox.warning(self, "Device Disconnected", msg)
 
     @Slot(str)
     def _on_connected(self, port_name: str) -> None:
@@ -585,38 +672,40 @@ class DeviceTab(QWidget):
 
     @Slot(str)
     def _on_disconnected(self, port_name: str) -> None:
+        # Authoritative signal that the port is closed — whether the user
+        # asked for it or the device dropped. Drives the single teardown;
+        # _user_initiated_disconnect (set by _on_disconnect) selects the
+        # quiet vs. unexpected-drop presentation. During a programmatic
+        # teardown (tab close / app quit) the port close also emits this,
+        # but there's no live tab to update — skip the UX.
         logger.info("Disconnected: %s", port_name)
-        self._status_bar.set_status("Disconnected")
+        if self._suppress_disconnect_ui:
+            return
+        self._teardown_after_disconnect(
+            port_name, user_initiated=self._user_initiated_disconnect,
+        )
 
     @Slot(str)
     def _on_serial_error(self, error_msg: str) -> None:
-        """Handle serial errors with professional user-facing feedback."""
+        """Surface a serial error.
+
+        A fatal error that drops the link is handled by the manager
+        closing the port and emitting ``disconnected`` (see B1 /
+        _on_disconnected) — by the time this runs the teardown has already
+        set is_connected False, so we don't double-report. If we are still
+        connected but the manager's port is no longer open, the error took
+        the link down without a clean close, so tear down to match the
+        real state. Otherwise it's a transient error — just inform the
+        user. No error-string matching is used to make this decision.
+        """
         logger.error("Serial error: %s", error_msg)
-
-        fatal_keywords = ("access", "denied", "removed", "disappeared",
-                          "device not connected", "permission", "resource",
-                          "i/o", "broken pipe", "no such")
-        is_fatal = any(kw in error_msg.lower() for kw in fatal_keywords)
-
-        if is_fatal and self._session.is_connected:
-            port = self._session.port_name
-            was_logging = self._session.is_logging
-            self._on_disconnect()
-
-            # Prominent dialog — user MUST see this
-            msg = (
-                f"The connection to {port} was lost unexpectedly.\n\n"
-                "This typically happens when:\n"
-                "  • The device was unplugged\n"
-                "  • Another application took control of the port\n"
-                "  • The USB connection was interrupted\n"
+        if not self._session.is_connected:
+            return
+        if not self._serial_manager.is_open():
+            self._teardown_after_disconnect(
+                self._session.port_name, user_initiated=False,
             )
-            if was_logging:
-                msg += "\nYour log data has been saved and flushed to disk."
-            msg += "\n\nPlease reconnect when the device is available."
-
-            QMessageBox.warning(self, "Device Disconnected", msg)
-        elif self._session.is_connected:
+        else:
             Toast.warning(self, "Communication error — connection still active")
 
     # ══════════════════════════════════════════════════════════════════════

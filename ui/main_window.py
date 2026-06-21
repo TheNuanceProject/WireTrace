@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QFont, QKeySequence
+from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
@@ -42,6 +42,7 @@ from app.constants import (
 from ui.device_tab import DeviceTab
 from ui.themes.theme_manager import ThemeManager
 from ui.widgets.toast import Toast
+from ui.window_geometry import visible_geometry
 from version import APP_DESCRIPTION, WINDOW_TITLE
 
 logger = logging.getLogger(__name__)
@@ -691,15 +692,49 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════
 
     def _restore_window_state(self) -> None:
-        """Restore window position and size from config."""
-        self.resize(self._config.window_width, self._config.window_height)
-        self.move(self._config.window_x, self._config.window_y)
+        """Restore window geometry from config, clamped to a live screen.
+
+        Guards against a saved position that is no longer visible — e.g. a
+        coordinate on an external monitor that has since been disconnected.
+        Without this, the window is placed off-screen and shows only as a
+        taskbar entry. If the saved geometry is not visible on any connected
+        screen, the window is centred on the primary screen.
+        """
+        screens = [
+            (g.x(), g.y(), g.width(), g.height())
+            for g in (s.availableGeometry() for s in QGuiApplication.screens())
+        ]
+        primary = None
+        ps = QGuiApplication.primaryScreen()
+        if ps is not None:
+            g = ps.availableGeometry()
+            primary = (g.x(), g.y(), g.width(), g.height())
+
+        x, y, w, h = visible_geometry(
+            (
+                self._config.window_x,
+                self._config.window_y,
+                self._config.window_width,
+                self._config.window_height,
+            ),
+            screens,
+            (self.minimumWidth(), self.minimumHeight()),
+            primary,
+        )
+        self.resize(w, h)
+        self.move(x, y)
         if self._config.maximized:
             self.showMaximized()
 
     def save_window_state(self) -> None:
-        """Save current window geometry to config."""
-        if not self.isMaximized():
+        """Save current window geometry to config.
+
+        Skips saving while minimized or maximized: in those states
+        ``geometry()`` does not reflect a usable restore position (on
+        Windows a minimized window reports -32000). The maximized flag is
+        always recorded so the state is restored on next launch.
+        """
+        if not self.isMaximized() and not self.isMinimized():
             geo = self.geometry()
             self._config.window_width = geo.width()
             self._config.window_height = geo.height()

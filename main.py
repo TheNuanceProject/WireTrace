@@ -63,6 +63,7 @@ def run_smoke_test() -> int:
         # through plot_view.
         ("pyqtgraph", "pyqtgraph (live plotter rendering library)"),
         ("numpy", "numpy (ring-buffer backing array)"),
+        ("regex", "regex (timeout-capable engine for manual-mode plot patterns)"),
         ("ui.widgets.plot_view", "PlotView widget (lazy-loaded from DeviceTab)"),
         ("ui.dialogs.plot_config_dialog",
          "Configure Plot dialog (lazy-loaded from menu/toolbar/CTA)"),

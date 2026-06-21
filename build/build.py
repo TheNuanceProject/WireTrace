@@ -62,11 +62,12 @@ def run_cmd(
     cmd: list[str],
     cwd: str | None = None,
     check: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a command, optionally raising on failure."""
     log(f"$ {' '.join(cmd)}")
     result = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True,
+        cmd, cwd=cwd, capture_output=True, text=True, env=env,
     )
     if result.returncode != 0:
         log(f"STDOUT:\n{result.stdout}", "DEBUG")
@@ -466,6 +467,123 @@ def run_smoke_test(final_dir: Path, plat: str) -> None:
 # STEP 6: PACKAGE INSTALLER
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _assemble_appdir(final_dir: Path, appdir: Path) -> Path:
+    """Build a complete AppDir from the FULL standalone distribution.
+
+    B6: the previous Linux packaging copied only the launcher binary out
+    of the Nuitka ``--standalone`` directory and renamed it ``.AppImage``,
+    leaving every sibling behind — the Qt libraries, shiboken6, the
+    bundled resources/themes, and the numpy/pyqtgraph/regex extension
+    modules. The result could not launch. An AppImage must contain the
+    whole dependency tree, so we copy the entire ``final_dir`` into
+    ``AppDir/usr/bin`` and add the AppRun entry point, desktop entry, and
+    icon that ``appimagetool`` requires.
+
+    Returns the populated AppDir path.
+    """
+    app = APP_NAME.lower()
+
+    if appdir.exists():
+        shutil.rmtree(appdir)
+    bin_dir = appdir / "usr" / "bin"
+    bin_dir.mkdir(parents=True)
+    (appdir / "usr" / "share" / "applications").mkdir(parents=True)
+    icon_install = appdir / "usr" / "share" / "icons" / "hicolor" / "256x256" / "apps"
+    icon_install.mkdir(parents=True)
+
+    # The COMPLETE standalone tree — binary plus all sibling libraries
+    # and bundled data — goes into usr/bin so the launcher finds its
+    # dependencies at runtime.
+    shutil.copytree(final_dir, bin_dir, dirs_exist_ok=True)
+
+    # AppRun: resolve our own location, expose the bundled libs, exec the
+    # real binary, forwarding all arguments (so ``--smoke-test`` works).
+    apprun = appdir / "AppRun"
+    apprun.write_text(
+        "#!/bin/sh\n"
+        'HERE="$(dirname "$(readlink -f "${0}")")"\n'
+        'export LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"\n'
+        f'exec "${{HERE}}/usr/bin/{app}" "$@"\n'
+    )
+    os.chmod(apprun, 0o755)
+
+    # Desktop entry — required at the AppDir root by appimagetool, and
+    # installed under usr/share for desktop integration. Mirrors the .deb
+    # entry; Exec/Icon use AppImage conventions (AppRun resolves the path).
+    desktop_text = (
+        "[Desktop Entry]\n"
+        f"Name={APP_NAME}\n"
+        "Comment=Professional Serial Data Monitor\n"
+        f"Exec={app}\n"
+        f"Icon={app}\n"
+        "Terminal=false\n"
+        "Type=Application\n"
+        "Categories=Development;Electronics;\n"
+    )
+    (appdir / f"{app}.desktop").write_text(desktop_text)
+    (appdir / "usr" / "share" / "applications" / f"{app}.desktop").write_text(desktop_text)
+
+    # Icon — appimagetool needs one at the AppDir root named to match the
+    # desktop Icon= key; also install it into the hicolor theme.
+    icon_src = PROJECT_ROOT / "resources" / "app_icon.png"
+    if icon_src.exists():
+        shutil.copy2(icon_src, appdir / f"{app}.png")
+        shutil.copy2(icon_src, icon_install / f"{app}.png")
+    else:
+        log(f"Icon {icon_src} not found — AppImage may lack an icon", "WARN")
+
+    return appdir
+
+
+def _build_linux_appimage(final_dir: Path, deploy_dir: Path, version: str) -> Path:
+    """Package the standalone build as a runnable Linux artifact.
+
+    Preferred: a real AppImage via ``appimagetool`` from a full AppDir.
+    Fallback (tool absent): a gzipped tarball of the COMPLETE standalone
+    directory — still fully runnable. Either way the artifact contains
+    every dependency, so the B6 bare-binary defect cannot recur.
+
+    Returns the artifact path.
+
+    Raises:
+        RuntimeError: if neither an AppImage nor the fallback archive
+            could be produced.
+    """
+    appdir = deploy_dir / "AppDir"
+    _assemble_appdir(final_dir, appdir)
+
+    tool = shutil.which("appimagetool")
+    if tool:
+        out = deploy_dir / f"WireTrace-v{version}-x86_64.AppImage"
+        if out.exists():
+            out.unlink()
+        # appimagetool selects the runtime by the ARCH env var.
+        env = dict(os.environ)
+        env["ARCH"] = "x86_64"
+        run_cmd([tool, str(appdir), str(out)], env=env, check=False)
+        if out.exists():
+            os.chmod(out, 0o755)
+            log(f"AppImage: {out.name} ({out.stat().st_size / 1024 / 1024:.1f} MB)")
+            return out
+        log("appimagetool ran but produced no AppImage — using tarball fallback", "WARN")
+    else:
+        log("appimagetool not found — packaging full directory as tarball", "WARN")
+        log("  Install appimagetool to produce a .AppImage; the tarball is runnable.", "WARN")
+
+    # Fallback: archive the ENTIRE distribution directory (not the bare
+    # binary). final_dir is build/dist/WireTrace; archive it by name.
+    archive_base = deploy_dir / f"WireTrace-v{version}-x86_64"
+    shutil.make_archive(
+        str(archive_base), "gztar",
+        root_dir=str(final_dir.parent), base_dir=final_dir.name,
+    )
+    tarball = Path(f"{archive_base}.tar.gz")
+    if not tarball.exists():
+        raise RuntimeError("Failed to produce AppImage or fallback tarball")
+    log(f"Portable tarball: {tarball.name} ({tarball.stat().st_size / 1024 / 1024:.1f} MB)")
+    return tarball
+
+
 def package_installer(plat: str, final_dir: Path, version: str) -> list[Path]:
     log_section("Step 6: Package Installer")
 
@@ -521,13 +639,11 @@ def package_installer(plat: str, final_dir: Path, version: str) -> list[Path]:
             artifacts.append(Path(f"{archive}.tar.gz"))
 
     elif plat == "linux":
-        # AppImage (portable)
-        appimage = deploy_dir / f"WireTrace-v{version}-x86_64.AppImage"
-        exe = final_dir / APP_NAME.lower()
-        if exe.exists():
-            shutil.copy2(exe, appimage)
-            os.chmod(appimage, 0o755)
-            artifacts.append(appimage)
+        # AppImage (or runnable tarball fallback) from the FULL standalone
+        # directory — see _build_linux_appimage. (B6: previously this
+        # copied only the launcher binary, omitting shiboken6 and every
+        # other dependency.)
+        artifacts.append(_build_linux_appimage(final_dir, deploy_dir, version))
 
         # .deb package
         if shutil.which("dpkg-deb"):

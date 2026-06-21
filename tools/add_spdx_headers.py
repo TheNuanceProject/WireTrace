@@ -48,12 +48,28 @@ EXCLUDE_DIRS: frozenset[str] = frozenset({
 
 
 def is_excluded(path: Path, repo_root: Path) -> bool:
-    """Return True if any part of the path matches an exclude directory."""
+    """Return True if the path is inside any excluded directory.
+
+    An exclude entry is either a single directory name (matched against
+    any path component, e.g. ``__pycache__``) or a relative path prefix
+    (matched against the start of the path, e.g. ``build/dist``). The
+    prefix form is what excludes generated Nuitka build trees such as
+    ``build/dist/main.build`` — previously these slipped through because
+    a slash-joined entry can never equal a single path component.
+    """
     try:
-        rel_parts = path.relative_to(repo_root).parts
+        rel = path.relative_to(repo_root)
     except ValueError:
         return True
-    return any(part in EXCLUDE_DIRS for part in rel_parts)
+    rel_posix = rel.as_posix()
+    parts = rel.parts
+    for entry in EXCLUDE_DIRS:
+        if "/" in entry:
+            if rel_posix == entry or rel_posix.startswith(entry + "/"):
+                return True
+        elif entry in parts:
+            return True
+    return False
 
 
 def has_spdx(content: str) -> bool:

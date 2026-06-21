@@ -86,17 +86,17 @@ is cross-platform — it uses Qt (via PySide6) for the UI, QSerialPort
 for serial I/O, and a build pipeline that produces native binaries for
 all three operating systems.
 
-**Pre-built binaries are currently published for Windows only.** This
-is a practical limitation of who maintains the project (a single
-person, testing only on Windows day-to-day), not a design limitation
-of the software.
+**Pre-built binaries are published for Windows and Linux.** macOS is
+supported from source. This reflects who maintains the project (a single
+person) and which platforms are tested for each release, not a design
+limitation of the software.
 
-If you want WireTrace on macOS or Linux:
+If you want WireTrace on macOS:
 
 - **Build it from source** using the included build scripts — the
   BUILD_GUIDE covers all three platforms
-- **Open an issue** to express interest — if there's demand, pre-built
-  macOS and Linux binaries become a realistic priority
+- **Open an issue** to express interest — if there's demand, a pre-built
+  macOS binary becomes a realistic priority
 - **Submit a pull request** with test results on your platform —
   contributions that validate cross-platform behaviour are especially
   welcome
@@ -104,8 +104,8 @@ If you want WireTrace on macOS or Linux:
 ### System requirements (binary install)
 
 - **Windows:** 64-bit Windows 10 or newer
+- **Linux:** Ubuntu 20.04 or equivalent (x86-64); AppImage or `.deb`
 - **macOS:** 11 (Big Sur) or newer, built from source
-- **Linux:** Ubuntu 20.04 or equivalent, built from source
 - Roughly 100 MB of disk space plus room for your logs
 
 CPU-only software rendering — runs in remote desktop sessions,
@@ -122,11 +122,19 @@ and run it. The application launches from the Start menu.
 On first launch, the welcome screen prompts for a device connection.
 Everything else appears once a device is connected.
 
-### macOS and Linux
+### Linux (binary)
 
-Pre-built binaries for macOS and Linux are not currently published.
-The recommended path is to build from source (see below). It takes a
-few minutes on modern hardware.
+Download the `.AppImage` from the
+[Releases page](https://github.com/TheNuanceProject/WireTrace/releases/latest),
+make it executable (`chmod +x`), and run it — no installation needed. A
+`.deb` is also provided for Debian/Ubuntu (`sudo dpkg -i`). In-app
+auto-update applies to the AppImage (it replaces itself and relaunches);
+`.deb` installs update via a fresh download.
+
+### macOS
+
+A pre-built macOS binary is not currently published; build from source
+(see below). It takes a few minutes on modern hardware.
 
 ## Build from source
 

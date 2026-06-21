@@ -3,3 +3,4 @@ PySide6>=6.6.0          # Qt6 framework (includes QSerialPort)
 pyserial>=3.5           # Fallback serial library
 pyqtgraph>=0.13         # Live-plot rendering (Qt-native, GPU-accelerated)
 numpy>=1.24             # Plot ring buffers (required by pyqtgraph)
+regex>=2024.0.0         # Timeout-capable regex for user-supplied plot patterns (ReDoS guard)

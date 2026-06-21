@@ -265,16 +265,43 @@ Nuitka-compiled binaries are sometimes flagged by antivirus software. This is a 
 
 ## Cross-Platform Builds
 
+Nuitka compiles native code, so each platform's artifact is built on that
+platform — there is no cross-compilation. Build Windows on Windows, Linux
+on Linux, macOS on macOS, each from the same source revision, then attach
+all artifacts to one GitHub Release.
+
 ### macOS
 ```bash
-python build/build.py --platform macos
+python build/build.py --platform macos --version 1.2.0
 ```
-Outputs: `deployment/macos/WireTrace-v1.1.0.dmg`
+Outputs: `deployment/macos/WireTrace-v1.2.0.dmg`
 
 ### Linux
+
+Prerequisites (in addition to the Python deps):
 ```bash
-python build/build.py --platform linux
+pip install -r requirements-build.txt          # Nuitka, ordered-set
+sudo apt install build-essential patchelf libfuse2
+# appimagetool on PATH for a real .AppImage (else a runnable .tar.gz is produced):
+#   download appimagetool-x86_64.AppImage, chmod +x, put it on PATH
+```
+
+```bash
+python build/build.py --platform linux --version 1.2.0
 ```
 Outputs:
-- `deployment/linux/WireTrace-v1.1.0-x86_64.AppImage`
-- `deployment/linux/wiretrace_1.1.0_amd64.deb`
+- `deployment/linux/WireTrace-v1.2.0-x86_64.AppImage` (or `.tar.gz` fallback)
+- `deployment/linux/wiretrace_1.2.0_amd64.deb`
+
+The build also writes `deployment/wiretrace-update.json` with a `linux`
+block (download URL, size, SHA-256) pointing at the AppImage.
+
+#### Linux auto-update
+
+In-app auto-update on Linux applies to the **AppImage**: when WireTrace
+runs as an AppImage it downloads the new image, replaces the running file
+(via the `APPIMAGE` path the runtime provides) and relaunches. A `.deb`
+install cannot be updated in place without root, so for `.deb`/source
+installs the updater opens the download for a manual install instead.
+Distribute the AppImage as the auto-updating artifact; the `.deb` is for
+manual/package installs.

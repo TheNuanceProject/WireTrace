@@ -12,10 +12,12 @@ This module does NOT touch: UI, serial, or logging.
 """
 
 import configparser
+import io
 import logging
 import os
 from typing import Any
 
+from app._atomic import atomic_write_text
 from app.constants import (
     DEFAULT_BAUD_RATE,
     DEFAULT_FONT_FAMILY,
@@ -179,15 +181,22 @@ class ConfigManager:
         self._load()
 
     def save(self) -> bool:
-        """Write current configuration to disk.
+        """Write current configuration to disk atomically.
+
+        Serialises the in-memory config to a string, then writes it via
+        ``atomic_write_text`` so an interrupted save (crash, power loss,
+        disk-full) can never leave ``preferences.ini`` empty or
+        truncated. The next launch therefore always sees either the
+        previous complete file or the new complete file.
 
         Returns:
             True if save succeeded, False otherwise.
         """
         try:
             os.makedirs(self._config_dir, exist_ok=True)
-            with open(self._config_path, "w", encoding="utf-8") as f:
-                self._config.write(f)
+            buffer = io.StringIO()
+            self._config.write(buffer)
+            atomic_write_text(self._config_path, buffer.getvalue(), encoding="utf-8")
             logger.info("Configuration saved to %s", self._config_path)
             return True
         except OSError as e:

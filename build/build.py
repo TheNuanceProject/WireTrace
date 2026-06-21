@@ -4,10 +4,13 @@
 Production build pipeline per spec section 13.
 
 Usage:
-    python build/build.py --platform windows --version 1.0.0
-    python build/build.py --platform macos   --version 1.0.0
-    python build/build.py --platform linux   --version 1.0.0
-    python build/build.py --platform all     --version 1.0.0
+    python build/build.py --platform windows
+    python build/build.py --platform macos
+    python build/build.py --platform linux
+    python build/build.py --platform all
+
+The version is read from version.py (APP_VERSION) by default; pass
+--version X.Y.Z to override it for a one-off build.
 
 Build steps:
     1. Validate environment (Python, Nuitka, platform tools)

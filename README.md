@@ -158,15 +158,17 @@ python main.py                          # run from source
 
 To build a distributable installer locally:
 
+The version is read from `version.py`; no version flag is needed.
+
 ```bash
 # Windows
-python build/build.py --platform windows --version 1.1.0
+python build/build.py --platform windows
 
 # macOS
-python build/build.py --platform macos --version 1.1.0
+python build/build.py --platform macos
 
 # Linux
-python build/build.py --platform linux --version 1.1.0
+python build/build.py --platform linux
 ```
 
 See [BUILD_GUIDE.md](./BUILD_GUIDE.md) for detailed prerequisites and

@@ -80,10 +80,13 @@ This runs the complete pipeline:
 5. Creates installer via Inno Setup
 6. Generates SHA-256 hashes and update JSON
 
-### Custom Version
+### Custom version
+
+The version is read from `version.py` by default. To build a one-off
+artifact with a different version string, pass `--version`:
 
 ```cmd
-python build/build.py --platform windows --version 1.0.1
+python build/build.py --platform windows --version 1.2.0
 ```
 
 ---
@@ -95,7 +98,7 @@ After a successful build:
 ```
 deployment/
 └── windows/
-    └── WireTrace-Setup-v1.1.0.exe    ← Installer
+    └── WireTrace-Setup-v1.2.0.exe    ← Installer
 ```
 
 The intermediate standalone directory is at:
@@ -162,7 +165,7 @@ Both modes create:
 If Inno Setup is not installed, the build script creates a portable ZIP instead:
 
 ```
-deployment/windows/WireTrace-v1.1.0-portable-win64.zip
+deployment/windows/WireTrace-v1.2.0-portable-win64.zip
 ```
 
 Extract anywhere and run `WireTrace.exe` directly. No installation needed.

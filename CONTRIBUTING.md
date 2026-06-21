@@ -52,9 +52,9 @@ agree on the approach before you write the code.
 
 - The code runs locally with `python main.py`
 - The build completes for your platform:
-  - Windows: `python build/build.py --platform windows --version 1.0.0`
-  - macOS: `python build/build.py --platform macos --version 1.0.0`
-  - Linux: `python build/build.py --platform linux --version 1.0.0`
+  - Windows: `python build/build.py --platform windows`
+  - macOS: `python build/build.py --platform macos`
+  - Linux: `python build/build.py --platform linux`
 - Tests and lints are green (see "Running tests" below)
 - No new runtime dependencies unless we've discussed it
 - Code style matches the surrounding file (PEP 8, type hints on

@@ -1,10 +1,248 @@
 # WireTrace Changelog
 
-All notable changes to this project follow [Semantic Versioning](https://semver.org/).
+Notable changes to WireTrace, by version. Versions follow
+[Semantic Versioning](https://semver.org/).
 
 ---
 
-## [1.2.0] — 2026-06-21
+## [2.0.0] - 2026-10-18
+
+The path from the serial port to the disk has been rebuilt, the
+interface redesigned, updates are verified by signature, and the
+licence has changed.
+
+### Licence
+
+- **WireTrace is now under the GNU General Public License, version 3
+  or later.** WireTrace stays free to use, study, change and share;
+  a version that is shared stays open source under the same licence.
+  Versions 1.0.0 to 1.2.0 remain under the MIT License.
+
+### Changed: data
+
+- **Reading, writing and drawing are separate.** The port is read on
+  its own thread and the log is written on another. A busy window or a
+  slow disk does not delay reading, and the log does not pass through
+  the window on its way to disk.
+- **Disconnect keeps the last lines.** On disconnect, an unplugged
+  device, or closing a tab or the application, the port is closed
+  first, the final partial line is taken, and everything waiting is
+  written and synced before the result is reported.
+- **Export saves the session, not the screen.** Every session is
+  recorded to a temporary file from the moment of connection, up to
+  1 GB a tab, so Export works without a log running and includes lines
+  the console no longer holds. Clear sets where the next export
+  starts. The export runs in the background, and a session can still
+  be exported after its device has disconnected. The recording is
+  removed when the tab closes or connects again.
+- **One timestamp per line.** A line is stamped once, when it is read,
+  and the console, the log, the CSV and the plot all use that stamp.
+- **CSV rows are chosen by content.** A line becomes a row because it
+  carries the detected columns, not because of its severity tag.
+  Detection retries as data arrives, so a boot log before the readings
+  does not force raw mode, provided the readings begin within the
+  first 200 lines. Negative numbers are written as numbers.
+- **A log always has its text file.** The choice when starting a log
+  is Text, or Text and CSV; a CSV is not written alone.
+- **Blank lines are kept.** A preference hides them in the console
+  only.
+- **Console memory is bounded.** The console holds the most recent
+  lines up to its limit, counted in lines and in characters. When a
+  device outpaces the display, the console skips ahead and says how
+  many lines it skipped; they are still recorded and logged.
+- **HEX mode rebuilt.** Bytes are shown and recorded as `hexdump -C`
+  lays them out: the offset, sixteen bytes in two groups of eight, and
+  the printable characters between bars. On screen the offset, the bars
+  and the dots for unprintable bytes are drawn quieter than the bytes.
+- **Log files end lines with LF on every system.** On Windows they
+  ended with CR LF. A preference restores CR LF.
+
+### Changed: interface
+
+- **The interface has been redesigned.** A new tab opens on a list of
+  serial ports that updates by itself. Each tab has its own toolbar,
+  level buttons with counts, command row and status bar.
+- **Menus are arranged by task:** File, Edit, View, Device, Help.
+  Themes moved to View > Theme.
+- **Keyboard shortcuts changed.** Ctrl+S opens Export session; it was
+  Quick Save. Ctrl+E is not used. The live plot is Ctrl+P; it was
+  Ctrl+Shift+P. New: Ctrl+Shift+C copies without timestamps, Ctrl+A
+  selects all, F5 refreshes the ports, F2 renames the tab, and Ctrl+1
+  to Ctrl+9 fetch saved commands. Help > Keyboard shortcuts lists
+  them all.
+- **Themes are Light, Dark and System.** System follows your computer
+  and is the default. On Windows, the title bar of every window follows
+  the theme chosen, at once.
+- **One design with thenuanceproject.com.** WireTrace follows the
+  Nuance Design Language: its colours, sizes and type come from the
+  same design tokens as the website. Interface text is Poppins, which
+  comes with WireTrace, at one scale of sizes in pixels, so the
+  interface looks the same on Windows, Linux and macOS and follows the
+  display's scaling; menus, lists and tooltips use it too, and every
+  system draws its letters as the font draws them. The WireTrace mark
+  is drawn in the Nuance accent. Outlines of fields and buttons are
+  firmer (3:1), meta text and links meet 4.5:1, the keyboard focus is a
+  visible ring, and the icons are Lucide's.
+- **A window is never smaller than its content needs,** so no text is
+  cut off at any display scale.
+- **The console font is JetBrains Mono, which comes with WireTrace,**
+  with its joined symbols switched off, so a pair such as `->` or `!=`
+  shows as the two characters the device sent. Its size is in pixels,
+  from 12 to 40; it starts at 13.
+- **On the first start after updating from 1.x, the theme is set to
+  System and the console font and its size to the 2.0 defaults, once.**
+  Every other setting is kept.
+- **Messages work one way.** A short message says that something
+  finished, a bar at the top of the tab reports a problem until it is
+  over, and a dialog appears only when a decision is needed.
+- **After a lost connection the tab keeps its lines** and offers to
+  connect again, export the session and open the log folder.
+- **Preferences are arranged in pages** and have Restore defaults.
+  New: log folder, maximum log file size, line endings in files, hide blank
+  lines.
+- **The plot has a list of values with latest, least, greatest and
+  average,** in place of the legend.
+- **Point at the plot to read it.** A line marks the nearest sample, a
+  dot each value, and a card gives the time it was received and each
+  value then.
+- **The plot has a close button** at the right end of its toolbar.
+- **The user guide has been rewritten** and is filled in from the
+  program, so its shortcuts, limits and folders are those of the
+  version you run.
+
+### Changed: updates
+
+- **Updates are verified by signature.** A new version is accepted
+  only if its description carries a valid signature, and a download
+  is used only if it is exactly the file
+  that description names. The download address is built by WireTrace
+  itself.
+- **Checks continue while WireTrace stays open**, every 12 hours.
+  A new version is announced by a message and never interrupts a
+  session. Skip and Remind later are remembered across restarts.
+- **An update check states one more thing:** the day of the previous
+  check, as the website named it. It is the same for everyone who
+  checked that day, so installations can be counted without
+  identifying anyone. As before, a check states the WireTrace version,
+  the operating system, the processor type and how WireTrace was
+  installed. See the privacy policy.
+- **A `.deb` or source install is sent to the release page** instead
+  of being offered a download it cannot install.
+- **Downloaded updates are kept in WireTrace's own cache folder,** not
+  the system's temporary folder.
+- **The Windows installer** shows the privacy statement, offers the
+  update check as an option, and on uninstalling removes working files
+  and leaves settings and logs.
+
+### Added
+
+- **Usage statistics, if you choose to share them.** Off unless
+  switched on. WireTrace asks once, with a bar that blocks nothing, and
+  the setting is in Preferences, under Updates and privacy. Switching
+  them on makes a random installation identifier. A report for each day
+  of use says which features were used, whether lines were lost, a log
+  could not be written, a connection was lost or WireTrace closed
+  unexpectedly, and, as ranges, the busiest line rate, the connections,
+  the longest time a window stayed open and the starts; never anything
+  a device sent. Notes are kept on disk as they happen, so a sudden
+  close loses nothing, several open windows share them safely, and
+  reports are never sent while WireTrace closes. Switching statistics
+  off deletes everything kept on the computer and asks the server to
+  delete every report sent. The privacy policy lists every value.
+- **Several WireTrace windows can be open at once** without one losing
+  what another saved: preferences are written under a lock, after
+  reading what the others wrote.
+- **Maximum log file size.** A log that reaches the size set in
+  Preferences (100 MB by default; Off keeps one file) continues in a
+  new file, numbered `_002`, `_003` and so on, so long captures stay
+  easy to open. A line is never cut, each file has its own header, and
+  while the limit is on a CSV file also ends at 1,000,000 rows.
+- **Firmware log levels.** ESP-IDF (`E (123) tag:`), Zephyr (`<err>`)
+  and bracketed (`[ERROR]`) level markers decide a line's severity
+  before the keyword search.
+- **Loss is never silent.** If the disk cannot keep up or fails, the
+  number of lines not written is reported and marked in the file at the
+  place they would have been.
+- **Saved commands.** Up to 20, the first nine on Ctrl+1 to Ctrl+9.
+- **Line ending for commands:** None, LF, CR or CR LF.
+- **The log folder is remembered.** A log is offered the folder the
+  previous log was started in, in every tab.
+- **Each port remembers** its baud rate, line ending, plot profile and
+  tab name.
+- **Tabs can be renamed** (F2 or double-click).
+- **Filter by level** with one click, with a count on each level.
+- **Copy without timestamps, and Export selection,** from the console
+  menu.
+- **Plot: Measure,** two cursors that stop on samples and hold the
+  plot still, with a table of A, B and B minus A: the time between them
+  and the change in each value. **Panels by scale**, and **Pop out**
+  into a window of its own.
+- **Help > Report a problem** and **About > Third-party licences**.
+
+### Removed
+
+- **Quick Save.** Export session (Ctrl+S) takes its place.
+- **CSV-only logs.** A log always has its text file.
+- **The macOS build and the `--platform` option of `build/build.py`.**
+  A build is made on the system it is for; macOS runs from source.
+
+### Fixed
+
+- Existing log files are never overwritten; a clashing name gets a
+  numbered suffix.
+- Bytes that are not valid UTF-8 are shown as `\xNN` rather than
+  replaced.
+- Leading and trailing spaces of a line are kept, so indented output
+  reads as the device sent it.
+- Preferences containing a `%` character load correctly.
+- A very long line with no separators does not stall CSV logging or
+  freeze the plot.
+- Cursor, private-mode and window-title escape sequences are removed
+  like colour codes, instead of appearing as text.
+- A CSV column name containing a comma or starting with `=` is escaped
+  like a value, and a key repeated on one line gives one column.
+- Search results stay correct after the console is drawn again or
+  cleared.
+- With a filter active, the console does not show lines it has
+  already let go of.
+
+### Security
+
+- Text that comes from a device, a port's description or the update
+  server is always shown as plain text, never read as markup.
+- Control characters, Unicode line separators and direction overrides
+  in received data are written as escapes in the console and in logs.
+- Memory stays bounded when a device sends very long lines or a
+  stream without line breaks.
+- A plot pattern that keeps running out of time stops plotting and
+  says so, instead of holding up the window.
+- The download is checked against the signed description again at the
+  moment it is installed.
+- An AppImage is replaced only when WireTrace really runs from it.
+- The recording of a session, and the settings file, are readable by
+  their owner only.
+- A damaged settings file cannot stop WireTrace from starting.
+
+### Building and development
+
+- **Releases are built by a workflow**, with Python 3.12, from
+  dependencies pinned by hash, and come with checksums, a bill of
+  materials, a build provenance attestation and the licence texts of
+  everything they contain.
+- **Linux builds run on older systems.** They are built on Ubuntu
+  22.04 and refuse to need a C library newer than glibc 2.35.
+- New runtime dependency: `cryptography`, to verify signatures.
+- A second test suite, `tests_gui/`, runs the real interface on Linux,
+  Windows and macOS.
+- Added a Code of Conduct, issue forms and private vulnerability
+  reporting.
+- The repository shows a Sponsor button, for GitHub Sponsors, and
+  Help > About has a Support button that opens the same page.
+  Sponsoring is optional; WireTrace never asks for it on its own.
+
+---
+
+## [1.2.0] - 2026-06-21
 
 Maintenance release. Hardens data durability, fixes disconnect handling
 on Linux and a plot-pattern hang, and corrects window restore after a
@@ -27,7 +265,7 @@ no file-format breaks, no user action required to upgrade.
   disk log, the CSV export, and the plot parsers all receive plain
   text. Colour-wrapped numbers now parse for plotting, and a line that
   was only escape codes (such as a clear-screen sequence) is dropped
-  rather than logged as noise. Stripping only — terminal rendering
+  rather than logged as noise. Stripping only: terminal rendering
   remains out of scope. Affects v1.0.0 and v1.1.0.
 - **CSV exports hardened against formula injection.** Exported values
   whose first character is one a spreadsheet treats as a formula start
@@ -82,14 +320,14 @@ no file-format breaks, no user action required to upgrade.
   previously shipped just the launcher executable renamed to
   `.AppImage`, leaving behind the Qt libraries (including shiboken6) and
   every other dependency, so it could not start. The build now packages
-  the complete application into the AppImage — or, if the AppImage tool
-  is unavailable, a tarball of the full directory — so the artifact runs
+  the complete application into the AppImage (or, if the AppImage tool
+  is unavailable, a tarball of the full directory), so the artifact runs
   on its own. Affects v1.1.0.
 - **The tab now updates when a device drops on its own.** When a device
   was unplugged or the connection was lost, the port was released and the
   status bar said "Disconnected," but the tab's controls stayed in the
   connected state (the Disconnect button and port field looked live). Any
-  disconnect — clicking Disconnect, an unplug, or a connection error — now
+  disconnect (clicking Disconnect, an unplug, or a connection error) now
   flows through one path that resets the tab and, for an unexpected drop,
   shows a clear notice. Affects v1.0.0 and v1.1.0.
 - **Linux in-app updates now install.** On Linux the updater previously
@@ -114,23 +352,23 @@ no file-format breaks, no user action required to upgrade.
 
 ---
 
-## [1.1.0] — 2026-05-24
+## [1.1.0] - 2026-05-29
 
 First feature release after v1.0.0. Adds the live data plotter,
 manual plot configuration with named profiles, two data-protection
 fixes, and parser improvements. Fully backwards-compatible: no API
 breaks, no file-format breaks, no user action required to upgrade.
 
-### Added — Live data plotter
+### Added: Live data plotter
 
 - **Docked plot panel** beneath the console. Auto-detects three
-  structured formats — JSON object lines, `key:value` pairs,
+  structured formats: JSON object lines, `key:value` pairs,
   positional values with auto-detected delimiter (comma, tab,
   semicolon, pipe, whitespace).
 - **`plt:` / `plt0:` / `plt1:` prefix routing** for selectively
   plotting only tagged lines, and `plt!Name1,Name2,…` for explicit
   column naming.
-- **Frequency-based detection** — a column must appear in ≥70% of
+- **Frequency-based detection**: a column must appear in ≥70% of
   matching sample lines, so boot banners, debug spam, and stray
   colons no longer corrupt detection.
 - **Per-column ring buffer**, 10 000 samples × up to 8 traces, on
@@ -145,7 +383,7 @@ breaks, no file-format breaks, no user action required to upgrade.
   illegible). Switching themes mid-session retints traces, chrome,
   and legend without data loss.
 
-### Added — Manual plot configuration
+### Added: Manual plot configuration
 
 - **`View → Configure Plot…`** dialog (also reachable from the plot
   toolbar's **Configure…** button, the **`[ Configure manually… ]`**
@@ -160,7 +398,7 @@ breaks, no file-format breaks, no user action required to upgrade.
   numeric value you want to plot, name it; the dialog scaffolds the
   regex for you. No need to hand-write regex unless you want to.
 - **Tiered Test result**: Green (matched recent lines), Amber
-  (pattern valid but no current matches — firmware may simply be
+  (pattern valid but no current matches: firmware may simply be
   quiet), Red (structurally broken). Apply is enabled for Green or
   Amber, disabled for Red. No "broken" UX state.
 - **Named profiles**: save, rename, delete, set as default.
@@ -170,7 +408,7 @@ breaks, no file-format breaks, no user action required to upgrade.
   reconnection so engineers don't have to re-enter their config
   every session.
 
-### Changed — Data protection
+### Changed: Data protection
 
 - **fsync ordering on log stop.** `stop_logging()` now flushes →
   finalises CSV → fsyncs → closes. Previously the fsync happened
@@ -183,7 +421,7 @@ breaks, no file-format breaks, no user action required to upgrade.
   is now bounded to 30 s of in-flight buffer, instead of the
   entire session.
 
-### Changed — Tag detector & CSV
+### Changed: Tag detector & CSV
 
 - Tag detector uses word-boundary regex per severity to eliminate
   false positives like *"default"* matching *"fault"*.
@@ -193,7 +431,7 @@ breaks, no file-format breaks, no user action required to upgrade.
 
 ### Fixed
 
-- **Status bar metrics reset on disconnect** — port, baud, data rate,
+- **Status bar metrics reset on disconnect**: port, baud, data rate,
   and line count no longer show stale values from the previous
   session. This affected v1.0.0 too; the bar now clears cleanly when
   a device disconnects, regardless of how the disconnect happened
@@ -205,7 +443,7 @@ breaks, no file-format breaks, no user action required to upgrade.
   area and per-axis, right-click context menu, legend click-to-
   toggle (each legend entry's coloured sample toggles that trace's
   visibility), splitter handle resize, and the Window dropdown's
-  view-filter semantics. No popups, no first-run tour — quiet
+  view-filter semantics. No popups, no first-run tour: quiet
   hover hints on the controls where the affordance isn't obvious.
 - **User Guide rewritten and expanded** for v1.1.0. Covers the live
   plotter, manual configuration, the capture-from-sample assistant,
@@ -245,7 +483,7 @@ breaks, no file-format breaks, no user action required to upgrade.
 
 ---
 
-## [1.0.0] — 2026-04-15
+## [1.0.0] - 2026-04-15
 
 Initial public release of WireTrace. Multi-device serial monitor
 with buffered logging, structured CSV export, search and live

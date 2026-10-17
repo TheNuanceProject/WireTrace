@@ -1,7 +1,7 @@
 # WireTrace Development Dependencies
 #
 # Tools used to test, lint, and verify WireTrace during development
-# and CI. NOT needed for end users running the application — see
+# and CI. NOT needed for end users running the application: see
 # requirements.txt for the runtime set.
 #
 # Install with:

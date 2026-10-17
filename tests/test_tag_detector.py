@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for the severity-based tag detector.
 
 The detector runs on every serial line, so correctness and priority
@@ -67,6 +67,14 @@ class TestPriorityOrder:
         assert TagDetector.detect("debug: device connected") == "INFO"
 
 
+    @pytest.mark.parametrize(
+        "message",
+        ["link ok, then a fatal error", "fatal error after link ok"],
+    )
+    def test_most_severe_keyword_wins_wherever_it_stands(self, message):
+        assert TagDetector.detect(message) == "CRITICAL"
+
+
 class TestCaseInsensitive:
     """Keyword matching ignores case."""
 
@@ -76,7 +84,7 @@ class TestCaseInsensitive:
 
 
 class TestFallback:
-    """Lines with no severity keyword fall back to DATA (or COMMAND)."""
+    """Lines with no severity keyword fall back to DATA."""
 
     def test_plain_data_line(self):
         assert TagDetector.detect("Temperature: 25.3C") == "DATA"
@@ -84,33 +92,22 @@ class TestFallback:
     def test_empty_string(self):
         assert TagDetector.detect("") == "DATA"
 
-    def test_explicit_command_type(self):
-        # data_type="COMMAND" returns immediately — keywords irrelevant.
-        assert (
-            TagDetector.detect("ERROR: this is actually a command", "COMMAND")
-            == "COMMAND"
-        )
-
 
 class TestWordBoundaryFalsePositives:
-    """Substring-inside-word fix: keywords embedded mid-word do NOT match.
+    """Keywords embedded in the middle of a word do not match.
 
-    The earlier ``kw in message`` matching incorrectly classified data
-    lines whose words happened to contain a severity keyword as an
-    embedded substring (e.g. "fault" inside "default", "ok" inside
-    "token"). The word-boundary fix anchors keyword matching to a left
-    word boundary, eliminating this class of false positive.
+    Matching is anchored to a left word boundary, so "fault" inside
+    "default" and "ok" inside "token" do not classify a line.
 
-    Note: keywords appearing as a *prefix* of a longer word (e.g. "info"
-    in "InfoLog", "fault" in "fault-tolerant") still match — this is
-    intentional and matches the spirit of the original design where
-    "fail" must continue to match "failed"/"failing".
+    A keyword at the start of a longer word (for example "info" in
+    "InfoLog", "fault" in "fault-tolerant") still matches. That is
+    intended: "fail" must go on matching "failed" and "failing".
     """
 
     @pytest.mark.parametrize(
         ("message", "expected"),
         [
-            # The headline case from the audit: "fault" inside "Default"
+            # "fault" inside "Default"
             ("Default: 100, Override: 50", "DATA"),
             ("Default value: 42", "DATA"),
             # "ok" embedded mid-word in common English words
@@ -144,17 +141,12 @@ class TestMorphologicalVariants:
             ("warnings present", "WARNING"),
             # "info" stem (rare prefix usage; kept consistent)
             ("InfoLog ready", "INFO"),
-            # The "informational" case was an explicit Help-Guide
-            # vs code mismatch flagged in the v1.1.0 claim audit.
-            # The detector intentionally classifies this as INFO
-            # because the same left-boundary rule lets "failed" and
-            # "warning" match correctly. The Help Guide was rewritten
-            # to document this accurately; this test pins the
-            # behaviour so future detector changes don't regress.
+            # "informational" is INFO by design: the left-boundary rule
+            # that lets "failed" and "warning" match applies here too.
             ("informational note", "INFO"),
             ("information available", "INFO"),
             # "connected" keyword (note: full word "connected", not
-            # stem "connect", so "connection" does not match — this
+            # stem "connect", so "connection" does not match: this
             # is intentional)
             ("connected to WiFi", "INFO"),
             ("connected successfully", "INFO"),
@@ -192,13 +184,11 @@ class TestRemainingAmbiguities:
     in structured serial data: "Fail" as a counter label, "ok" as a
     status value, "Trace" as an analytical-chemistry data label,
     "connected" / "complete" as status fields. Tagging these as severity
-    is a cosmetic miscolouring in the console — the data is still
-    written to disk completely, and the CSV detection layer's tag-aware
-    sampling tolerates them.
+    only colours the line in the console: the data is still written to
+    disk completely, and CSV rows are chosen by content, never by tag.
 
-    These tests pin the *current* behaviour. They exist so that any
-    future change to the classifier (e.g. context-aware tagging) is a
-    deliberate decision, not an accidental regression.
+    These tests hold the behaviour as it is, so that a change to the
+    classifier is a deliberate decision.
     """
 
     @pytest.mark.parametrize(
@@ -215,3 +205,66 @@ class TestRemainingAmbiguities:
         self, message, tag_assigned,
     ):
         assert TagDetector.detect(message) == tag_assigned
+
+
+class TestFirmwareLevelMarkers:
+    """An explicit level marker printed by the firmware decides the tag."""
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("E (1234) wifi: connect to the AP fail", "ERROR"),
+            ("W (300) spi_flash: detected chip size mismatch", "WARNING"),
+            ("I (5012) main: no error found", "INFO"),
+            ("D (77) nvs: nvs_open_from_partition", "DEBUG"),
+            ("V (78) intr_alloc: failed lookup", "DEBUG"),
+            ("[00:00:01.234,000] <err> net_core: packet dropped", "ERROR"),
+            ("[00:00:02.000,000] <wrn> bt_hci: fault recovered", "WARNING"),
+            ("[00:00:03.100,000] <inf> app: fatal flag cleared", "INFO"),
+            ("[00:00:04.200,000] <dbg> sensor: warning threshold 3", "DEBUG"),
+            ("[ERROR] sensor timeout", "ERROR"),
+            ("[warn] retrying", "WARNING"),
+            ("2026-01-02 10:00:00 [INFO] error count: 0", "INFO"),
+            ("[FATAL] stack overflow", "CRITICAL"),
+            ("[TRACE] entering loop", "DEBUG"),
+        ],
+    )
+    def test_marker_decides_the_tag(self, message, expected):
+        assert TagDetector.detect(message) == expected
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "E 1234 not an esp-idf line",
+            "I(12) missing space",
+            "values <error> in angle brackets",
+            "[ERRORS] plural is not a level",
+        ],
+    )
+    def test_near_misses_fall_through_to_keywords_or_data(self, message):
+        marker = TagDetector._tag_from_level_marker(message)
+        assert marker is None
+
+    def test_line_without_marker_or_keyword_is_data(self):
+        assert TagDetector.detect("RPM: 1465, Current: 2.45") == "DATA"
+
+
+
+class TestLettersOutsideAscii:
+    """Case-insensitive matching treats a few non-ASCII letters as their
+    ASCII counterparts (dotted and dotless i, long s). Such a line must
+    be classified like any other, never rejected."""
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("SENSOR FA\u0130L", "ERROR"),
+            ("sensor fa\u0131l", "ERROR"),
+            ("cra\u017fh in task", "CRITICAL"),
+            ("\u0130NFO boot", "INFO"),
+            ("d\u00e9marrage termin\u00e9", "DATA"),
+            ("\u6e29\u5ea6: 21.5", "DATA"),
+        ],
+    )
+    def test_line_is_classified(self, message, expected):
+        assert TagDetector.detect(message) == expected

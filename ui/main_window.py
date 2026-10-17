@@ -1,31 +1,44 @@
-# SPDX-License-Identifier: MIT
-"""WireTrace main window — tab host, menu bar, welcome state, global shortcuts.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""WireTrace main window: the tabs and the menus.
 
-Per spec sections 3.4, 6.1-6.8:
-  - Hosts DeviceTabs in a QTabWidget
-  - Shows welcome state when no tabs are open
-  - Full menu structure (File, View, Themes, Help)
-  - Global keyboard shortcuts
-  - Theme switching
-  - Window state save/restore
+Responsibilities:
+  - One tab per device, each with a status dot and a name that can be
+    changed in place
+  - Menus organised by task (File, Edit, View, Device, Help); every
+    shortcut comes from ``ui.shortcuts``
+  - Keeping the menus in step with the tab in front
+  - Saving and restoring the window's place on screen
+  - An orderly shutdown of every tab on exit
 
-Does NOT perform serial I/O or file I/O directly.
+This module does not touch serial I/O or log files.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QDesktopServices,
+    QGuiApplication,
+    QKeySequence,
+    QMouseEvent,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import (
-    QLabel,
+    QApplication,
+    QComboBox,
+    QLineEdit,
     QMainWindow,
     QMenu,
-    QMessageBox,
-    QPushButton,
-    QStackedWidget,
+    QTabBar,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -36,665 +49,888 @@ from app.constants import (
     FONT_SIZE_MAX,
     FONT_SIZE_MIN,
     FONT_SIZE_STEP,
-    ThemeID,
+    PORT_TAB_NAME_MAX,
+    SAVED_COMMAND_SHORTCUTS,
+    UPDATE_SNOOZE_HOURS,
+    USAGE_QUESTION_MAX_SHOWINGS,
+    DisplayMode,
     TimestampMode,
 )
-from ui.device_tab import DeviceTab
-from ui.themes.theme_manager import ThemeManager
+from core.device_pipeline import TransportFactory
+from core.transport import open_serial_transport
+from ui import shortcuts
+from ui.device_tab import NEW_TAB_TITLE, DeviceTab
+from ui.dialogs.messages import confirm, tell
+from ui.formatting import format_count
+from ui.themes import tokens
+from ui.themes.icons import bind_icon
+from ui.themes.theme_manager import ThemeManager, normalise_preference
+from ui.widgets import banner as banners
+from ui.widgets.banner import BannerAction, BannerArea
+from ui.widgets.button import Button
+from ui.widgets.command_bar import LINE_ENDING_NAMES
+from ui.widgets.least_size import keep_least_size
+from ui.widgets.status_dot import state_icon
+from ui.widgets.styling import plain_tooltip, set_compact
 from ui.widgets.toast import Toast
 from ui.window_geometry import visible_geometry
-from version import APP_DESCRIPTION, WINDOW_TITLE
+from updater.install import UpdateApplyError, launch_update, prepare_update
+from updater.manifest import PlatformRelease, ReleaseManifest
+from updater.update_dialog import UpdateAnswer, UpdateDialog
+from updater.update_manager import UpdateManager
+from updater.usage import Feature, Problem, UsageStatistics
+from version import APP_ISSUES_URL, APP_NAME, APP_PRIVACY_URL, APP_VERSION, WINDOW_TITLE
 
 logger = logging.getLogger(__name__)
 
+#: The key of the bar that asks about usage statistics.
+_BANNER_USAGE = "usage"
+
+
+class TabBar(QTabBar):
+    """Tab bar with a New tab button after the last tab and renaming in place.
+
+    Signals:
+        new_tab_requested():  The New tab button was pressed.
+        renamed(int, str):  A tab was given a new name.
+    """
+
+    new_tab_requested = Signal()
+    renamed = Signal(int, str)
+
+    def __init__(self, parent: QTabWidget | None = None) -> None:
+        super().__init__(parent)
+        metrics = tokens.METRICS
+
+        self._add = Button(parent=self, compact=True)
+        self._add.setObjectName("flatIconButton")
+        self._add.setToolTip(shortcuts.with_keys("New tab", "new_tab"))
+        self._add.setAccessibleName("New tab")
+        bind_icon(self._add, "add_tab", "text_secondary")
+        self._add.clicked.connect(self.new_tab_requested)
+
+        self._editor = QLineEdit(self)
+        self._editor.setObjectName("tabNameEditor")
+        set_compact(self._editor)
+        self._editor.setMaxLength(PORT_TAB_NAME_MAX)
+        self._editor.setPlaceholderText("Tab name")
+        self._editor.setToolTip("Enter to rename, Esc to cancel")
+        self._editor.setAccessibleName("Tab name")
+        self._editor.hide()
+        self._editor.installEventFilter(self)
+        self._editing = -1
+
+        # Set last: each of these makes Qt lay the tabs out, which
+        # places the button created above.
+        self.setExpanding(False)
+        self.setDrawBase(False)
+        self.setElideMode(Qt.TextElideMode.ElideRight)
+        self.setIconSize(QSize(metrics.status_dot, metrics.status_dot))
+
+    # ── New tab button ───────────────────────────────────────────────────
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(hint.width() + self._add.width() + 2 * tokens.METRICS.space_2, hint.height())
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(hint.width() + self._add.width() + 2 * tokens.METRICS.space_2, hint.height())
+
+    def tabLayoutChange(self) -> None:
+        super().tabLayoutChange()
+        self._place_add_button()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._place_add_button()
+
+    def _place_add_button(self) -> None:
+        """Put the button after the last tab, inside the bar."""
+        space = tokens.METRICS.space_2
+        left = self.tabRect(self.count() - 1).right() + space if self.count() else space
+        # When there are more tabs than fit, Qt shows two scroll arrows
+        # at the end of the bar; the button goes just before them.
+        limit = self.width()
+        for arrow in self.findChildren(QToolButton):
+            if arrow.isVisible():
+                limit = min(limit, arrow.x())
+        left = max(space, min(left, limit - self._add.width() - space))
+        self._add.move(left, (self.height() - self._add.height()) // 2)
+        self._add.raise_()
+
+    # ── Renaming ─────────────────────────────────────────────────────────
+
+    @property
+    def editing(self) -> bool:
+        return self._editing >= 0
+
+    def start_rename(self, index: int, current_name: str) -> None:
+        """Put a text box over tab ``index`` holding its name."""
+        if not 0 <= index < self.count():
+            return
+        self.finish_rename(keep=False)
+        space = tokens.METRICS.space_1
+        self._editing = index
+        self._editor.setGeometry(self.tabRect(index).adjusted(space, space, -space, -space))
+        self._editor.setText(current_name)
+        self._editor.selectAll()
+        self._editor.show()
+        self._editor.raise_()
+        self._editor.setFocus()
+
+    def finish_rename(self, *, keep: bool) -> None:
+        index, self._editing = self._editing, -1
+        if index < 0:
+            return
+        self._editor.hide()
+        if keep:
+            self.renamed.emit(index, self._editor.text().strip())
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._editor and self.editing:
+            kind = event.type()
+            if kind == QEvent.Type.ShortcutOverride:
+                # Esc is also a shortcut of the window. While a name is
+                # being typed it belongs to the text box.
+                if event.key() == Qt.Key.Key_Escape:
+                    event.accept()
+                    return True
+            elif kind == QEvent.Type.KeyPress:
+                if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self.finish_rename(keep=True)
+                    return True
+                if event.key() == Qt.Key.Key_Escape:
+                    self.finish_rename(keep=False)
+                    return True
+            elif kind == QEvent.Type.FocusOut:
+                self.finish_rename(keep=True)
+        return super().eventFilter(watched, event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        index = self.tabAt(event.position().toPoint())
+        if index >= 0 and event.button() == Qt.MouseButton.LeftButton:
+            self.parent().rename_requested.emit(index)
+        else:
+            super().mouseDoubleClickEvent(event)
+
+
+class TabWidget(QTabWidget):
+    """The tabs of the main window, using ``TabBar``."""
+
+    rename_requested = Signal(int)
+
+    def __init__(self, parent: QMainWindow | None = None) -> None:
+        super().__init__(parent)
+        self.bar = TabBar(self)
+        self.setTabBar(self.bar)
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+
 
 class MainWindow(QMainWindow):
-    """WireTrace main window with tabbed device interface."""
+    """The WireTrace window: device tabs under a menu bar."""
 
     def __init__(
         self,
         config: ConfigManager,
         theme_manager: ThemeManager,
-        parent=None,
+        parent: QMainWindow | None = None,
+        transport_factory: TransportFactory = open_serial_transport,
+        updates: UpdateManager | None = None,
+        usage: UsageStatistics | None = None,
     ) -> None:
         super().__init__(parent)
-
         self._config = config
         self._theme_manager = theme_manager
+        self._transport_factory = transport_factory
+        self._updates = updates if updates is not None else UpdateManager(config, self)
+        self._updates.update_available.connect(self._on_update_available)
+        self._updates.up_to_date.connect(
+            lambda: self._notify(Toast.success, f"{APP_NAME} {APP_VERSION} is the latest version")
+        )
+        self._updates.check_failed.connect(self._on_update_check_failed)
+        self._usage = usage if usage is not None else UsageStatistics(config, self)
+        self._exit_confirmed = False
 
         self.setWindowTitle(WINDOW_TITLE)
-        self.setMinimumSize(800, 600)
+        keep_least_size(self, tokens.METRICS.window_min_width, tokens.METRICS.window_min_height)
 
-        self._setup_central_widget()
-        self._setup_menu_bar()
-        self._setup_shortcuts()
-        self._setup_status_bar()
+        self._setup_tabs()
+        self._setup_menus()
         self._restore_window_state()
 
-        # Show welcome state initially
-        self._update_view()
+        self._theme_manager.theme_changed.connect(self._refresh_tab_icons)
+        self.new_tab()
 
-    # ══════════════════════════════════════════════════════════════════════
-    # CENTRAL WIDGET
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Tabs ─────────────────────────────────────────────────────────────
 
-    def _setup_central_widget(self) -> None:
-        """Stacked widget: welcome page (page 0) or tab widget (page 1)."""
-        self._stacked = QStackedWidget()
-        self.setCentralWidget(self._stacked)
+    def _setup_tabs(self) -> None:
+        self._tabs = TabWidget(self)
+        self._tabs.tabCloseRequested.connect(self.close_tab)
+        self._tabs.currentChanged.connect(self._on_current_tab_changed)
+        self._tabs.rename_requested.connect(self.rename_tab)
+        bar = self._tabs.bar
+        bar.new_tab_requested.connect(self.new_tab)
+        bar.renamed.connect(self._on_tab_renamed)
+        bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        bar.customContextMenuRequested.connect(self._show_tab_menu)
 
-        # Page 0: Welcome state (spec section 6.1)
-        self._welcome_page = self._create_welcome_page()
-        self._stacked.addWidget(self._welcome_page)
+        # Messages that concern the whole window sit above the tabs.
+        self._window_banners = BannerArea()
+        central = QWidget(self)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._window_banners)
+        layout.addWidget(self._tabs, 1)
+        self.setCentralWidget(central)
 
-        # Page 1: Tab widget
-        self._tab_widget = QTabWidget()
-        self._tab_widget.setTabsClosable(True)
-        self._tab_widget.setMovable(True)
-        self._tab_widget.tabCloseRequested.connect(self._close_tab)
-        self._tab_widget.currentChanged.connect(self._on_tab_changed)
-        self._tab_widget.tabBar().setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu
-        )
-        self._tab_widget.tabBar().customContextMenuRequested.connect(
-            self._on_tab_context_menu
-        )
-        self._stacked.addWidget(self._tab_widget)
+    def tabs(self) -> list[DeviceTab]:
+        """Every tab, left to right.
 
-        # "+" button in tab bar corner
-        add_btn = QPushButton("+")
-        add_btn.setObjectName("addTabBtn")
-        add_btn.setToolTip("New Tab (Ctrl+T)")
-        add_btn.setFixedSize(28, 28)
-        add_btn.clicked.connect(self._on_new_tab)
-        self._tab_widget.setCornerWidget(add_btn, Qt.Corner.TopLeftCorner)
-
-    def _create_welcome_page(self) -> QWidget:
-        """Welcome / first-launch page per spec section 6.1."""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setSpacing(16)
-
-        title = QLabel("Welcome to WireTrace")
-        title_font = QFont()
-        title_font.setPointSize(20)
-        title_font.setWeight(QFont.Weight.DemiBold)
-        title.setFont(title_font)
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        subtitle = QLabel(APP_DESCRIPTION)
-        subtitle.setProperty("secondary", True)
-        sub_font = QFont()
-        sub_font.setPointSize(13)
-        subtitle.setFont(sub_font)
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        connect_btn = QPushButton("  +  Connect a Device  ")
-        connect_btn.setObjectName("welcomeConnectBtn")
-        connect_btn.setMinimumSize(QSize(220, 44))
-        btn_font = QFont()
-        btn_font.setPointSize(13)
-        connect_btn.setFont(btn_font)
-        connect_btn.clicked.connect(self._on_new_tab)
-
-        hint = QLabel("Select a serial port to start monitoring")
-        hint.setProperty("secondary", True)
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        layout.addStretch(2)
-
-        # App icon (64x64, per spec section 6.1)
-        from app.icon_loader import app_icon_pixmap
-        pix = app_icon_pixmap(64)
-        if not pix.isNull():
-            icon_label = QLabel()
-            icon_label.setPixmap(pix)
-            icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(icon_label)
-            layout.addSpacing(12)
-
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-        layout.addSpacing(24)
-        layout.addWidget(connect_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addSpacing(8)
-        layout.addWidget(hint)
-        layout.addStretch(3)
-
-        return page
-
-    def _update_view(self) -> None:
-        """Switch between welcome page and tab widget."""
-        if self._tab_widget.count() == 0:
-            self._stacked.setCurrentWidget(self._welcome_page)
-            self.setWindowTitle(WINDOW_TITLE)
-        else:
-            self._stacked.setCurrentWidget(self._tab_widget)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # MENU BAR (spec section 6.7)
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _setup_menu_bar(self) -> None:
-        menu_bar = self.menuBar()
-
-        # ── File ──
-        file_menu = menu_bar.addMenu("&File")
-
-        self._act_new_tab = file_menu.addAction("New Tab")
-        self._act_new_tab.setShortcut(QKeySequence("Ctrl+T"))
-        self._act_new_tab.triggered.connect(self._on_new_tab)
-
-        self._act_close_tab = file_menu.addAction("Close Tab")
-        self._act_close_tab.setShortcut(QKeySequence("Ctrl+W"))
-        self._act_close_tab.triggered.connect(self._on_close_current_tab)
-
-        file_menu.addSeparator()
-
-        self._act_new_log = file_menu.addAction("New Log")
-        self._act_new_log.setShortcut(QKeySequence("Ctrl+N"))
-        self._act_new_log.triggered.connect(self._on_menu_new_log)
-
-        self._act_quick_save = file_menu.addAction("Quick Save (.txt)")
-        self._act_quick_save.setShortcut(QKeySequence("Ctrl+S"))
-        self._act_quick_save.triggered.connect(self._on_menu_quick_save)
-
-        self._act_export = file_menu.addAction("Export...")
-        self._act_export.setShortcut(QKeySequence("Ctrl+E"))
-        self._act_export.triggered.connect(self._on_menu_export)
-
-        file_menu.addSeparator()
-
-        self._act_prefs = file_menu.addAction("Preferences")
-        self._act_prefs.setShortcut(QKeySequence("Ctrl+,"))
-        self._act_prefs.triggered.connect(self._on_menu_preferences)
-
-        file_menu.addSeparator()
-
-        self._act_exit = file_menu.addAction("Exit")
-        self._act_exit.setShortcut(QKeySequence("Ctrl+Q"))
-        self._act_exit.triggered.connect(self.close)
-
-        # ── View ──
-        view_menu = menu_bar.addMenu("&View")
-
-        self._act_font_up = view_menu.addAction("Font Size +")
-        self._act_font_up.setShortcut(QKeySequence("Ctrl++"))
-        self._act_font_up.triggered.connect(lambda: self._change_font_size(FONT_SIZE_STEP))
-
-        self._act_font_down = view_menu.addAction("Font Size -")
-        self._act_font_down.setShortcut(QKeySequence("Ctrl+-"))
-        self._act_font_down.triggered.connect(lambda: self._change_font_size(-FONT_SIZE_STEP))
-
-        self._act_font_reset = view_menu.addAction("Reset Font Size")
-        self._act_font_reset.setShortcut(QKeySequence("Ctrl+0"))
-        self._act_font_reset.triggered.connect(self._reset_font_size)
-
-        view_menu.addSeparator()
-
-        ts_menu = view_menu.addMenu("Timestamp Format")
-        self._act_ts_absolute = ts_menu.addAction("Timestamp")
-        self._act_ts_absolute.setCheckable(True)
-        self._act_ts_absolute.setChecked(True)
-        self._act_ts_absolute.triggered.connect(
-            lambda: self._set_timestamp_mode(TimestampMode.ABSOLUTE)
-        )
-        self._act_ts_relative = ts_menu.addAction("Elapsed")
-        self._act_ts_relative.setCheckable(True)
-        self._act_ts_relative.triggered.connect(
-            lambda: self._set_timestamp_mode(TimestampMode.RELATIVE)
-        )
-
-        view_menu.addSeparator()
-
-        self._act_auto_scroll = view_menu.addAction("Auto-Scroll")
-        self._act_auto_scroll.setCheckable(True)
-        self._act_auto_scroll.setChecked(True)
-        self._act_auto_scroll.triggered.connect(self._toggle_auto_scroll)
-
-        dm_menu = view_menu.addMenu("Display Mode")
-        self._act_dm_text = dm_menu.addAction("Text")
-        self._act_dm_text.setCheckable(True)
-        self._act_dm_text.setChecked(True)
-        self._act_dm_text.triggered.connect(lambda: self._set_display_mode("text"))
-        self._act_dm_hex = dm_menu.addAction("HEX")
-        self._act_dm_hex.setCheckable(True)
-        self._act_dm_hex.triggered.connect(lambda: self._set_display_mode("hex"))
-
-        view_menu.addSeparator()
-
-        # Live plot panel toggle. Checkable so the menu reflects the
-        # current state of the active tab. Updated on tab switch via
-        # _refresh_view_menu_state().
-        self._act_plot_panel = view_menu.addAction("Live Plot")
-        self._act_plot_panel.setCheckable(True)
-        self._act_plot_panel.setShortcut(QKeySequence("Ctrl+Shift+P"))
-        self._act_plot_panel.triggered.connect(self._on_menu_toggle_plot)
-
-        # Configure Plot opens the manual-mode dialog. Useful when
-        # auto-detect doesn't fit the firmware's format, or when the
-        # engineer wants to declare an exact regex up front.
-        self._act_plot_configure = view_menu.addAction("Configure Plot\u2026")
-        self._act_plot_configure.triggered.connect(self._on_menu_configure_plot)
-
-        # ── Themes ──
-        themes_menu = menu_bar.addMenu("&Themes")
-        self._themes_menu = themes_menu
-
-        for theme_id, display_name in self._theme_manager.available_themes():
-            action = themes_menu.addAction(display_name)
-            action.setCheckable(True)
-            action.setChecked(theme_id == self._theme_manager.current_theme)
-            action.setData(theme_id)
-            action.triggered.connect(
-                lambda checked, tid=theme_id: self._on_theme_selected(tid)
-            )
-
-        # ── Help ──
-        help_menu = menu_bar.addMenu("&Help")
-
-        self._act_user_guide = help_menu.addAction("User Guide")
-        self._act_user_guide.setShortcut("F1")
-        self._act_user_guide.triggered.connect(self._on_menu_user_guide)
-
-        help_menu.addSeparator()
-
-        self._act_check_updates = help_menu.addAction("Check for Updates...")
-        self._act_check_updates.triggered.connect(self._on_menu_check_updates)
-
-        help_menu.addSeparator()
-
-        self._act_about = help_menu.addAction("About")
-        self._act_about.triggered.connect(self._on_menu_about)
-
-    def _setup_shortcuts(self) -> None:
-        """Keyboard shortcuts per spec section 6.8."""
-        shortcuts = [
-            ("Ctrl+F", self._on_search),
-            ("Ctrl+L", self._on_filter_focus),
-            ("F3", self._on_search_next),
-            ("Shift+F3", self._on_search_prev),
-            ("Escape", self._on_escape),
-        ]
-        for key, handler in shortcuts:
-            action = QAction(self)
-            action.setShortcut(QKeySequence(key))
-            action.triggered.connect(handler)
-            self.addAction(action)
-
-    def _setup_status_bar(self) -> None:
-        self.statusBar().showMessage("Ready")
-
-    # ══════════════════════════════════════════════════════════════════════
-    # TAB MANAGEMENT
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _on_new_tab(self) -> None:
-        """Create a new device tab."""
-        tab = DeviceTab(self._theme_manager, self._config, self)
-        tab.title_changed.connect(
-            lambda title, t=tab: self._on_tab_title_changed(t, title)
-        )
-        tab.timestamp_mode_changed.connect(self._sync_timestamp_menu)
-        # View → Live Plot checkmark must reflect actual plot visibility
-        # regardless of how visibility changed (toolbar button, menu,
-        # or disconnect tear-down). The signal is the single source of
-        # truth; the handler ignores emissions from non-current tabs
-        # so cross-tab activity doesn't perturb the menu.
-        tab.plot_visibility_changed.connect(
-            lambda visible, t=tab: self._on_tab_plot_visibility_changed(t, visible)
-        )
-        idx = self._tab_widget.addTab(tab, "New Tab")
-        self._tab_widget.setCurrentIndex(idx)
-        self._update_view()
-
-    def _close_tab(self, index: int) -> None:
-        """Close tab at the given index with confirmation."""
-        tab = self._tab_widget.widget(index)
-        if isinstance(tab, DeviceTab):
-            if not tab.confirm_close():
-                return
-            tab.ordered_shutdown()
-            # Final teardown of the plot view's redraw timer. This is
-            # the ONLY place shutdown() is called — per-disconnect
-            # cycles use reset_session() (timer keeps running) so a
-            # subsequent reconnect renders properly.
-            plot_view = getattr(tab, "_plot_view", None)
-            if plot_view is not None:
-                shutdown = getattr(plot_view, "shutdown", None)
-                if callable(shutdown):
-                    shutdown()
-
-        self._tab_widget.removeTab(index)
-        if tab:
-            tab.deleteLater()
-        self._update_view()
-
-    def _on_close_current_tab(self) -> None:
-        idx = self._tab_widget.currentIndex()
-        if idx >= 0:
-            self._close_tab(idx)
-
-    def _on_tab_changed(self, index: int) -> None:
-        """Update window title and sync View menu state when tab changes."""
-        if index < 0:
-            self.setWindowTitle(WINDOW_TITLE)
-            self._act_plot_panel.setChecked(False)
-            return
-        title = self._tab_widget.tabText(index)
-        self.setWindowTitle(f"{WINDOW_TITLE} — {title}")
-
-        # Sync View menu checkmarks to the current tab's state
-        tab = self._current_tab()
-        if tab:
-            self._sync_timestamp_menu(tab._session.timestamp_mode)
-            self._act_plot_panel.setChecked(tab.is_plot_visible())
-
-    def _on_tab_title_changed(self, tab: DeviceTab, title: str) -> None:
-        """Update tab text when DeviceTab emits title_changed."""
-        idx = self._tab_widget.indexOf(tab)
-        if idx >= 0:
-            self._tab_widget.setTabText(idx, title)
-            if idx == self._tab_widget.currentIndex():
-                self.setWindowTitle(f"{WINDOW_TITLE} — {title}")
-
-    def _on_tab_plot_visibility_changed(
-        self, tab: DeviceTab, visible: bool,
-    ) -> None:
-        """Sync the View → Live Plot menu check to a tab's state.
-
-        Only acts on emissions from the currently-active tab.
-        Background tabs changing their plot state must not perturb
-        the menu — the menu always shows the current tab's view.
+        While a tab is being closed, Qt has already taken its page away
+        but still counts it on the tab bar, and shows the next page in
+        between; a tab without a page is not counted.
         """
-        if tab is self._current_tab():
-            self._act_plot_panel.setChecked(visible)
+        pages = (self._tabs.widget(index) for index in range(self._tabs.count()))
+        return [page for page in pages if page is not None]
 
-    def _on_tab_context_menu(self, pos) -> None:
-        """Context menu on tab right-click."""
-        tab_bar = self._tab_widget.tabBar()
-        index = tab_bar.tabAt(pos)
+    def current_tab(self) -> DeviceTab | None:
+        return self._tabs.currentWidget()
+
+    def new_tab(self) -> DeviceTab:
+        """Open a tab on its first screen and bring it to the front."""
+        tab = DeviceTab(self._theme_manager, self._config, self, self._transport_factory)
+        for signal in (
+            tab.title_changed,
+            tab.connection_changed,
+            tab.link_state_changed,
+            tab.timestamp_mode_changed,
+            tab.display_mode_changed,
+            tab.following_changed,
+            tab.line_ending_changed,
+            tab.plot_visibility_changed,
+        ):
+            signal.connect(lambda *_args, t=tab: self._on_tab_state_changed(t))
+        tab.usage_noted.connect(self._note_usage)
+        tab.line_rate_measured.connect(self._usage.note_line_rate)
+        tab.connection_changed.connect(
+            lambda connected: self._usage.note_connection() if connected else None
+        )
+        index = self._tabs.addTab(tab, tab.title)
+        self._show_tab_state(tab)
+        self._tabs.setCurrentIndex(index)
+        if self._tabs.count() > 1:
+            self._usage.note_feature(Feature.TABS)
+        return tab
+
+    def close_tab(self, index: int) -> None:
+        """Close a tab, asking first if that would end a log or an export.
+
+        The window always has a tab: closing the last one opens a new one.
+        """
+        tab = self._tabs.widget(index)
+        if tab is None or not tab.confirm_close():
+            return
+        self._tabs.bar.finish_rename(keep=False)
+        tab.ordered_shutdown()
+        self._tabs.removeTab(index)
+        tab.deleteLater()
+        if self._tabs.count() == 0:
+            self.new_tab()
+
+    def close_current_tab(self) -> None:
+        self.close_tab(self._tabs.currentIndex())
+
+    def rename_tab(self, index: int) -> None:
+        """Let the user type a name for the tab, on the tab itself."""
+        tab = self._tabs.widget(index)
+        if tab is not None:
+            self._tabs.bar.start_rename(index, tab.custom_name)
+
+    def rename_current_tab(self) -> None:
+        self.rename_tab(self._tabs.currentIndex())
+
+    def _on_tab_renamed(self, index: int, name: str) -> None:
+        tab = self._tabs.widget(index)
+        if tab is not None:
+            tab.rename(name)
+
+    def _show_tab_menu(self, position: QPoint) -> None:
+        bar = self._tabs.bar
+        index = bar.tabAt(position)
         if index < 0:
             return
         menu = QMenu(self)
-        rename_action = menu.addAction("Rename")
-        rename_action.triggered.connect(lambda: self._rename_tab(index))
-        menu.addSeparator()
-        close_action = menu.addAction("Close")
-        close_action.triggered.connect(lambda: self._close_tab(index))
-        menu.exec(tab_bar.mapToGlobal(pos))
-
-    def _rename_tab(self, index: int) -> None:
-        """Inline rename of a tab via input dialog."""
-        from PySide6.QtWidgets import QInputDialog
-        current = self._tab_widget.tabText(index)
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Tab", "Tab name:", text=current,
+        menu.addAction(
+            shortcuts.menu_text("Rename", "rename_tab"), lambda: self.rename_tab(index),
         )
-        if ok and new_name.strip():
-            self._tab_widget.setTabText(index, new_name.strip())
-            if index == self._tab_widget.currentIndex():
-                self.setWindowTitle(f"{WINDOW_TITLE} — {new_name.strip()}")
+        menu.addSeparator()
+        menu.addAction(
+            shortcuts.menu_text("Close", "close_tab"), lambda: self.close_tab(index),
+        )
+        menu.exec(bar.mapToGlobal(position))
+        menu.deleteLater()
 
-    def _current_tab(self) -> DeviceTab | None:
-        """Return the active DeviceTab, or None."""
-        tab = self._tab_widget.currentWidget()
-        return tab if isinstance(tab, DeviceTab) else None
+    def _show_tab_state(self, tab: DeviceTab) -> None:
+        """Bring the tab's dot, name and tooltip up to date."""
+        index = self._tabs.indexOf(tab)
+        if index < 0:
+            return
+        self._tabs.setTabIcon(index, state_icon(tab.link_state, self.devicePixelRatioF()))
+        self._tabs.setTabText(index, tab.title)
+        self._tabs.setTabToolTip(index, plain_tooltip(tab.title))
 
-    # ══════════════════════════════════════════════════════════════════════
-    # MENU HANDLERS
-    # ══════════════════════════════════════════════════════════════════════
+    def _refresh_tab_icons(self) -> None:
+        for tab in self.tabs():
+            self._show_tab_state(tab)
 
-    def _on_menu_new_log(self) -> None:
-        tab = self._current_tab()
-        if tab and tab.is_connected:
-            tab._on_log_on()
+    def _on_tab_state_changed(self, tab: DeviceTab) -> None:
+        self._show_tab_state(tab)
+        if tab is self.current_tab():
+            self._sync_with_current_tab()
 
-    def _on_menu_quick_save(self) -> None:
-        """Quick save current tab's console content as .txt (Ctrl+S)."""
-        tab = self._current_tab()
-        if tab:
-            tab.quick_save()
+    def _on_current_tab_changed(self, _index: int) -> None:
+        self._tabs.bar.finish_rename(keep=True)
+        self._sync_with_current_tab()
 
-    def _on_menu_export(self) -> None:
-        """Open export dialog for current tab (Ctrl+E)."""
-        tab = self._current_tab()
-        if tab:
-            tab._on_export()
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.DevicePixelRatioChange:
+            # The window moved to a screen with another scaling.
+            self._refresh_tab_icons()
+        return super().event(event)
 
-    def _on_menu_preferences(self) -> None:
+    # ── Menus ────────────────────────────────────────────────────────────
+
+    def _add_action(
+        self,
+        menu: QMenu,
+        text: str,
+        run: Callable[[], None],
+        shortcut: str = "",
+        *,
+        checkable: bool = False,
+        role: QAction.MenuRole = QAction.MenuRole.NoRole,
+    ) -> QAction:
+        """Add an entry to ``menu``. ``shortcut`` is a name in ``ui.shortcuts``."""
+        action = menu.addAction(text)
+        # Without a role, macOS moves entries into its application menu
+        # by guessing from their text.
+        action.setMenuRole(role)
+        action.setCheckable(checkable)
+        if shortcut:
+            action.setShortcuts([
+                QKeySequence(keys)
+                for keys in (shortcuts.keys(shortcut), *shortcuts.ALTERNATE_KEYS.get(shortcut, ()))
+            ])
+            self._shortcut_actions[shortcut] = action
+        action.triggered.connect(lambda _checked=False: run())
+        return action
+
+    def _add_choices(
+        self,
+        menu: QMenu,
+        choices: list[tuple[str, object]],
+        choose: Callable[[object], None],
+    ) -> dict[object, QAction]:
+        """Add entries of which exactly one is ticked."""
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        actions: dict[object, QAction] = {}
+        for text, value in choices:
+            action = self._add_action(menu, text, lambda v=value: choose(v), checkable=True)
+            group.addAction(action)
+            actions[value] = action
+        return actions
+
+    def _setup_menus(self) -> None:
+        self._shortcut_actions: dict[str, QAction] = {}
+        bar = self.menuBar()
+        self._setup_file_menu(bar.addMenu("&File"))
+        self._setup_edit_menu(bar.addMenu("&Edit"))
+        self._setup_view_menu(bar.addMenu("&View"))
+        self._setup_device_menu(bar.addMenu("&Device"))
+        self._setup_help_menu(bar.addMenu("&Help"))
+
+    def shortcut_actions(self) -> dict[str, QAction]:
+        """The action behind each name in ``ui.shortcuts``."""
+        return dict(self._shortcut_actions)
+
+    def _setup_file_menu(self, menu: QMenu) -> None:
+        add = self._add_action
+        add(menu, "New tab", self.new_tab, "new_tab")
+        add(menu, "Close tab", self.close_current_tab, "close_tab")
+        menu.addSeparator()
+        self._act_start_log = add(menu, "Start log...", self._for_tab(DeviceTab.start_log), "start_log")
+        self._act_stop_log = add(menu, "Stop log", self._for_tab(DeviceTab.stop_log))
+        self._act_log_folder = add(menu, "Open log folder", self._for_tab(DeviceTab.open_log_folder))
+        menu.addSeparator()
+        self._act_export = add(
+            menu, "Export session...", self._for_tab(DeviceTab.export_session), "export",
+        )
+        menu.addSeparator()
+        add(
+            menu, "Preferences...", self._open_preferences, "preferences",
+            role=QAction.MenuRole.PreferencesRole,
+        )
+        menu.addSeparator()
+        add(menu, "Exit", self.close, "quit", role=QAction.MenuRole.QuitRole)
+
+    def _setup_edit_menu(self, menu: QMenu) -> None:
+        add = self._add_action
+        self._act_copy = add(menu, "Copy", self._copy, "copy")
+        self._act_copy_messages = add(
+            menu, "Copy without timestamps", self._copy_messages, "copy_messages",
+        )
+        self._act_select_all = add(menu, "Select all", self._select_all, "select_all")
+        menu.addSeparator()
+        self._act_find = add(menu, "Find...", self._for_tab(DeviceTab.activate_search), "find")
+        self._act_find_next = add(menu, "Find next", self._for_tab(DeviceTab.search_next), "find_next")
+        self._act_find_previous = add(
+            menu, "Find previous", self._for_tab(DeviceTab.search_prev), "find_previous",
+        )
+        self._act_filter = add(menu, "Filter lines", self._for_tab(DeviceTab.activate_filter), "filter")
+        self._act_close_find = add(
+            menu, "Close Find and clear the filter",
+            self._for_tab(DeviceTab.clear_search_filter), "close_find",
+        )
+        menu.addSeparator()
+        self._act_clear = add(menu, "Clear console", self._for_tab(DeviceTab.clear_console))
+        # Copy and Select all are switched off in the open menu when
+        # there is nothing for them to act on, and back on when it
+        # closes so that their shortcuts always reach the handler.
+        menu.aboutToShow.connect(self._sync_edit_menu)
+        menu.aboutToHide.connect(self._release_edit_menu)
+
+    def _setup_view_menu(self, menu: QMenu) -> None:
+        add = self._add_action
+        self._theme_actions = self._add_choices(
+            menu.addMenu("Theme"),
+            [(name, preference) for preference, name in self._theme_manager.available_preferences()],
+            self._choose_theme,
+        )
+        self._theme_actions[self._theme_manager.preference].setChecked(True)
+        menu.addSeparator()
+
+        self._timestamp_actions = self._add_choices(
+            menu.addMenu("Timestamps"),
+            [("Time of day", TimestampMode.ABSOLUTE), ("Since previous line", TimestampMode.RELATIVE)],
+            lambda mode: self._for_tab(DeviceTab.set_timestamp_mode, mode)(),
+        )
+        self._display_menu = menu.addMenu("Display")
+        self._display_actions = self._add_choices(
+            self._display_menu,
+            [("Text", DisplayMode.TEXT), ("HEX", DisplayMode.HEX)],
+            lambda mode: self._for_tab(DeviceTab.set_display_mode, mode)(),
+        )
+        self._act_follow = add(menu, "Follow new lines", self._toggle_following, checkable=True)
+        self._act_hide_blank = add(menu, "Hide blank lines", self._toggle_hide_blank, checkable=True)
+        self._act_hide_blank.setChecked(self._config.hide_blank_lines)
+        menu.addSeparator()
+
+        self._act_plot = add(menu, "Live plot", self._for_tab(DeviceTab.toggle_plot), "plot", checkable=True)
+        self._act_configure_plot = add(
+            menu, "Configure plot...", self._for_tab(DeviceTab.open_plot_config_dialog),
+        )
+        menu.addSeparator()
+
+        add(menu, "Larger text", lambda: self._change_text_size(FONT_SIZE_STEP), "text_larger")
+        add(menu, "Smaller text", lambda: self._change_text_size(-FONT_SIZE_STEP), "text_smaller")
+        add(menu, "Reset text size", self._reset_text_size, "text_reset")
+
+    def _setup_device_menu(self, menu: QMenu) -> None:
+        add = self._add_action
+        self._act_connect = add(menu, "Connect", self._for_tab(DeviceTab.connect_device))
+        self._act_disconnect = add(menu, "Disconnect", self._for_tab(DeviceTab.disconnect_device))
+        self._act_refresh = add(
+            menu, "Refresh ports", self._for_tab(DeviceTab.refresh_ports), "refresh_ports",
+        )
+        menu.addSeparator()
+        self._line_ending_actions = self._add_choices(
+            menu.addMenu("Line ending for commands"),
+            [(name, ending) for ending, name in LINE_ENDING_NAMES.items()],
+            lambda ending: self._for_tab(DeviceTab.set_line_ending, ending)(),
+        )
+        # The shortcuts of the saved commands belong to the window, not
+        # to menu entries: the menu lists whatever is saved when it
+        # opens, while a shortcut must work whether or not it has been.
+        for number in range(1, SAVED_COMMAND_SHORTCUTS + 1):
+            name = shortcuts.saved_command_name(number)
+            action = QAction(self)
+            action.setShortcut(QKeySequence(shortcuts.keys(name)))
+            fill = self._for_tab(DeviceTab.fill_saved_command, number)
+            action.triggered.connect(lambda _checked=False, run=fill: run())
+            self.addAction(action)
+            self._shortcut_actions[name] = action
+        self._saved_menu = menu.addMenu("Saved commands")
+        self._saved_menu.aboutToShow.connect(self._fill_saved_menu)
+        self._fill_saved_menu()
+        menu.addSeparator()
+        add(menu, "Rename tab", self.rename_current_tab, "rename_tab")
+
+    def _fill_saved_menu(self) -> None:
+        """List the saved commands as they are now."""
+        menu = self._saved_menu
+        menu.clear()
+        tab = self.current_tab()
+        commands = tab.saved_commands.all() if tab is not None else []
+        for number, command in enumerate(commands, start=1):
+            text = command.replace("&", "&&")
+            if number <= SAVED_COMMAND_SHORTCUTS:
+                text = shortcuts.menu_text(text, shortcuts.saved_command_name(number))
+            self._add_action(menu, text, self._for_tab(DeviceTab.fill_saved_command, number))
+        if commands:
+            menu.addSeparator()
+        self._add_action(
+            menu, "Edit saved commands...", self._for_tab(DeviceTab.edit_saved_commands),
+        )
+
+    def _setup_help_menu(self, menu: QMenu) -> None:
+        add = self._add_action
+        add(menu, "User guide", self._open_user_guide, "user_guide")
+        add(menu, "Keyboard shortcuts", self._show_shortcuts)
+        menu.addSeparator()
+        self._act_update = add(menu, "Check for updates...", self.check_for_updates)
+        add(menu, "Report a problem", self._report_problem)
+        menu.addSeparator()
+        add(menu, f"About {APP_NAME}", self._show_about, role=QAction.MenuRole.AboutRole)
+
+    def _for_tab(self, method: Callable[..., None], *args: object) -> Callable[[], None]:
+        """A menu handler that calls ``method`` on the tab in front."""
+        def run() -> None:
+            tab = self.current_tab()
+            if tab is not None:
+                method(tab, *args)
+        return run
+
+    # ── Keeping the menus in step with the tab in front ──────────────────
+
+    def _sync_with_current_tab(self) -> None:
+        tab = self.current_tab()
+        if tab is None:
+            return
+        connected, logging, session = tab.is_connected, tab.is_logging, tab.has_session
+
+        self._act_start_log.setEnabled(connected and not logging)
+        self._act_stop_log.setEnabled(logging)
+        self._act_export.setEnabled(session)
+
+        for action in (
+            self._act_find, self._act_find_next, self._act_find_previous,
+            self._act_filter, self._act_close_find, self._act_clear,
+            self._act_follow, self._act_copy_messages,
+        ):
+            action.setEnabled(session)
+        for action in self._timestamp_actions.values():
+            action.setEnabled(session)
+        for action in self._line_ending_actions.values():
+            action.setEnabled(session)
+        self._display_menu.setEnabled(connected)
+        self._act_plot.setEnabled(connected)
+
+        self._act_connect.setEnabled(not connected)
+        self._act_disconnect.setEnabled(connected)
+        self._act_refresh.setEnabled(not connected)
+
+        self._timestamp_actions[tab.session.timestamp_mode].setChecked(True)
+        self._display_actions[tab.session.display_mode].setChecked(True)
+        self._line_ending_actions[tab.line_ending].setChecked(True)
+        self._act_follow.setChecked(tab.following)
+        self._act_plot.setChecked(tab.is_plot_visible())
+
+        title = tab.title
+        self.setWindowTitle(WINDOW_TITLE if title == NEW_TAB_TITLE else f"{title} - {WINDOW_TITLE}")
+
+    # ── Edit ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _focused_text_field() -> QLineEdit | None:
+        """The text box the user is typing in, if any."""
+        widget = QApplication.focusWidget()
+        if isinstance(widget, QLineEdit):
+            return widget
+        if isinstance(widget, QComboBox) and widget.isEditable():
+            return widget.lineEdit()
+        return None
+
+    def _copy(self) -> None:
+        field = self._focused_text_field()
+        tab = self.current_tab()
+        if field is not None:
+            field.copy()
+        elif tab is not None:
+            tab.console.copy()
+
+    def _copy_messages(self) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.console.copy_messages()
+
+    def _select_all(self) -> None:
+        field = self._focused_text_field()
+        tab = self.current_tab()
+        if field is not None:
+            field.selectAll()
+        elif tab is not None and tab.has_session:
+            tab.console.select_all()
+
+    def _sync_edit_menu(self) -> None:
+        field = self._focused_text_field()
+        tab = self.current_tab()
+        console = tab.console if tab is not None and tab.has_session else None
+        selected = console is not None and console.has_selection
+        if field is not None:
+            self._act_copy.setEnabled(field.hasSelectedText())
+            self._act_select_all.setEnabled(bool(field.text()))
+        else:
+            self._act_copy.setEnabled(selected)
+            self._act_select_all.setEnabled(console is not None and console.visible_count > 0)
+        self._act_copy_messages.setEnabled(selected)
+
+    def _release_edit_menu(self) -> None:
+        tab = self.current_tab()
+        self._act_copy.setEnabled(True)
+        self._act_select_all.setEnabled(True)
+        self._act_copy_messages.setEnabled(tab is not None and tab.has_session)
+
+    # ── View ─────────────────────────────────────────────────────────────
+
+    def _choose_theme(self, preference: str) -> None:
+        self._theme_manager.apply_preference(preference)
+        self._config.theme = self._theme_manager.preference
+        self._theme_actions[self._theme_manager.preference].setChecked(True)
+
+    def _toggle_following(self) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.set_following(self._act_follow.isChecked())
+
+    def _toggle_hide_blank(self) -> None:
+        self._config.hide_blank_lines = self._act_hide_blank.isChecked()
+        self._apply_preferences_to_tabs()
+
+    def _change_text_size(self, change: int) -> None:
+        size = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, self._config.font_size + change))
+        if size != self._config.font_size:
+            self._config.font_size = size
+            self._apply_preferences_to_tabs()
+
+    def _reset_text_size(self) -> None:
+        self._config.font_size = DEFAULT_FONT_SIZE
+        self._apply_preferences_to_tabs()
+
+    def _apply_preferences_to_tabs(self) -> None:
+        for tab in self.tabs():
+            tab.apply_preferences()
+
+    def _open_preferences(self) -> None:
         from ui.dialogs.preferences_dialog import PreferencesDialog
-        dialog = PreferencesDialog(self._config, self._theme_manager, self)
-        dialog.exec()
 
-        # Apply theme from config (may have changed via Save or Reset)
-        saved_theme = ThemeID(self._config.theme)
-        if saved_theme != self._theme_manager.current_theme:
-            self._theme_manager.apply_theme(saved_theme)
+        dialog = PreferencesDialog(
+            self._config, self._theme_manager, self,
+            open_plot_config=self._for_tab(DeviceTab.open_plot_config_dialog),
+        )
+        sharing = self._config.usage_statistics
+        saved = dialog.exec() == PreferencesDialog.DialogCode.Accepted
 
-        # Sync theme menu checkmarks
-        current = self._theme_manager.current_theme
-        for action in self._themes_menu.actions():
-            action.setChecked(action.data() == current)
+        # The dialog may have changed any of these, by Save or by
+        # Restore defaults, which takes effect even if it is then cancelled.
+        theme = normalise_preference(self._config.theme)
+        if theme != self._theme_manager.preference:
+            self._theme_manager.apply_preference(theme)
+        self._theme_actions[self._theme_manager.preference].setChecked(True)
+        self._act_hide_blank.setChecked(self._config.hide_blank_lines)
+        self._apply_preferences_to_tabs()
+        if self._config.usage_statistics != sharing:
+            self._usage.apply_setting()
+        if saved:
+            self._notify(Toast.success, "Preferences saved")
 
-        # Update all tab consoles with new tag colors and font settings
-        family = self._config.font_family
-        size = self._config.font_size
-        for i in range(self._tab_widget.count()):
-            tab = self._tab_widget.widget(i)
-            if isinstance(tab, DeviceTab):
-                tab.apply_theme()
-                tab._console.set_font_family(family)
-                tab._console.set_font_size(size)
+    # ── Help ─────────────────────────────────────────────────────────────
 
-    def _on_theme_selected(self, theme_id: ThemeID) -> None:
-        """Apply selected theme and update menu checks."""
-        self._theme_manager.apply_theme(theme_id)
-        self._config.theme = theme_id.value
-        for action in self._themes_menu.actions():
-            action.setChecked(action.data() == theme_id)
-        # Update all tab consoles with new tag colors
-        for i in range(self._tab_widget.count()):
-            tab = self._tab_widget.widget(i)
-            if isinstance(tab, DeviceTab):
-                tab.apply_theme()
+    def _notify(
+        self,
+        show: Callable[..., Toast],
+        message: str,
+        action_label: str = "",
+        action: Callable[[], None] | None = None,
+    ) -> None:
+        """Show a toast over the tab in front, with a button if one is given."""
+        tab = self.current_tab()
+        if tab is not None:
+            show(tab, message, action_label, action)
 
-    def _on_menu_check_updates(self) -> None:
-        """Check for updates using background thread, then show dialog if available."""
-        from updater.update_manager import UpdateDialog, UpdateManager
-        from version import APP_VERSION
-
-        Toast.info(self, "Checking for updates...")
-        self.statusBar().showMessage("Checking for updates...", 0)
-
-        # Keep reference alive during async check
-        self._update_mgr = UpdateManager()
-
-        def on_available(info):
-            self.statusBar().showMessage("")
-            dlg = UpdateDialog(info, self)
-            dlg.exec()
-            # Handle dialog result
-            if dlg.result_action == "remind":
-                self._update_mgr.snooze()
-                Toast.info(self, "Update reminder snoozed for 24 hours")
-            elif dlg.result_action == "skip":
-                self._update_mgr.skip_version(info.latest_version)
-                Toast.info(self, f"Version {info.latest_version} skipped")
-            # "update" action is handled inside the dialog itself
-
-        def on_not_available():
-            Toast.success(self, f"You're running the latest version (v{APP_VERSION})")
-            self.statusBar().showMessage(
-                f"Up to date — v{APP_VERSION}", 5000)
-
-        def on_failed(msg):
-            Toast.error(self, "Unable to check for updates — please try again later")
-            self.statusBar().showMessage("Update check failed", 5000)
-            logger.warning("Update check failed: %s", msg)
-
-        self._update_mgr.update_available.connect(on_available)
-        self._update_mgr.update_not_available.connect(on_not_available)
-        self._update_mgr.check_failed.connect(on_failed)
-        self._update_mgr.check_now(silent=False)
-
-    def _on_menu_about(self) -> None:
-        from ui.dialogs.about_dialog import AboutDialog
-        dialog = AboutDialog(self)
-        dialog.exec()
-
-    def _on_menu_user_guide(self) -> None:
-        """Open the User Guide HTML in the system default browser.
-
-        Resolution, version-stamping, and per-user cache placement
-        are handled by ``app.help_loader``. If the source asset is
-        missing (e.g. an incomplete install), we surface a clear
-        toast rather than silently failing.
-        """
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
-
-        from app.help_loader import UserGuideNotFoundError, prepare_user_guide
-        from ui.widgets.toast import Toast
+    def _open_user_guide(self) -> None:
+        """Open the user guide in the system's browser."""
+        from app.help_loader import UserGuideError, UserGuideNotFoundError, prepare_user_guide
 
         try:
-            stamped_path = prepare_user_guide()
+            path = prepare_user_guide()
         except UserGuideNotFoundError:
             logger.exception("User guide source not found")
-            Toast.error(
-                self,
-                "User Guide is not installed. Please reinstall WireTrace.",
-            )
+            self._notify(Toast.error, f"The user guide is not installed. Please reinstall {APP_NAME}.")
+            return
+        except UserGuideError:
+            logger.exception("User guide could not be filled in")
+            self._notify(Toast.error, f"The user guide is damaged. Please reinstall {APP_NAME}.")
             return
         except OSError:
-            logger.exception("Failed to write stamped user guide to cache")
-            Toast.error(
-                self,
-                "Could not prepare the User Guide. Please check disk permissions.",
+            logger.exception("Failed to write the user guide to the cache")
+            self._notify(Toast.error, "The user guide could not be prepared. Check the disk permissions.")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self._notify(Toast.error, "No browser is set up to open the user guide.")
+
+    def _show_shortcuts(self) -> None:
+        from ui.dialogs.shortcuts_dialog import ShortcutsDialog
+
+        ShortcutsDialog(self).exec()
+
+    def _report_problem(self) -> None:
+        if not QDesktopServices.openUrl(QUrl(APP_ISSUES_URL)):
+            self._notify(Toast.warning, f"The page could not be opened: {APP_ISSUES_URL}")
+
+    def _show_about(self) -> None:
+        from ui.dialogs.about_dialog import AboutDialog
+
+        AboutDialog(self._theme_manager, self).exec()
+
+    # ── Usage statistics ─────────────────────────────────────────────────
+
+    @property
+    def usage(self) -> UsageStatistics:
+        return self._usage
+
+    def _note_usage(self, item: object) -> None:
+        if isinstance(item, Feature):
+            self._usage.note_feature(item)
+        elif isinstance(item, Problem):
+            self._usage.note_problem(item)
+
+    def ask_about_usage_statistics(self) -> None:
+        """Ask, once, whether usage statistics may be shared.
+
+        The question is a bar above the tabs that blocks nothing. It is
+        shown on a later start once more only if the window was closed
+        without an answer; after that the setting is in Preferences.
+        """
+        config = self._config
+        if (
+            config.usage_question_answered
+            or config.usage_question_shown >= USAGE_QUESTION_MAX_SHOWINGS
+        ):
+            return
+        config.usage_question_shown += 1
+        config.save()
+        banner = self._window_banners.show_banner(
+            _BANNER_USAGE, banners.INFO,
+            f"Help improve {APP_NAME}?",
+            "Share usage statistics, which you can switch off and delete at any time. Nothing your devices send is ever included.",
+            (
+                BannerAction("What is sent", self._show_privacy_policy),
+                BannerAction("Share", lambda: self._answer_usage_question(share=True)),
+                BannerAction("No thanks", lambda: self._answer_usage_question(share=False)),
+            ),
+        )
+        banner.dismissed.connect(lambda: self._answer_usage_question(share=False))
+
+    def _answer_usage_question(self, *, share: bool) -> None:
+        self._config.usage_question_answered = True
+        self._window_banners.clear(_BANNER_USAGE)
+        self._usage.set_enabled(share)
+        if share:
+            self._notify(
+                Toast.success,
+                "Thank you. Usage statistics are shared; you can change this in Preferences.",
             )
+
+    def _show_privacy_policy(self) -> None:
+        if not QDesktopServices.openUrl(QUrl(APP_PRIVACY_URL)):
+            self._notify(Toast.warning, f"The page could not be opened: {APP_PRIVACY_URL}")
+
+    # ── Updates ──────────────────────────────────────────────────────────
+
+    @property
+    def updates(self) -> UpdateManager:
+        return self._updates
+
+    def check_for_updates(self) -> None:
+        """Offer the update already found, or look for one now."""
+        found = self._updates.found
+        if found is not None:
+            self._offer_update(found)
             return
+        self._notify(Toast.info, "Checking for updates")
+        self._updates.check_now()
 
-        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(stamped_path))):
-            Toast.error(self, "No default browser configured to open the User Guide.")
+    def _on_update_available(self, manifest: ReleaseManifest, asked: bool) -> None:
+        """Offer a newer release.
 
-    # ══════════════════════════════════════════════════════════════════════
-    # SHORTCUT HANDLERS (delegate to current tab)
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _on_search(self) -> None:
-        tab = self._current_tab()
-        if tab:
-            tab.activate_search()
-
-    def _on_filter_focus(self) -> None:
-        tab = self._current_tab()
-        if tab:
-            tab.activate_filter()
-
-    def _on_search_next(self) -> None:
-        tab = self._current_tab()
-        if tab:
-            tab.search_next()
-
-    def _on_search_prev(self) -> None:
-        tab = self._current_tab()
-        if tab:
-            tab.search_prev()
-
-    def _on_escape(self) -> None:
-        tab = self._current_tab()
-        if tab:
-            tab.clear_search_filter()
-
-    def _change_font_size(self, delta: int) -> None:
-        new_size = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, self._config.font_size + delta))
-        self._config.font_size = new_size
-        for i in range(self._tab_widget.count()):
-            tab = self._tab_widget.widget(i)
-            if isinstance(tab, DeviceTab):
-                tab._console.set_font_size(new_size)
-
-    def _reset_font_size(self) -> None:
-        self._config.font_size = DEFAULT_FONT_SIZE
-        for i in range(self._tab_widget.count()):
-            tab = self._tab_widget.widget(i)
-            if isinstance(tab, DeviceTab):
-                tab._console.set_font_size(DEFAULT_FONT_SIZE)
-
-    def _set_timestamp_mode(self, mode: TimestampMode) -> None:
-        """Set timestamp mode from View menu — syncs menu + tab + status bar."""
-        self._sync_timestamp_menu(mode)
-        tab = self._current_tab()
-        if tab:
-            tab._on_timestamp_toggled(mode)
-
-    def _sync_timestamp_menu(self, mode: TimestampMode) -> None:
-        """Sync View menu checkmarks to the given timestamp mode.
-
-        Called from:
-          - _set_timestamp_mode (View menu click)
-          - DeviceTab.timestamp_mode_changed signal (status bar click)
-          - _on_tab_changed (tab switch)
+        A check the user asked for opens the update window. One made in
+        the background is announced by a message, so that a window never
+        opens over work in progress; the Help menu keeps the offer.
         """
-        self._act_ts_absolute.setChecked(mode == TimestampMode.ABSOLUTE)
-        self._act_ts_relative.setChecked(mode == TimestampMode.RELATIVE)
-
-    def _toggle_auto_scroll(self) -> None:
-        tab = self._current_tab()
-        if tab:
-            tab._console.auto_scroll = self._act_auto_scroll.isChecked()
-
-    def _set_display_mode(self, mode: str) -> None:
-        from app.constants import DisplayMode
-        is_hex = mode == "hex"
-        self._act_dm_text.setChecked(not is_hex)
-        self._act_dm_hex.setChecked(is_hex)
-        dm = DisplayMode.HEX if is_hex else DisplayMode.TEXT
-        tab = self._current_tab()
-        if tab:
-            tab.set_display_mode(dm)
-
-    def _on_menu_toggle_plot(self) -> None:
-        """Toggle the live-plot panel on the current tab.
-
-        The action is checkable; ``triggered`` carries the new checked
-        state via the action itself. We dispatch to the active tab's
-        public ``toggle_plot()`` API. If no tab is active, revert the
-        menu check so the UI doesn't lie about state.
-        """
-        tab = self._current_tab()
-        if tab is None:
-            self._act_plot_panel.setChecked(False)
-            return
-        tab.toggle_plot()
-        # Sync the menu's check to whatever the tab actually decided.
-        self._act_plot_panel.setChecked(tab.is_plot_visible())
-
-    def _on_menu_configure_plot(self) -> None:
-        """Open the Configure Plot dialog rooted on the active tab.
-
-        Configuration is per-tab — each tab's engine gets its own
-        applied PlotConfig — but profiles are shared across tabs via
-        the PlotProfileStore.
-        """
-        tab = self._current_tab()
-        if tab is None:
-            QMessageBox.information(
-                self, "Configure Plot",
-                "Open a tab first \u2014 plot configuration is per-tab.",
+        self._act_update.setText(f"Update to {manifest.version}...")
+        if asked:
+            self._offer_update(manifest)
+        else:
+            self._notify(
+                Toast.info, f"{APP_NAME} {manifest.version} is available",
+                "See what is new", lambda: self._offer_update(manifest),
             )
-            return
-        tab.open_plot_config_dialog()
 
-    # ══════════════════════════════════════════════════════════════════════
-    # WINDOW STATE
-    # ══════════════════════════════════════════════════════════════════════
+    def _offer_update(self, manifest: ReleaseManifest) -> None:
+        dialog = UpdateDialog(manifest, self._updates, self)
+        dialog.install_requested.connect(self.install_update)
+        dialog.exec()
+        if dialog.answer is UpdateAnswer.SNOOZED:
+            self._notify(
+                Toast.info,
+                f"You will be reminded about this update in {UPDATE_SNOOZE_HOURS} hours",
+            )
+        elif dialog.answer is UpdateAnswer.SKIPPED:
+            self._notify(
+                Toast.info,
+                f"Version {manifest.version} will not be announced again. "
+                "It stays in the Help menu.",
+            )
+
+    def _on_update_check_failed(self, reason: str) -> None:
+        self._notify(Toast.error, f"The update check failed: {reason}")
+
+    def install_update(self, installer: Path, release: PlatformRelease) -> None:
+        """Install a verified download and close. ``release`` is what the
+        signed manifest says the download must be.
+
+        The part that can fail is done while the window is still open.
+        Sessions are then closed as on any exit, asking first if that
+        would end a connection, a log or an export.
+        """
+        if not self._may_exit():
+            return
+        try:
+            prepare_update(installer, release)
+        except UpdateApplyError as exc:
+            logger.error("The update could not be put in place: %s", exc)
+            self._notify(Toast.error, f"The update could not be installed: {exc}")
+            return
+        self._exit_confirmed = True
+        self.close()
+        try:
+            launch_update(installer, release)
+        except UpdateApplyError as exc:
+            logger.error("The update could not be started: %s", exc)
+            tell(None, "Update", f"The update could not be started: {exc}\n\n{installer}")
+        QApplication.quit()
+
+    # ── Window state ─────────────────────────────────────────────────────────
 
     def _restore_window_state(self) -> None:
         """Restore window geometry from config, clamped to a live screen.
 
-        Guards against a saved position that is no longer visible — e.g. a
+        Guards against a saved position that is no longer visible, such as a
         coordinate on an external monitor that has since been disconnected.
         Without this, the window is placed off-screen and shows only as a
         taskbar entry. If the saved geometry is not visible on any connected
@@ -742,95 +978,62 @@ class MainWindow(QMainWindow):
             self._config.window_y = geo.y()
         self._config.maximized = self.isMaximized()
 
+
+    # ── Closing ──────────────────────────────────────────────────────────
+
     def get_connected_ports(self) -> set[str]:
-        """Return set of port names currently connected across all tabs."""
-        ports = set()
-        for i in range(self._tab_widget.count()):
-            tab = self._tab_widget.widget(i)
-            if isinstance(tab, DeviceTab) and tab.is_connected:
-                ports.add(tab.port_name)
-        return ports
+        """The ports that are open in any tab."""
+        return {tab.port_name for tab in self.tabs() if tab.is_connected}
 
     def shutdown_all_tabs(self) -> None:
-        """Ordered shutdown of all tabs."""
-        for i in range(self._tab_widget.count()):
-            tab = self._tab_widget.widget(i)
-            if isinstance(tab, DeviceTab):
-                tab.ordered_shutdown()
+        """Close every connection and wait until every session is on disk."""
+        self._usage.stop()
+        for tab in self.tabs():
+            tab.ordered_shutdown()
 
-    def closeEvent(self, event) -> None:
-        """Handle window close with strategic confirmation.
-
-        Flow:
-          - No tabs / no connections → close silently
-          - Connected devices (not logging) → confirm disconnect
-          - Active logging → warn about data, confirm with emphasis
-          - On confirm: ordered shutdown (flush → close → release)
-          - On cancel: abort close, return to application
-        """
-        # Gather state across all tabs
-        connected_ports: list[str] = []
-        logging_ports: list[str] = []
-
-        for i in range(self._tab_widget.count()):
-            tab = self._tab_widget.widget(i)
-            if isinstance(tab, DeviceTab) and tab.is_connected:
-                connected_ports.append(tab.port_name)
-                if tab.is_logging:
-                    logging_ports.append(tab.port_name)
-
-        # No active connections → close silently
-        if not connected_ports:
-            self._perform_shutdown()
-            event.accept()
-            return
-
-        # Build confirmation dialog
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Close WireTrace")
-        msg.setIcon(QMessageBox.Icon.Warning)
-
-        if logging_ports:
-            # High risk — active logging
-            n_log = len(logging_ports)
-            port_list = ", ".join(logging_ports)
-            msg.setText(
-                f"Logging is active on {n_log} device(s): {port_list}"
-            )
-            msg.setInformativeText(
-                "All log data will be flushed and saved before closing.\n\n"
-                "Are you sure you want to exit?"
-            )
-        else:
-            # Low risk — connected but not logging
-            n_con = len(connected_ports)
-            port_list = ", ".join(connected_ports)
-            msg.setText(
-                f"{n_con} device(s) connected: {port_list}"
-            )
-            msg.setInformativeText(
-                "All connections will be closed.\n\n"
-                "Are you sure you want to exit?"
-            )
-
-        cancel_btn = msg.addButton(
-            "Cancel", QMessageBox.ButtonRole.RejectRole
-        )
-        exit_btn = msg.addButton(
-            "Exit", QMessageBox.ButtonRole.AcceptRole
-        )
-        msg.setDefaultButton(cancel_btn)
-        msg.exec()
-
-        if msg.clickedButton() != exit_btn:
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Ask before closing would end a connection, a log or an export."""
+        if not self._exit_confirmed and not self._may_exit():
             event.ignore()
             return
-
-        self._perform_shutdown()
-        event.accept()
-
-    def _perform_shutdown(self) -> None:
-        """Save state and perform ordered shutdown of all tabs."""
+        self._updates.stop()
         self.save_window_state()
         self._config.save()
         self.shutdown_all_tabs()
+        event.accept()
+
+    def _may_exit(self) -> bool:
+        """Whether the window may close: at once if nothing is running,
+        otherwise only if the user agrees."""
+        tabs = self.tabs()
+        connected = [tab.port_name for tab in tabs if tab.is_connected]
+        logging_ports = [tab.port_name for tab in tabs if tab.is_logging]
+        exporting = any(tab.is_exporting for tab in tabs)
+        if not connected and not exporting:
+            return True
+        return self._confirm_exit(connected, logging_ports, exporting)
+
+    def _confirm_exit(self, connected: list[str], logging_ports: list[str], exporting: bool) -> bool:
+        details: list[str] = []
+        if logging_ports:
+            text = (
+                f"{format_count(len(logging_ports), 'device is', 'devices are')} "
+                f"still logging: {', '.join(logging_ports)}"
+            )
+            details.append(
+                "Exiting stops every log and closes every connection. "
+                "Everything received so far is written to the files first."
+            )
+        elif connected:
+            text = (
+                f"{format_count(len(connected), 'device is', 'devices are')} "
+                f"connected: {', '.join(connected)}"
+            )
+            details.append("Exiting closes every connection.")
+        else:
+            text = "An export is still being written"
+        if exporting:
+            details.append("Exiting now cancels the export and removes the unfinished file.")
+        return confirm(
+            self, f"Exit {APP_NAME}", text, detail="\n\n".join(details), proceed="Exit",
+        )

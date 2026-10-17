@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for window-geometry screen clamping (ui.window_geometry).
 
 Restoring a saved window position that lies on a now-disconnected monitor
@@ -21,8 +21,8 @@ class TestVisibleGeometry:
         assert visible_geometry(saved, [LAPTOP], MIN, LAPTOP) == saved
 
     def test_offscreen_external_monitor_is_recentred(self):
-        # The real bug: saved on an external monitor at x=2934 that is now
-        # disconnected. Only the laptop screen remains.
+        # Saved on an external monitor at x=2934 that is now disconnected.
+        # Only the laptop screen remains.
         saved = (2934, 246, 958, 844)
         x, y, w, h = visible_geometry(saved, [LAPTOP], MIN, LAPTOP)
         assert (w, h) == (958, 844)

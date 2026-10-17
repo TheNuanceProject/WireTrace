@@ -1,12 +1,12 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for ``core.plot_parsers.RegexParser`` and engine manual mode.
 
 The RegexParser is the user-declared half of the plotter: it lets a
 firmware engineer plot any format their device emits, even ones the
 auto-detect pipeline can't recognise. These tests pin down its
-contract — pattern validation, named-group extraction, partial
+contract: pattern validation, named-group extraction, partial
 matches, mode switching on the engine, and the test() helper that
-the Configure Plot dialog uses.
+the Configure plot dialog uses.
 """
 
 from __future__ import annotations
@@ -19,9 +19,12 @@ from core.plot_engine import (
     PlotMode,
 )
 from core.plot_parsers import RegexParser, RegexParserError
+from tests.clock import TickClock
+
+_tick = TickClock()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RegexParser — construction validation
+# RegexParser: construction validation
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRegexParserConstruction:
@@ -60,7 +63,7 @@ class TestRegexParserConstruction:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RegexParser — extract behaviour
+# RegexParser: extract behaviour
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRegexParserExtract:
@@ -88,7 +91,7 @@ class TestRegexParserExtract:
 
     def test_non_numeric_capture_excluded(self):
         """A named group that captures non-numeric text is dropped
-        from the result — keeps plotting alive when one channel
+        from the result: keeps plotting alive when one channel
         emits an error string while others stay healthy."""
         p = RegexParser(
             r"RPM:\s*(?P<RPM>\S+),\s*Voltage:\s*(?P<Voltage>[\d.]+)"
@@ -118,7 +121,7 @@ class TestRegexParserExtract:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RegexParser — test() helper for the Configure Plot dialog
+# RegexParser: test() helper for the Configure plot dialog
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRegexParserTest:
@@ -140,7 +143,7 @@ class TestRegexParserTest:
 
     def test_partial_match(self):
         """Pattern matches some lines, doesn't match others. The
-        dialog shows this as 'amber' — valid but firmware sometimes
+        dialog shows this as 'amber': valid but firmware sometimes
         doesn't emit the expected format."""
         p = RegexParser(r"x=(?P<x>\d+)")
         sample = ["x=1", "noise", "x=2", "WARNING", "x=3"]
@@ -150,7 +153,7 @@ class TestRegexParserTest:
         assert result["columns"] == ["x"]
 
     def test_zero_match_amber_state(self):
-        """No match — but pattern is structurally valid. Apply still
+        """No match: but pattern is structurally valid. Apply still
         allowed because firmware may emit the format later."""
         p = RegexParser(r"y=(?P<y>\d+)")
         sample = ["x=1", "x=2", "x=3"]
@@ -170,7 +173,7 @@ class TestRegexParserTest:
 
     def test_columns_filtered_to_actually_seen(self):
         """A column whose group never captured a numeric value is
-        excluded from the result's columns list — the dialog should
+        excluded from the result's columns list: the dialog should
         warn the user that 'b' didn't actually plot anything."""
         p = RegexParser(r"a=(?P<a>\d+)(?:\s+b=(?P<b>\d+))?")
         sample = ["a=1", "a=2", "a=3"]
@@ -180,7 +183,7 @@ class TestRegexParserTest:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — manual mode integration
+# PlotEngine: manual mode integration
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineManualMode:
@@ -210,9 +213,9 @@ class TestPlotEngineManualMode:
     def test_manual_mode_extracts_immediately(self):
         eng = PlotEngine()
         eng.set_manual_config(r"RPM:\s*(?P<RPM>\d+)")
-        # No 50-line warm-up — first DATA line lands in the buffer
+        # No 50-line warm-up: first DATA line lands in the buffer
         for i in range(10):
-            eng.process(f"RPM: {1400 + i}", "DATA")
+            eng.process(f"RPM: {1400 + i}", _tick())
         _x, y = eng.snapshot("RPM")
         assert y.size == 10
         assert y[0] == 1400.0
@@ -221,30 +224,28 @@ class TestPlotEngineManualMode:
     def test_manual_mode_skips_non_matching_lines(self):
         eng = PlotEngine()
         eng.set_manual_config(r"RPM:\s*(?P<RPM>\d+)")
-        eng.process("RPM: 1400", "DATA")
-        eng.process("WARNING: thermal", "DATA")
-        eng.process("RPM: 1401", "DATA")
-        eng.process("noise line with no match", "DATA")
-        eng.process("RPM: 1402", "DATA")
+        eng.process("RPM: 1400", _tick())
+        eng.process("WARNING: thermal", _tick())
+        eng.process("RPM: 1401", _tick())
+        eng.process("noise line with no match", _tick())
+        eng.process("RPM: 1402", _tick())
         _x, y = eng.snapshot("RPM")
         assert y.size == 3  # only the 3 RPM lines
 
-    def test_manual_mode_severity_lines_filtered(self):
-        """The TAG_DATA filter still applies in manual mode — severity-
-        tagged lines never reach the parser."""
+    def test_manual_mode_plots_any_line_the_pattern_matches(self):
+        """The pattern alone decides; the wording of the line does not."""
         eng = PlotEngine()
         eng.set_manual_config(r"RPM:\s*(?P<RPM>\d+)")
-        eng.process("RPM: 1400", "WARNING")  # filtered by tag
-        eng.process("RPM: 1401", "DATA")
+        eng.process("WARNING: RPM: 1400 above limit", _tick())
+        eng.process("RPM: 1401", _tick())
         _x, y = eng.snapshot("RPM")
-        assert y.size == 1
-        assert y[0] == 1401.0
+        assert list(y) == [1400.0, 1401.0]
 
     def test_set_auto_config_switches_back(self):
         eng = PlotEngine()
         eng.set_manual_config(r"RPM:\s*(?P<RPM>\d+)")
         for i in range(10):
-            eng.process(f"RPM: {1400 + i}", "DATA")
+            eng.process(f"RPM: {1400 + i}", _tick())
         assert eng.has_any_data
 
         eng.set_auto_config()
@@ -256,12 +257,12 @@ class TestPlotEngineManualMode:
 
     def test_manual_pattern_preserved_across_reset(self):
         """The disconnect/reconnect cycle must preserve the user's
-        manual config — re-entering it every reconnect would be
+        manual config: re-entering it every reconnect would be
         hostile UX."""
         eng = PlotEngine()
         eng.set_manual_config(r"RPM:\s*(?P<RPM>\d+)")
         for i in range(10):
-            eng.process(f"RPM: {1400 + i}", "DATA")
+            eng.process(f"RPM: {1400 + i}", _tick())
 
         # Disconnect: ordered_shutdown calls reset()
         eng.reset()
@@ -273,7 +274,7 @@ class TestPlotEngineManualMode:
 
         # Reconnect: lines flow, engine extracts using the preserved pattern
         for i in range(5):
-            eng.process(f"RPM: {1500 + i}", "DATA")
+            eng.process(f"RPM: {1500 + i}", _tick())
         _x, y = eng.snapshot("RPM")
         assert y.size == 5
         assert y[0] == 1500.0  # fresh data, no first-session leakage
@@ -303,7 +304,7 @@ class TestPlotEngineManualMode:
         eng = PlotEngine()
         eng.set_manual_config(r"RPM:\s*(?P<RPM>\d+)")
         for i in range(10):
-            eng.process(f"RPM: {1400 + i}", "DATA")
+            eng.process(f"RPM: {1400 + i}", _tick())
         assert eng.has_any_data
 
         eng.set_manual_config(r"V:\s*(?P<V>[\d.]+)")
@@ -312,11 +313,11 @@ class TestPlotEngineManualMode:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — recent_lines accessor
+# PlotEngine: recent_lines accessor
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineRecentLines:
-    """The Configure Plot dialog displays recent DATA lines as
+    """The Configure plot dialog displays recent DATA lines as
     reference and uses them as the corpus for pattern testing.
     """
 
@@ -327,25 +328,22 @@ class TestPlotEngineRecentLines:
     def test_collects_data_lines(self):
         eng = PlotEngine()
         for i in range(5):
-            eng.process(f"line {i}", "DATA")
+            eng.process(f"line {i}", _tick())
         assert eng.recent_lines() == [f"line {i}" for i in range(5)]
 
-    def test_excludes_non_data_tags(self):
-        """Recent-lines is for plotting reference. Severity and
-        command tags are excluded so the dialog only shows plottable
-        candidates."""
+    def test_holds_every_recent_line(self):
+        """The reference material is what the device actually sent."""
         eng = PlotEngine()
-        eng.process("data 1", "DATA")
-        eng.process("WARNING: thermal", "WARNING")
-        eng.process("INFO: heartbeat", "INFO")
-        eng.process("data 2", "DATA")
-        assert eng.recent_lines() == ["data 1", "data 2"]
+        lines = ["data 1", "WARNING: thermal", "INFO: heartbeat", "data 2"]
+        for line in lines:
+            eng.process(line, _tick())
+        assert eng.recent_lines() == lines
 
     def test_capped_at_buffer_size(self):
         eng = PlotEngine()
         n = PLOT_RECENT_LINES_BUFFER_SIZE + 50
         for i in range(n):
-            eng.process(f"line {i}", "DATA")
+            eng.process(f"line {i}", _tick())
         recent = eng.recent_lines()
         assert len(recent) == PLOT_RECENT_LINES_BUFFER_SIZE
         # Window holds the most recent lines
@@ -355,7 +353,7 @@ class TestPlotEngineRecentLines:
     def test_returns_copy(self):
         """Mutating the returned list must not affect the engine."""
         eng = PlotEngine()
-        eng.process("a", "DATA")
+        eng.process("a", _tick())
         recent = eng.recent_lines()
         recent.clear()
         assert eng.recent_lines() == ["a"]
@@ -363,7 +361,7 @@ class TestPlotEngineRecentLines:
     def test_cleared_on_reset(self):
         eng = PlotEngine()
         for i in range(10):
-            eng.process(f"line {i}", "DATA")
+            eng.process(f"line {i}", _tick())
         eng.reset()
         assert eng.recent_lines() == []
 
@@ -374,9 +372,9 @@ class TestPlotEngineRecentLines:
         # Push enough noise to make auto-detect give up
         from core.plot_engine import PLOT_DETECTION_GIVE_UP_LINES
         for i in range(PLOT_DETECTION_GIVE_UP_LINES + 5):
-            eng.process(f"random unstructured line {i}", "DATA")
+            eng.process(f"random unstructured line {i}", _tick())
         assert eng.detection_gave_up
 
         # And new lines should still feed recent_lines
-        eng.process("a structured: 42 line", "DATA")
+        eng.process("a structured: 42 line", _tick())
         assert "a structured: 42 line" in eng.recent_lines()

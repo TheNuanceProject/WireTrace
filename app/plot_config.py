@@ -1,11 +1,11 @@
-# SPDX-License-Identifier: MIT
-"""WireTrace plot configuration — value objects and profile storage.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""WireTrace plot configuration: value objects and profile storage.
 
 A ``PlotConfig`` describes one plotting setup: either auto-detect, or
 manual mode with a regex pattern. Configurations are saved as named
 profiles inside the existing ``preferences.ini`` under the ``[Plot]``
-section, JSON-encoded to support arbitrary profile names without INI
-escaping headaches.
+section, JSON-encoded, so any profile name can be stored without INI
+escaping.
 
 Schema in preferences.ini::
 
@@ -22,7 +22,7 @@ This module:
   - Always exposes the built-in "Auto-detect" profile, even on a fresh
     install or a corrupted config
 
-This module does NOT touch UI, the plot engine, or disk directly —
+This module does not touch the UI, the plot engine or the disk directly:
 all persistence flows through the injected ``ConfigManager``.
 """
 
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # ── Canonical built-in profile name ─────────────────────────────────────────
 #
 # Every install ships with this profile. It cannot be deleted or renamed
-# by the user — selecting it is how you say "use auto-detect."
+# by the user: selecting it is how you say "use auto-detect."
 AUTO_PROFILE_NAME = "Auto-detect"
 
 # Maximum profile name length. Long enough for descriptive names like
@@ -56,7 +56,7 @@ PROFILE_NAME_MAX = 64
 PROFILE_PATTERN_MAX = 4096
 
 
-# ── Data classes ────────────────────────────────────────────────────────────
+# ── Data classes ─────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class PlotConfig:
@@ -124,7 +124,7 @@ class PlotConfig:
 
 @dataclass
 class _ProfileStoreState:
-    """Internal — the loaded state of the profile store."""
+    """Internal: the loaded state of the profile store."""
 
     profiles: list[PlotConfig] = field(default_factory=list)
     default_name: str = AUTO_PROFILE_NAME
@@ -134,12 +134,17 @@ class PlotProfileStore:
     """Read/write plot profiles to ``preferences.ini`` via ConfigManager.
 
     Always exposes at least the built-in Auto-detect profile. Corrupt
-    or missing config falls back to defaults silently — the user
+    or missing config falls back to defaults silently: the user
     should never see a parse error from a stray byte in their INI.
 
-    All mutations (add / rename / delete / set_default) are written
+    All mutations (upsert / rename / delete / set_default) are written
     through to disk on each call so a crash mid-session doesn't lose
     the user's most recent edit.
+
+    Every tab and the Preferences dialog has a store of its own on the
+    one shared ``ConfigManager``. Each call therefore reads the current
+    profiles first, so a store never shows, or writes back, a list that
+    another store has since changed.
     """
 
     SECTION = "Plot"
@@ -149,20 +154,25 @@ class PlotProfileStore:
     def __init__(self, config: ConfigManager) -> None:
         self._config = config
         self._state = _ProfileStoreState()
+        # The stored text the state was last built from.
+        self._loaded_from: tuple[str, str] | None = None
         self._load()
 
     # ── Read API ─────────────────────────────────────────────────────────
 
     def all_profiles(self) -> list[PlotConfig]:
         """Return all profiles in display order (Auto-detect always first)."""
+        self._load()
         return list(self._state.profiles)
 
     def names(self) -> list[str]:
         """Return profile names in display order."""
+        self._load()
         return [p.name for p in self._state.profiles]
 
     def get(self, name: str) -> PlotConfig | None:
         """Return the named profile, or None if not found."""
+        self._load()
         for p in self._state.profiles:
             if p.name == name:
                 return p
@@ -175,6 +185,7 @@ class PlotProfileStore:
         Always returns a name that exists in the store. If the saved
         default no longer exists, falls back to AUTO_PROFILE_NAME.
         """
+        self._load()
         for p in self._state.profiles:
             if p.name == self._state.default_name:
                 return self._state.default_name
@@ -194,6 +205,7 @@ class PlotProfileStore:
         manual config (would break the contract), but its presence
         in the store is preserved by this method either way.
         """
+        self._load()
         if profile.name == AUTO_PROFILE_NAME and profile.mode != "auto":
             raise ValueError(
                 f"The built-in {AUTO_PROFILE_NAME!r} profile must remain in auto mode.",
@@ -213,6 +225,7 @@ class PlotProfileStore:
         The built-in Auto-detect profile cannot be deleted; attempting
         to do so is a no-op that returns False.
         """
+        self._load()
         if name == AUTO_PROFILE_NAME:
             return False
         for i, existing in enumerate(self._state.profiles):
@@ -231,6 +244,7 @@ class PlotProfileStore:
         Built-in profiles cannot be renamed. New name must be unique
         and within length limits.
         """
+        self._load()
         if old_name == AUTO_PROFILE_NAME:
             return False
         new_name = new_name.strip()
@@ -253,6 +267,7 @@ class PlotProfileStore:
 
     def set_default(self, name: str) -> bool:
         """Mark a profile as the default. Returns True on success."""
+        self._load()
         if not any(p.name == name for p in self._state.profiles):
             return False
         self._state.default_name = name
@@ -288,6 +303,9 @@ class PlotProfileStore:
 
         # Profiles JSON blob
         raw = self._config.get(self.SECTION, self.KEY_PROFILES, fallback="") or ""
+        if (raw, default_name) == self._loaded_from:
+            return
+        self._loaded_from = (raw, default_name)
 
         profiles: list[PlotConfig] = []
         if raw.strip():

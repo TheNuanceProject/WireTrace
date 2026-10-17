@@ -1,22 +1,15 @@
-# SPDX-License-Identifier: MIT
-"""Regression tests for the Preferences dialog's Plot section save/load.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests that the default plot profile chosen in Preferences is saved
+and read back.
 
-The bug: user saved a profile, set it as default in Preferences, but
-on relaunch the dropdown still showed Auto-detect and new tabs booted
-in auto mode. Root cause: ``PreferencesDialog._apply()`` saved
-Appearance/Display/Serial/Storage/Performance/Updates but had **no
-Plot section save**. The user's selection in the default-profile
-dropdown was silently discarded.
+What is held to:
+  1. Saving calls ``PlotProfileStore.set_default(name)``
+  2. Loading reads ``store.default_name`` and selects it
+  3. Save, close, reopen: the list shows the saved value
+  4. The store's persistence through ConfigManager works
 
-These tests pin the round-trip contract:
-  1. ``_apply()`` calls ``PlotProfileStore.set_default(name)``
-  2. ``_load_values()`` reads ``store.default_name`` and selects it
-  3. Save → close → reopen → combo shows the saved value
-  4. The store's underlying ConfigManager persistence works
-
-The dialog's Qt-bound parts can't run under stubs, so we test the
-state transitions at the data layer — same pattern as
-``test_plot_visibility_signal.py``.
+The dialog itself cannot run against the Qt stand-ins, so the state
+transitions are tested at the data layer.
 """
 
 from __future__ import annotations
@@ -25,7 +18,7 @@ from app.plot_config import AUTO_PROFILE_NAME, PlotConfig, PlotProfileStore
 
 
 class FakeConfig:
-    """Mirror of the FakeConfig in test_plot_config.py — fresh
+    """Mirror of the FakeConfig in test_plot_config.py: fresh
     instance per test so each test is hermetic."""
 
     def __init__(self) -> None:
@@ -83,7 +76,7 @@ class _MiniCombo:
 
 
 def _populate(combo: _MiniCombo, store: PlotProfileStore) -> None:
-    """Mirror of PreferencesDialog._refresh_plot_default_combo."""
+    """Mirror of PreferencesDialog._load_plot_profiles."""
     combo.blockSignals(True)
     try:
         combo.clear()
@@ -109,8 +102,7 @@ def _apply(combo: _MiniCombo, store: PlotProfileStore) -> None:
 
 
 class TestPlotPreferencesRoundTrip:
-    """Save → close → reopen → see saved value. The exact path that
-    was broken before the fix."""
+    """Save, close and reopen: the value saved is the value shown."""
 
     def test_initial_default_is_auto_detect(self):
         cfg = FakeConfig()
@@ -142,9 +134,8 @@ class TestPlotPreferencesRoundTrip:
         assert store.default_name == "Motor v3"
 
     def test_save_then_reopen_shows_saved_default(self):
-        """REGRESSION: the bug was that reopening Preferences after
-        Save always showed Auto-detect, regardless of what the user
-        had selected. _load_values must read from the store."""
+        """Reopening Preferences after Save shows the profile that was
+        chosen, not Auto-detect: _load_values reads it from the store."""
         cfg = FakeConfig()
         store = PlotProfileStore(cfg)
         store.upsert(PlotConfig.manual("Motor v3", r"RPM:\s*(?P<r>\d+)"))
@@ -197,9 +188,9 @@ class TestPlotPreferencesRoundTrip:
         store.set_default("Motor v3")
         assert store.default_name == "Motor v3"
 
-        # Delete the profile (e.g. via the Configure Plot dialog)
+        # Delete the profile (e.g. via the Configure plot dialog)
         store.delete("Motor v3")
-        # Now default falls back to Auto-detect — store contract
+        # Now default falls back to Auto-detect: store contract
         assert store.default_name == AUTO_PROFILE_NAME
 
         # Preferences reopen: combo should select Auto-detect
@@ -217,7 +208,7 @@ class TestPlotPreferencesRoundTrip:
         store.set_default("Motor v3")
 
         combo = _MiniCombo()
-        # Don't populate — combo is empty, currentData() returns None
+        # Don't populate: combo is empty, currentData() returns None
         _apply(combo, store)
 
         assert store.default_name == "Motor v3"

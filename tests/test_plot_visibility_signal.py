@@ -1,22 +1,13 @@
-# SPDX-License-Identifier: MIT
-"""Regression tests for the ``plot_visibility_changed`` signal contract.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests of the ``plot_visibility_changed`` signal.
 
-The bug: View → Live Plot menu's checkmark could drift out of sync
-with the actual plot panel visibility. Specifically, disconnecting
-hid the plot but the menu still showed it as checked, because the
-menu was only re-synced on tab switch — not on per-action transitions.
+Every change of the plot panel's visibility goes through one setter,
+``_set_plot_visible(value)``, which updates the state, updates the
+toolbar's Plot button and emits ``plot_visibility_changed(value)``. The
+main window follows the signal to keep the View menu's check mark in
+step with the current tab.
 
-The fix introduces a single setter ``_set_plot_visible(value)`` that
-all mutation paths must go through. The setter:
-  1. Updates ``_plot_visible``
-  2. Updates the toolbar Plot button
-  3. Emits ``plot_visibility_changed(value)``
-
-MainWindow connects to the signal and updates the menu's check when
-the emitting tab is the current one.
-
-These tests pin down the signal-contract invariants. The visual Qt
-parts aren't covered (they can't run headless), but the data flow is.
+The Qt parts cannot run against the stand-ins; the data flow can.
 """
 
 from __future__ import annotations
@@ -79,7 +70,7 @@ class TestPlotVisibilitySignalContract:
         assert rec.events == [True, False]
 
     def test_idempotent_call_still_emits(self):
-        """Re-syncing on tab switch is the use case — even if state
+        """Re-syncing on tab switch is the use case: even if state
         didn't change, the signal must fire so the menu can refresh
         defensively. The View menu pulls from this signal as its
         only sync source after initial creation."""
@@ -113,7 +104,7 @@ class TestPlotVisibilitySignalContract:
         rec = _Recorder()
         tab.connect(rec)
 
-        # Disconnect — must go through the setter
+        # Disconnect: must go through the setter
         tab._set_plot_visible(False)
 
         assert rec.events == [False], \
@@ -136,7 +127,7 @@ class TestPlotVisibilitySignalContract:
 class TestCurrentTabFilter:
     """MainWindow's handler must ignore emissions from non-current
     tabs. Background tabs changing their plot state shouldn't
-    perturb the menu — the menu always reflects the *current* tab.
+    perturb the menu: the menu always reflects the *current* tab.
     """
 
     def test_only_current_tab_drives_menu(self):
@@ -152,19 +143,19 @@ class TestCurrentTabFilter:
         tab_a.connect(lambda v: handler(tab_a, v))
         tab_b.connect(lambda v: handler(tab_b, v))
 
-        # Tab A is current. A turns plot on — menu reflects it.
+        # Tab A is current. A turns plot on: menu reflects it.
         tab_a._set_plot_visible(True)
         assert menu_checked[0] is True
 
-        # Tab B (background) turns plot on — menu unchanged.
+        # Tab B (background) turns plot on: menu unchanged.
         tab_b._set_plot_visible(True)
         assert menu_checked[0] is True
 
-        # Switch current to B — caller would re-sync menu via
+        # Switch current to B: caller would re-sync menu via
         # tab.is_plot_visible() here. The signal alone doesn't
         # cross-pollute.
         current_tab[0] = tab_b
 
-        # A (now background) turns plot off — menu still reflects B.
+        # A (now background) turns plot off: menu still reflects B.
         tab_a._set_plot_visible(False)
         assert menu_checked[0] is True

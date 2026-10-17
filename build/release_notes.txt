@@ -1,0 +1,24 @@
+WireTrace v2.0.0
+
+A rebuilt WireTrace. The path from the serial port to the disk is new, and so is the interface.
+
+Changed
+- The log is written straight from the port to the disk and never waits for the window. On disconnect, an unplugged device or closing, everything waiting is written before the result is reported.
+- Every session is recorded from the moment of connection, the most recent 1 GB of each tab, so it can be exported without a log running and after the device has gone.
+- If the disk cannot keep up or fails, WireTrace says how many lines were not written and marks the place in the file.
+- A new interface: a list of ports that updates by itself, a toolbar in every tab, level filters with counts, and Light, Dark and System themes.
+- One design with thenuanceproject.com: the same colours, sizes and type, with the Poppins font included, so WireTrace looks the same on every computer and no text is cut off.
+- Updates are verified by signature, and checked every 12 hours while WireTrace is open.
+- Licence: GNU General Public License, version 3 or later. Versions 1.0.0 to 1.2.0 remain under the MIT License.
+
+Added
+- Maximum log file size, a remembered log folder, saved commands, a HEX view, and firmware log levels (ESP-IDF, Zephyr).
+- The plot: point at it to read the values at any moment, measure between two cursors, and group values into panels by scale.
+- Usage statistics, off unless you switch them on.
+
+When updating from 1.x
+- Ctrl+S opens Export session (it was Quick Save), and the live plot is Ctrl+P.
+- Log files end lines with LF on every system. A preference restores CR LF.
+- On the first start, the theme is set to System and the console font and its size to the new defaults, once. The console text size is now in pixels. Every other setting is kept.
+
+Every change: CHANGELOG.md in the repository. Privacy: https://thenuanceproject.com/privacy/

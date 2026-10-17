@@ -1,130 +1,131 @@
 # Contributing to WireTrace
 
-Thanks for taking the time to look at this file. A few things to
-know up front, then the specifics.
+Thank you for your interest in WireTrace. This page says how to report
+a problem, suggest a feature or send a change.
 
 ## Who maintains this
 
-WireTrace is built and maintained by one person in spare hours.
-That shapes everything below. If it takes me a week or two to
-respond to an issue or pull request, that's normal, not a signal
-that you did something wrong.
+WireTrace is built and maintained by one person in spare hours. A reply
+to an issue or a pull request can take a week or two. That is normal
+and says nothing about your contribution.
 
 ## Ways to contribute
 
 ### Report a bug
 
-Open an issue with:
+Open an issue with the **Bug report** form. It asks for:
 
-- What version of WireTrace you're running (Help → About)
-- Your operating system and version
-- What you did, what you expected, what happened instead
+- The version of WireTrace (Help > About WireTrace)
+- Your operating system and how WireTrace was installed
+- What you did, what you expected and what happened instead
 - Steps to reproduce, if you can
-- A log snippet or screenshot if relevant
 
-If WireTrace crashed, check the logs directory for any crash logs
-and attach them:
+WireTrace keeps no log file of its own. Quote the exact words of any
+message it showed. On Linux, or when running from source, start it
+from a terminal and paste what the terminal printed.
 
-- **Windows:** `%APPDATA%\WireTrace\Logs\`
-- **macOS:** `~/Library/Application Support/WireTrace/Logs/`
-- **Linux:** `~/.config/WireTrace/Logs/`
+For a security issue, please do not open an issue. See
+[SECURITY.md](./SECURITY.md).
 
 ### Suggest a feature
 
-Open an issue with the **feature request** label. Describe:
+Open an issue with the **Feature request** form. Describe:
 
-- The problem you're trying to solve (not just the solution)
-- How you're working around it today
+- The problem you are trying to solve, not only the solution
+- How you work around it today
 - Who else might benefit
 
-Please open an issue to discuss before starting work on a feature
-PR. WireTrace aims to stay focused, and some otherwise-good
-features won't fit the scope. A short conversation saves everyone
-time.
+Please discuss a feature in an issue before you start on a pull
+request. WireTrace aims to stay focused, and some good ideas will not
+fit. A short conversation first saves time on both sides.
 
 ### Send a pull request
 
-For small fixes (typos, obvious bugs, documentation), just open
-the PR. For anything larger, please open an issue first so we can
-agree on the approach before you write the code.
+For small fixes (typos, obvious bugs, documentation), open the pull
+request directly. For anything larger, please open an issue first so
+the approach can be agreed before the code is written.
 
-**Before opening a PR:**
+Before opening a pull request:
 
-- The code runs locally with `python main.py`
-- The build completes for your platform:
-  - Windows: `python build/build.py --platform windows`
-  - macOS: `python build/build.py --platform macos`
-  - Linux: `python build/build.py --platform linux`
-- Tests and lints are green (see "Running tests" below)
-- No new runtime dependencies unless we've discussed it
-- Code style matches the surrounding file (PEP 8, type hints on
-  public functions, clear module boundaries)
+- The code runs with `python main.py`
+- The checks below pass
+- If you changed what a build contains (a dependency, a resource file,
+  the build script), the build completes on your system:
+  `python build/build.py` (see [BUILD_GUIDE.md](./BUILD_GUIDE.md))
+- No new runtime dependency, unless it was discussed first
+- The style matches the surrounding code: PEP 8, type hints on public
+  functions, clear module boundaries
 - A short description of what you changed and why
 
-## Running tests
+## Running the checks
 
-WireTrace has a pytest suite that runs against headless Qt stubs, so
-it works on any machine without needing a display or a serial device.
+There are two test suites. `tests/` checks the logic against stand-ins
+for Qt and needs no display. `tests_gui/` builds the real windows off
+screen.
 
-Install the dev tools (one-time):
+Install once:
 
-    pip install -r requirements-dev.txt
+    pip install -r requirements-gui-test.txt
 
-Then from the repo root:
+Then, from the repository root:
 
-    python -m pytest tests/ -q     # full test suite
-    python -m ruff check .         # lint + import-order check
+    python -m ruff check .
+    python -m pytest
+    python -m pytest tests_gui
 
-Both should be green before opening a PR. The CI workflow runs the
-same two commands; matching it locally saves a round-trip.
+CI runs the same checks on Linux, Windows and macOS. It also checks
+that every source file has its licence header
+(`python tools/add_spdx_headers.py --check`) and that the licence file
+matches the locked dependencies.
 
-**What gets merged quickly:**
+**Merged quickly:**
 
-- Bug fixes with a clear reproduction and a minimal diff
+- Bug fixes with a clear reproduction and a small change
 - Documentation improvements
-- Refactors that preserve behaviour and improve clarity
+- Refactoring that keeps behaviour and improves clarity
 
-**What gets discussed first:**
+**Discussed first:**
 
 - New features
 - New dependencies
-- Changes to the serial I/O, threading, or logging core
-- Changes to the update mechanism or build pipeline
+- Changes to the serial I/O, threading or logging core
+- Changes to the update mechanism or the build
 
-## Scope — what belongs and what doesn't
+## Scope
 
-WireTrace is a serial monitor. It shows serial data, logs it to
-disk, and exports it. That's it.
+WireTrace is a serial monitor. It shows what serial devices send, logs
+it, plots it, exports it, and sends commands back.
 
 In scope:
 
-- Improvements to the serial I/O path
-- Better handling of edge cases (disconnects, malformed data, large
-  throughput)
-- New export formats that make sense for serial data
-- Visual and usability improvements that don't bloat the UI
-- Cross-platform fixes (macOS and Linux — the build scripts support
-  both, but pre-built binaries aren't published yet)
+- Improvements to the path from the serial port to the screen and disk
+- Better handling of edge cases: disconnects, malformed data, high
+  rates
+- Export formats that make sense for serial data
+- Usability improvements that keep the interface simple
+- Fixes for a particular system. Windows and Linux builds are
+  published; macOS runs from source.
 
 Out of scope:
 
-- Protocol decoders for specific hardware (too specialized;
-  belongs in a plugin or a separate tool)
-- Network/TCP/UDP data capture (different problem)
-- Rich text editing or note-taking features
-- Anything that adds significant dependencies
+- Protocol decoders for particular hardware, which belong in a
+  separate tool
+- Capturing network data (TCP, UDP)
+- Text editing or note-taking
+- Anything that adds large dependencies
 
-If you're not sure, ask. "Out of scope" is not a rejection of the
-idea — it just means it doesn't belong in this specific tool.
+If you are not sure, ask. "Out of scope" is not a judgement of the
+idea; it means the idea belongs in another tool.
 
 ## Code of conduct
 
-Be kind. Assume good faith. Criticize code, not people. If
-something feels off about an interaction, say so calmly and we'll
-sort it out.
+Be kind and assume good faith. The
+[Code of Conduct](./CODE_OF_CONDUCT.md) applies everywhere in the
+project.
 
-## License
+## Licence
 
-By contributing to WireTrace, you agree that your contributions
-will be licensed under the [MIT License](./LICENSE), same as the
-rest of the project.
+By contributing to WireTrace, you agree that your contributions are
+licensed under the
+[GNU General Public License, version 3 or later](./LICENSE), the same
+as the rest of the project.

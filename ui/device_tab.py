@@ -1,12 +1,22 @@
-# SPDX-License-Identifier: MIT
-"""WireTrace device tab — one tab per connected serial device.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""WireTrace device tab: one tab per serial device.
 
 Central integration module. Each DeviceTab:
-  - Owns one SerialManager, SerialReader, LogEngine, CSVEngine, DeviceSession
-  - Contains all UI widgets (console, connection, command, search, filter, status, log controls)
-  - Implements progressive disclosure (spec section 6.1)
-  - Manages complete tab lifecycle (spec section 4.5)
-  - Guarantees ordered shutdown: stop reader → flush → close port → release
+  - Owns one DevicePipeline (port, reader thread, session writer) and
+    one DeviceSession
+  - Shows the first screen (choose a port) until a device has been
+    connected, then the session view: toolbar, console header, console,
+    command row and status bar
+  - Keeps the console on screen after a disconnect, so the last lines
+    before an unplug can still be read and exported
+
+The tab never touches the serial port or a log file itself. It asks the
+pipeline, and collects received lines from it on a timer, so nothing
+the window does can delay reading the port or writing the log.
+
+Messages follow one rule. A toast says something finished. A banner
+reports a problem and stays until it is over or dismissed. A dialog
+appears only when a decision is needed.
 """
 
 from __future__ import annotations
@@ -14,49 +24,96 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import re
+import time
 from datetime import datetime
+from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import QPoint, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QResizeEvent
 from PySide6.QtWidgets import (
-    QLabel,
-    QMessageBox,
+    QFileDialog,
+    QMenu,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from app._atomic import atomic_write_text
+from app.config import ConfigManager
 from app.constants import (
-    FILENAME_DEFAULT_NAME,
-    FILENAME_MAX_LENGTH,
-    FILENAME_TIMESTAMP_FORMAT,
-    LOG_TIMESTAMP_FORMAT,
+    DISPLAY_CHUNK_LINES,
+    DISPLAY_MAX_LAG_MS,
+    DISPLAY_SKIP_NOTICE_INTERVAL_MS,
+    DISPLAY_TICK_BUDGET_FRACTION,
+    FILTER_DEBOUNCE_MS,
+    MENU_SELECTION_PREVIEW_CHARS,
+    NAME_SEPARATOR,
+    SPOOL_DIRECTORY_NAME,
+    DisplayMode,
     ExportFormat,
+    LineEnding,
     TimestampMode,
+    get_cache_dir,
 )
+from app.file_names import output_base_path
 from app.plot_config import (
     PlotConfig,
     PlotProfileStore,
 )
-from core.csv_engine import CSVEngine
-from core.log_engine import LogConfig, LogEngine
-from core.plot_engine import PlotEngine
+from app.port_memory import PortMemory
+from app.saved_commands import SavedCommands
+from core.device_pipeline import DevicePipeline, TransportFactory
+from core.export_job import ExportRequest, ExportResult
+from core.log_writer import LogRequest, LogStartError, LogSummary
+from core.plot_engine import PlotEngine, PlotMode
 from core.plot_parsers import RegexParserError
-from core.serial_manager import SerialManager
-from core.serial_reader import SerialReader
+from core.records import RecordOrigin, notice_record
 from core.session import DeviceSession
-from core.tag_detector import TagDetector
+from core.transport import available_ports, open_serial_transport
+from ui import shortcuts
+from ui.dialogs.messages import confirm
+from ui.formatting import describe_files, format_count
+from ui.themes import tokens
 from ui.themes.theme_manager import ThemeManager
-from ui.widgets.command_bar import CommandBar
-from ui.widgets.connection_panel import ConnectionPanel
+from ui.widgets import banner as banners
+from ui.widgets.banner import BannerAction, BannerArea
+from ui.widgets.button import Button
+from ui.widgets.command_bar import LINE_ENDING_NAMES, CommandBar
+from ui.widgets.connect_page import ConnectPage
+from ui.widgets.console_header import ConsoleHeader
 from ui.widgets.console_view import ConsoleView
-from ui.widgets.filter_bar import FilterBar
-from ui.widgets.log_control_bar import LogControlBar
 from ui.widgets.search_bar import SearchBar
 from ui.widgets.status_bar import DeviceStatusBar
+from ui.widgets.status_dot import LinkState
+from ui.widgets.styling import set_primary
+from ui.widgets.tab_toolbar import TabToolbar
 from ui.widgets.toast import Toast
+from updater.usage import Feature, Problem
+
+if TYPE_CHECKING:
+    from ui.widgets.plot_view import PlotView
+    from ui.widgets.plot_window import PlotWindow
 
 logger = logging.getLogger(__name__)
+
+_MS_PER_SECOND = 1000
+_CLOCK_FORMAT = "%H:%M:%S"
+NEW_TAB_TITLE = "New tab"
+_SELECTION_NAME = "Selection"
+
+# Keys of the banners a tab can show. One banner per key.
+_BANNER_CONNECT = "connect"
+_BANNER_LOST = "lost"
+_BANNER_SERIAL = "serial"
+_BANNER_LOG_WRITE = "log-write"
+_BANNER_LOG_END = "log-end"
+_BANNER_DROPPED = "dropped"
+_BANNER_RECORDING = "recording"
+_BANNER_SPOOL = "spool"
+_BANNER_SKIPPING = "skipping"
+_BANNER_COMMAND = "command"
+_BANNER_EXPORT = "export"
 
 
 class DeviceTab(QWidget):
@@ -65,67 +122,103 @@ class DeviceTab(QWidget):
     Signals:
         title_changed(str):           Tab title should update.
         connection_changed(bool):     Connection state changed.
-        close_requested():            User wants to close this tab.
+        link_state_changed(object):   The ``LinkState`` shown on the tab.
         timestamp_mode_changed(obj):  Timestamp display mode changed.
+        display_mode_changed(obj):    Text or HEX display was chosen.
+        following_changed(bool):      The console started or stopped
+                                      following the newest line.
+        line_ending_changed(obj):     The line ending for commands.
         plot_visibility_changed(bool): Plot panel was shown or hidden.
                                       MainWindow listens to this to
-                                      keep the View → Live Plot menu
-                                      check in sync with the actual
-                                      visibility, no matter which path
-                                      caused the change (toolbar
-                                      button, menu, or disconnect).
+                                      keep the View menu in step with
+                                      the actual visibility, whichever
+                                      path caused the change.
+        usage_noted(object):          A ``Feature`` was used or a
+                                      ``Problem`` occurred, for the
+                                      usage statistics.
+        line_rate_measured(int):      Lines received in the last second.
     """
 
     title_changed = Signal(str)
     connection_changed = Signal(bool)
-    close_requested = Signal()
-    timestamp_mode_changed = Signal(object)  # TimestampMode — bubbles to MainWindow
+    link_state_changed = Signal(object)
+    timestamp_mode_changed = Signal(object)
+    display_mode_changed = Signal(object)
+    following_changed = Signal(bool)
+    line_ending_changed = Signal(object)
     plot_visibility_changed = Signal(bool)
+    usage_noted = Signal(object)
+    line_rate_measured = Signal(int)
 
     def __init__(
         self,
         theme_manager: ThemeManager,
-        config_manager=None,
+        config_manager: ConfigManager,
         parent: QWidget | None = None,
+        transport_factory: TransportFactory = open_serial_transport,
     ) -> None:
         super().__init__(parent)
 
         self._theme_manager = theme_manager
         self._config_manager = config_manager
+        self._port_memory = PortMemory(config_manager)
 
         # Core modules (per-tab isolation)
         self._session = DeviceSession()
-        self._serial_manager = SerialManager(self)
-        self._serial_reader: SerialReader | None = None
-        self._log_engine: LogEngine | None = None
-        self._csv_engine: CSVEngine | None = None
-        self._tag_detector = TagDetector()
+        self._pipeline = DevicePipeline(
+            spool_root=os.path.join(get_cache_dir(), SPOOL_DIRECTORY_NAME),
+            display_capacity=config_manager.max_console_lines,
+            max_pending_lines=config_manager.log_buffer_max_entries,
+            flush_interval_ms=config_manager.log_flush_interval_ms,
+            transport_factory=transport_factory,
+            parent=self,
+        )
 
-        # Disconnect-flow state. ``disconnected`` from the SerialManager is
-        # the single authoritative trigger for tearing the tab down, so a
-        # user-clicked disconnect and a device-initiated drop (unplug, I/O
-        # error) converge on one code path. ``_disconnecting`` guards that
-        # path against re-entrancy (the user path closes the port, which
-        # emits ``disconnected`` and re-enters); ``_user_initiated`` lets
-        # the teardown choose a quiet toast vs. an unexpected-drop dialog.
-        self._disconnecting = False
-        self._user_initiated_disconnect = False
-        # Set while a programmatic teardown is running (tab close, app
-        # quit, or the ordered_shutdown invoked from within the disconnect
-        # teardown itself). It tells _on_disconnected to skip the
-        # live-disconnect UI/dialog, since closing the port during these
-        # paths still emits ``disconnected`` but is not a device drop.
-        self._suppress_disconnect_ui = False
+        # True from a connect request until the pipeline answers it.
+        self._connecting = False
+        # Port and baud rate of the session that is, or was last,
+        # recorded. An export made after the device has gone still
+        # names them.
+        self._recorded_port = ""
+        self._recorded_baud = 0
+        # Set by ordered_shutdown; the tab is not used after that.
+        self._shut_down = False
+
+        # The name on the tab: the port's description, or a name the
+        # user gave it.
+        self._port_description = ""
+        self._custom_name = ""
+
+        # When the running log started, on the monotonic clock.
+        self._log_started = 0.0
+
+        # Lines the console skipped and has not yet reported, and when
+        # it last reported any.
+        self._skipped_lines = 0
+        self._last_skip_notice = 0.0
+
+        # Collects received lines from the pipeline while connected.
+        self._display_timer = QTimer(self)
+        self._display_timer.timeout.connect(self._drain_display)
+
+        # Re-renders the console once typing in the filter box pauses.
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(FILTER_DEBOUNCE_MS)
+        self._filter_timer.timeout.connect(self._apply_filter)
 
         # Plot subsystem.
-        # PlotEngine is eager so it can buffer data from session start
-        # even before the user opens the plot panel. PlotView is lazy
-        # — pyqtgraph imports are deferred until first toggle.
+        # PlotEngine is eager so it holds the most recent lines from
+        # session start; it only parses while the plot panel is open.
+        # PlotView is lazy: pyqtgraph imports are deferred until first
+        # toggle.
         self._plot_engine: PlotEngine = PlotEngine(self)
-        self._plot_view: QWidget | None = None
+        self._plot_engine.set_active(False)
+        self._plot_view: PlotView | None = None
+        self._plot_window: PlotWindow | None = None
         self._plot_visible: bool = False
 
-        # Plot profile store — read-through to the shared ConfigManager.
+        # Plot profile store: read-through to the shared ConfigManager.
         # On first construction we apply the user's default profile so
         # tabs open with the engineer's preferred mode rather than
         # always starting in auto-detect.
@@ -137,23 +230,20 @@ class DeviceTab(QWidget):
             self._plot_active_config, emit_toast=False,
         )
 
-        # Build UI
         self._setup_ui()
         self._connect_signals()
+        self._apply_initial_preferences()
+        self.apply_preferences()
 
-        # Progressive disclosure: start with only connection panel
-        self._set_connected_ui_visible(False)
-
-        # Load available ports
-        self._refresh_ports()
-
-    # ══════════════════════════════════════════════════════════════════════
-    # PUBLIC API
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Public API ───────────────────────────────────────────────────────────
 
     @property
     def session(self) -> DeviceSession:
         return self._session
+
+    @property
+    def console(self) -> ConsoleView:
+        return self._console
 
     @property
     def is_connected(self) -> bool:
@@ -164,107 +254,104 @@ class DeviceTab(QWidget):
         return self._session.is_logging
 
     @property
+    def has_session(self) -> bool:
+        """True once a device has been connected in this tab."""
+        return self._stack.currentWidget() is self._session_view
+
+    @property
     def port_name(self) -> str:
         return self._session.port_name
 
+    @property
+    def link_state(self) -> LinkState:
+        if self._session.is_logging:
+            return LinkState.LOGGING
+        if self._session.is_connected:
+            return LinkState.CONNECTED
+        return LinkState.IDLE
+
+    @property
+    def title(self) -> str:
+        """The text on the tab."""
+        if not self._recorded_port:
+            return self._custom_name or NEW_TAB_TITLE
+        name = self._custom_name or self._port_description
+        return f"{self._recorded_port}{NAME_SEPARATOR}{name}" if name else self._recorded_port
+
+    @property
+    def custom_name(self) -> str:
+        return self._custom_name
+
+    def rename(self, name: str) -> None:
+        """Give the tab a name. An empty name returns to the port's description.
+
+        The name is remembered for the port, so it is back the next time
+        that port is connected.
+        """
+        self._custom_name = name.strip()
+        if self._recorded_port:
+            self._port_memory.remember(self._recorded_port, tab_name=self._custom_name)
+        self._show_plot_window_state()
+        self.title_changed.emit(self.title)
+
     def ordered_shutdown(self) -> None:
-        """Ordered shutdown per spec section 4.5."""
+        """Close the connection and wait until the session is on disk.
+
+        Called when the tab or the application closes. The tab must not
+        be used afterwards.
+        """
+        if self._shut_down:
+            return
+        self._shut_down = True
         logger.info("Ordered shutdown: %s", self._session.port_name)
-        # 1. Disconnect data relay and stop reader
-        if self._serial_reader is not None:
-            # Stop data flow: disconnect relay signal first.
-            # Already-disconnected signals raise RuntimeError/TypeError —
-            # safe to suppress (idempotent teardown).
-            with contextlib.suppress(RuntimeError, TypeError):
-                self._serial_manager.data_received.disconnect(
-                    self._serial_reader.enqueue_data)
-            self._serial_reader.stop()
-            self._serial_reader.wait(2000)
-            # B8: disconnect the reader's outbound signals before dropping
-            # the reference. Done AFTER stop()/wait() so the thread's final
-            # flush (a trailing partial line and the final rate update)
-            # still reaches its slots; disconnecting here removes the
-            # connection records that would otherwise keep the dead
-            # SerialReader alive across every disconnect/reconnect cycle.
-            # Each disconnect is guarded independently so one already-gone
-            # connection doesn't skip the others.
-            for signal, slot in (
-                (self._serial_reader.line_received, self._on_line_received),
-                (self._serial_reader.rate_updated, self._on_rate_updated),
-                (self._serial_reader.error_occurred, self._on_serial_error),
-            ):
-                with contextlib.suppress(RuntimeError, TypeError):
-                    signal.disconnect(slot)
-            self._serial_reader = None
-
-        # 2-3. Stop logging (flush + close files)
-        if self._log_engine is not None:
-            if self._log_engine.is_logging:
-                self._log_engine.stop_logging()
-            self._log_engine.stop()
-            self._log_engine.wait(2000)
-            # B8: drop the log engine's error-signal connection too, for
-            # the same reason — it otherwise pins the dead LogEngine.
-            with contextlib.suppress(RuntimeError, TypeError):
-                self._log_engine.error_occurred.disconnect(self._on_log_error)
-            self._log_engine = None
-
-        self._csv_engine = None
-
-        # 4. Close serial port. This emits ``disconnected``; suppress the
-        #    live-disconnect UI for it, since a programmatic shutdown (tab
-        #    close, app quit, or the disconnect teardown's own close) is
-        #    not a device drop and must not pop the unexpected-drop dialog.
-        prev_suppress = self._suppress_disconnect_ui
-        self._suppress_disconnect_ui = True
-        try:
-            self._serial_manager.close()
-        finally:
-            self._suppress_disconnect_ui = prev_suppress
-
-        # 5. Per-connection-cycle reset of the plot view + engine.
-        #    CRITICAL: this is NOT a permanent teardown — the redraw
-        #    timer must keep running so a subsequent reconnect sees
-        #    fresh data render immediately. The view's reset_session()
-        #    clears traces/legend/buffers but leaves the timer alone.
-        #    The plot view's permanent shutdown happens only when this
-        #    tab is destroyed, via close_tab() below.
+        self._display_timer.stop()
+        self._filter_timer.stop()
+        self._pipeline.shutdown()
+        if self._plot_window is not None:
+            self.set_plot_floating(False)
         if self._plot_view is not None:
-            reset_session = getattr(
-                self._plot_view, "reset_session", None,
-            ) or getattr(self._plot_view, "reset", None)
-            if callable(reset_session):
-                reset_session()
-        else:
-            # No view yet — just clear engine state.
-            self._plot_engine.reset()
-
-        # 6. Update session
+            self._plot_view.shutdown()
         self._session.reset_connection_state()
 
-    def apply_theme(self) -> None:
-        """Re-apply tag colors from current theme.
+    def apply_preferences(self) -> None:
+        """Apply the saved preferences to this tab."""
+        config = self._config_manager
+        self._console.set_font_family(config.font_family)
+        self._console.set_font_size(config.font_size)
+        self._console.set_max_lines(config.max_console_lines)
+        self._console.set_hide_blank_lines(config.hide_blank_lines)
+        self._console.set_severity_colours(config.color_mode)
+        self._display_timer.setInterval(config.gui_update_interval_ms)
+        self._pipeline.configure(
+            display_capacity=config.max_console_lines,
+            max_pending_lines=config.log_buffer_max_entries,
+            flush_interval_ms=config.log_flush_interval_ms,
+        )
 
-        set_tag_colors triggers a full rebuild of all console lines,
-        so existing data is immediately visible in the new theme.
+    def _apply_initial_preferences(self) -> None:
+        """Start the tab in the state the preferences ask for.
+
+        These apply to a new tab only: later they are the user's choice
+        for that tab and a change in Preferences does not undo it.
         """
-        self._console.set_tag_colors(self._theme_manager.get_tag_colors())
+        config = self._config_manager
+        self._connect_page.set_baud(config.default_baud_rate)
+        mode = (
+            TimestampMode.RELATIVE if config.timestamp_mode == "relative"
+            else TimestampMode.ABSOLUTE
+        )
+        self.set_timestamp_mode(mode)
+        self._console.set_auto_follow(config.auto_scroll)
+        self._header.set_following(self._console.following)
 
-    # ══════════════════════════════════════════════════════════════════════
-    # PLOT CONFIGURATION API
-    # ══════════════════════════════════════════════════════════════════════
-
-    def plot_profile_store(self) -> PlotProfileStore:
-        """The shared profile store. Used by the Configure Plot dialog
-        and the Preferences dialog's Plot section."""
-        return self._plot_profile_store
+    # ── Plot configuration API ───────────────────────────────────────────────
 
     def plot_recent_lines(self) -> list[str]:
-        """Most recent DATA lines from the live engine.
+        """Most recent lines from the live engine.
 
-        The Configure Plot dialog uses this as reference material and
+        The Configure plot dialog uses this as reference material and
         as the corpus for its Test button. Always returns a list
-        (possibly empty) — never raises.
+        (possibly empty) and never raises.
         """
         try:
             return self._plot_engine.recent_lines()
@@ -272,12 +359,8 @@ class DeviceTab(QWidget):
             logger.exception("plot_engine.recent_lines() failed")
             return []
 
-    def active_plot_config(self) -> PlotConfig:
-        """The PlotConfig currently applied to this tab's engine."""
-        return self._plot_active_config
-
     def open_plot_config_dialog(self) -> None:
-        """Open the Configure Plot dialog rooted on this tab.
+        """Open the Configure plot dialog rooted on this tab.
 
         The dialog is constructed lazily so its imports don't pay a
         cost on tabs that never use it. The applied config is stored
@@ -301,15 +384,17 @@ class DeviceTab(QWidget):
         if not isinstance(config, PlotConfig):
             return
         self._apply_plot_config_to_engine(config, emit_toast=True)
+        if self._recorded_port and self._plot_active_config is config:
+            self._port_memory.remember(self._recorded_port, plot_profile=config.name)
 
     def _apply_plot_config_to_engine(
         self, config: PlotConfig, *, emit_toast: bool = True,
     ) -> None:
         """Push a PlotConfig down to the engine.
 
-        Auto mode → engine.set_auto_config().
-        Manual mode → engine.set_manual_config(pattern). On invalid
-        pattern (shouldn't happen — dialog validates first), falls
+        Auto mode calls engine.set_auto_config(); manual mode calls
+        engine.set_manual_config(pattern). On invalid
+        pattern (should not happen: the dialog validates first), falls
         back to auto and surfaces the error via Toast.
         """
         try:
@@ -317,6 +402,8 @@ class DeviceTab(QWidget):
                 self._plot_engine.set_auto_config()
             else:
                 self._plot_engine.set_manual_config(config.pattern)
+                if self._plot_visible:
+                    self.usage_noted.emit(Feature.PLOT_PATTERN)
         except RegexParserError as exc:
             logger.warning("Plot config rejected by engine: %s", exc)
             if emit_toast:
@@ -331,227 +418,201 @@ class DeviceTab(QWidget):
             mode_label = "Auto-detect" if config.mode == "auto" else "manual"
             Toast.info(self, f"Plot mode: {mode_label} ({config.name})")
 
-    def set_display_mode(self, mode) -> None:
+    def set_display_mode(self, mode: DisplayMode) -> None:
         """Switch between TEXT and HEX display modes."""
-        from app.constants import DisplayMode
         self._session.display_mode = mode
-        if self._serial_reader is not None:
-            self._serial_reader.display_mode = mode
-        Toast.info(self, f"Display mode: {'HEX' if mode == DisplayMode.HEX else 'Text'}")
+        if mode is DisplayMode.HEX:
+            self.usage_noted.emit(Feature.HEX)
+        self._pipeline.set_display_mode(mode)
+        self._toolbar.set_display_mode(mode)
+        self.display_mode_changed.emit(mode)
+
+    def set_timestamp_mode(self, mode: TimestampMode) -> None:
+        """Show the time of day, or the time since the previous line."""
+        self._session.timestamp_mode = mode
+        self._console.set_timestamp_mode(mode)
+        self._header.set_timestamp_mode(mode)
+        self.timestamp_mode_changed.emit(mode)
+
+    @property
+    def following(self) -> bool:
+        return self._console.following
+
+    def set_following(self, follow: bool) -> None:
+        """Stay on the newest line, or stop where the view is."""
+        self._console.set_auto_follow(follow)
+
+    @property
+    def line_ending(self) -> LineEnding:
+        return self._command_bar.line_ending
+
+    def set_line_ending(self, ending: LineEnding) -> None:
+        self._command_bar.set_line_ending(ending)
+
+    @property
+    def is_exporting(self) -> bool:
+        return self._pipeline.is_exporting
 
     def confirm_close(self) -> bool:
-        """Confirm close if logging is active. Returns True to proceed."""
-        if not self._session.is_logging:
+        """Confirm close if it would end a log or an export. Returns
+        True to proceed."""
+        if not self._session.is_logging and not self.is_exporting:
             return True
 
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Close Tab")
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setText(f"Logging is active on {self._session.port_name}.")
-        msg.setInformativeText(
-            "Closing will stop logging and disconnect the device."
+        if self._session.is_logging:
+            return confirm(
+                self, "Close tab", f"{self._session.port_name} is still logging",
+                detail=(
+                    "Closing the tab stops the log and disconnects the device. "
+                    "Everything received so far is written to the file first.\n\n"
+                    f"{os.path.basename(self._session.log_file_path)}"
+                ),
+                proceed="Stop log and close", stay="Keep logging",
+            )
+        return confirm(
+            self, "Close tab", "An export is still being written",
+            detail="Closing the tab now cancels the export and removes the unfinished file.",
+            proceed="Cancel export and close", stay="Keep exporting",
         )
-        cancel_btn = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        close_btn = msg.addButton("Close Tab", QMessageBox.ButtonRole.AcceptRole)
-        msg.setDefaultButton(cancel_btn)
-        msg.exec()
-        return msg.clickedButton() == close_btn
 
-    # ══════════════════════════════════════════════════════════════════════
-    # UI SETUP
-    # ══════════════════════════════════════════════════════════════════════
+    # ── UI setup ─────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
+        metrics = tokens.METRICS
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Connection panel (always visible)
-        self._connection_panel = ConnectionPanel()
-        layout.addWidget(self._connection_panel)
+        self._banners = BannerArea()
+        layout.addWidget(self._banners)
 
-        # Log controls
-        self._log_control_bar = LogControlBar()
-        layout.addWidget(self._log_control_bar)
+        self._stack = QStackedWidget()
+        layout.addWidget(self._stack, 1)
 
-        # Empty state placeholder (shown before connection)
-        self._placeholder = self._build_placeholder()
-        layout.addWidget(self._placeholder, 1)
+        # First screen: choose a port.
+        self._connect_page = ConnectPage(port_note=self._port_note)
+        self._stack.addWidget(self._connect_page)
 
-        # Console (with padding so it doesn't touch edges).
-        # The console_wrapper is the first pane of a vertical splitter
-        # so we can add the live-plot panel below it on demand without
-        # disturbing the existing layout.
+        # Session view: shown from the first connection on.
+        self._session_view = QWidget()
+        view = QVBoxLayout(self._session_view)
+        view.setContentsMargins(0, 0, 0, 0)
+        view.setSpacing(0)
+        self._stack.addWidget(self._session_view)
+
+        self._toolbar = TabToolbar()
+        view.addWidget(self._toolbar)
+
+        self._header = ConsoleHeader()
+        view.addWidget(self._header)
+
+        # Search row, hidden until Find is asked for.
+        self._search_bar = SearchBar()
+        view.addWidget(self._search_bar)
+
         self._console = ConsoleView()
-        self._console.set_tag_colors(self._theme_manager.get_tag_colors())
-        console_wrapper = QWidget()
-        cw_layout = QVBoxLayout(console_wrapper)
-        cw_layout.setContentsMargins(8, 4, 8, 4)
-        cw_layout.setSpacing(0)
-        cw_layout.addWidget(self._console)
-        self._console_wrapper = console_wrapper
-        # Floor on the console height — drags can shrink it but never
-        # to zero, so the user always has a console to type into.
-        console_wrapper.setMinimumHeight(120)
+        self._console.setMinimumHeight(metrics.pane_min_height)
+        self._console.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._search_bar.set_console(self._console)
+        self._search_bar.search_changed.connect(
+            lambda text: self.usage_noted.emit(Feature.FIND) if text else None
+        )
 
+        # Shown over the console while the view is not on the newest line.
+        self._new_lines = Button(parent=self._console)
+        self._new_lines.setObjectName("newLinesButton")
+        self._new_lines.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_primary(self._new_lines)
+        self._new_lines.hide()
+
+        # The console is the first pane of a vertical splitter, so the
+        # live plot can be added below it on demand.
         self._console_plot_splitter = QSplitter(Qt.Orientation.Vertical)
         self._console_plot_splitter.setObjectName("consolePlotSplitter")
-        # Children NOT collapsible — drag-to-collapse is confusing here
-        # because the user expects the toggle button to be the close
-        # mechanism. The toolbar's Plot button is the one true toggle.
+        # The panes cannot be collapsed: the Plot button is the one way to
+        # close the plot, so a drag cannot make a pane vanish.
         self._console_plot_splitter.setChildrenCollapsible(False)
-        self._console_plot_splitter.setHandleWidth(6)
-        # Discoverability: the 6px handle between console and plot is
-        # easily mistaken for a static divider. A tooltip on the handle
-        # makes the resize affordance obvious without adding any chrome.
-        # We set it after addWidget calls (which create the handle),
-        # via the handle(1) accessor — handle 0 is the dummy at index 0.
-        self._console_plot_splitter.addWidget(console_wrapper)
-        # Console occupies all height until the plot is opened.
+        self._console_plot_splitter.setHandleWidth(metrics.splitter_handle)
+        self._console_plot_splitter.addWidget(self._console)
         self._console_plot_splitter.setStretchFactor(0, 1)
         with contextlib.suppress(Exception):
             handle = self._console_plot_splitter.handle(1)
             if handle is not None:
-                handle.setToolTip("Drag to resize console and plot panes")
+                handle.setToolTip("Drag to resize the console and the plot")
         # Remembered split ratio across toggles within a session.
-        self._splitter_ratio: tuple[int, int] = (1, 1)  # 50/50 default
-        layout.addWidget(self._console_plot_splitter, 1)
+        self._splitter_ratio: tuple[int, int] = (1, 1)
+        view.addWidget(self._console_plot_splitter, 1)
 
-        # Command bar
-        self._command_bar = CommandBar()
-        layout.addWidget(self._command_bar)
+        self._saved_commands = SavedCommands(self._config_manager)
+        self._command_bar = CommandBar(self._saved_commands)
+        self._command_bar.set_sending_enabled(False)
+        view.addWidget(self._command_bar)
 
-        # Filter bar (always visible when connected)
-        self._filter_bar = FilterBar()
-        layout.addWidget(self._filter_bar)
-
-        # Search bar (hidden by default, shown via Ctrl+F — appears below filter)
-        self._search_bar = SearchBar()
-        self._search_bar.set_console(self._console)
-        layout.addWidget(self._search_bar)
-
-        # Status bar
         self._status_bar = DeviceStatusBar()
-        layout.addWidget(self._status_bar)
+        view.addWidget(self._status_bar)
 
     def _connect_signals(self) -> None:
-        # Connection
-        self._connection_panel.connect_requested.connect(self._on_connect)
-        self._connection_panel.disconnect_requested.connect(self._on_disconnect)
-        self._connection_panel.refresh_requested.connect(self._refresh_ports)
-        self._connection_panel.error_feedback.connect(
-            lambda msg: Toast.warning(self, msg)
-        )
+        # First screen
+        self._connect_page.connect_requested.connect(self._on_connect)
+        self._connect_page.ports_wanted.connect(self.refresh_ports)
+        self._connect_page.port_chosen.connect(self._on_port_chosen)
 
-        # Serial manager
-        self._serial_manager.connected.connect(self._on_connected)
-        self._serial_manager.disconnected.connect(self._on_disconnected)
-        self._serial_manager.error_occurred.connect(self._on_serial_error)
+        # Toolbar
+        self._toolbar.connect_requested.connect(self._on_connect)
+        self._toolbar.disconnect_requested.connect(self.disconnect_device)
+        self._toolbar.ports_wanted.connect(self.refresh_ports)
+        self._toolbar.log_toggled.connect(self.toggle_log)
+        self._toolbar.pause_toggled.connect(self._on_pause_toggle)
+        self._toolbar.clear_requested.connect(self.clear_console)
+        self._toolbar.export_requested.connect(self.export_session)
+        self._toolbar.plot_toggled.connect(self._on_plot_toggled)
+        self._toolbar.display_mode_changed.connect(self.set_display_mode)
+        self._toolbar.search_requested.connect(self.activate_search)
+        self._toolbar.hint.connect(lambda text: Toast.warning(self, text))
 
-        # Log controls
-        self._log_control_bar.log_on_clicked.connect(self._on_log_on)
-        self._log_control_bar.log_off_clicked.connect(self._on_log_off)
-        self._log_control_bar.pause_clicked.connect(self._on_pause_toggle)
-        self._log_control_bar.clear_clicked.connect(self._on_clear)
-        self._log_control_bar.export_clicked.connect(self._on_export)
-        self._log_control_bar.plot_toggled.connect(self._on_plot_toggled)
+        # Pipeline
+        self._pipeline.connected.connect(self._on_connected)
+        self._pipeline.connect_failed.connect(self._on_connect_failed)
+        self._pipeline.disconnected.connect(self._on_disconnected)
+        self._pipeline.transport_error.connect(self._on_serial_error)
+        self._pipeline.command_failed.connect(self._on_command_failed)
+        self._pipeline.stats_updated.connect(self._on_stats_updated)
+        self._pipeline.log_write_failed.connect(self._on_log_write_failed)
+        self._pipeline.log_write_recovered.connect(self._on_log_write_recovered)
+        self._pipeline.lines_dropped.connect(self._on_lines_dropped)
+        self._pipeline.spool_unavailable.connect(self._on_spool_unavailable)
+        self._pipeline.writer_error.connect(self._on_writer_error)
+        self._pipeline.export_finished.connect(self._on_export_finished)
 
-        # Command bar
+        # Console header
+        self._header.levels_changed.connect(self._console.set_levels)
+        self._header.filter_changed.connect(self._on_filter_changed)
+        self._header.timestamp_mode_changed.connect(self.set_timestamp_mode)
+        self._header.follow_requested.connect(self.set_following)
+
+        # Console
+        self._console.level_counts_changed.connect(self._on_level_counts_changed)
+        self._console.following_changed.connect(self._on_following_changed)
+        self._console.unseen_lines_changed.connect(self._on_unseen_lines_changed)
+        self._console.customContextMenuRequested.connect(self._show_console_menu)
+        self._new_lines.clicked.connect(lambda: self.set_following(True))
+
+        # Command row
         self._command_bar.command_sent.connect(self._on_command_sent)
-
-        # Filter
-        self._filter_bar.filter_changed.connect(self._on_filter_changed)
-
-        # Console line count
-        self._console.line_count_changed.connect(self._on_line_count_changed)
-
-        # Timestamp toggle
-        self._status_bar.timestamp_mode_toggled.connect(self._on_timestamp_toggled)
-
-    def _build_placeholder(self) -> QWidget:
-        """Build a clean empty-state placeholder shown before device connection."""
-        from PySide6.QtGui import QFont as _QFont
-
-        placeholder = QWidget()
-        placeholder.setObjectName("emptyTabPlaceholder")
-        lay = QVBoxLayout(placeholder)
-        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.setSpacing(6)
-
-        title = QLabel("No Device Connected")
-        title.setObjectName("placeholderTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tf = _QFont()
-        tf.setPointSize(15)
-        tf.setWeight(_QFont.Weight.DemiBold)
-        title.setFont(tf)
-
-        subtitle = QLabel(
-            "Select a port and baud rate above, then click Connect."
+        self._command_bar.line_ending_changed.connect(self._on_line_ending_changed)
+        self._command_bar.edit_saved_requested.connect(self.edit_saved_commands)
+        self._command_bar.saved_command_chosen.connect(
+            lambda: self.usage_noted.emit(Feature.SAVED_COMMANDS)
         )
-        subtitle.setObjectName("placeholderSubtitle")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sf = subtitle.font()
-        sf.setPointSize(11)
-        subtitle.setFont(sf)
 
-        shortcut_text = QLabel(
-            "Ctrl+T  New Tab   ·   Ctrl+N  Start Log   ·   Ctrl+F  Search"
-        )
-        shortcut_text.setObjectName("placeholderHint")
-        shortcut_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        scf = shortcut_text.font()
-        scf.setPointSize(9)
-        shortcut_text.setFont(scf)
+    # ── Connection ───────────────────────────────────────────────────────────
 
-        lay.addStretch(3)
-        lay.addWidget(title)
-        lay.addSpacing(4)
-        lay.addWidget(subtitle)
-        lay.addStretch(2)
-        lay.addWidget(shortcut_text)
-        lay.addSpacing(24)
-
-        return placeholder
-
-    def _set_connected_ui_visible(self, visible: bool) -> None:
-        self._log_control_bar.setVisible(visible)
-        self._console_plot_splitter.setVisible(visible)
-        self._command_bar.setVisible(visible)
-        self._filter_bar.setVisible(visible)
-        self._log_control_bar.set_connected(visible)
-        self._command_bar.set_enabled(visible)
-        # Toggle placeholder vs console
-        self._placeholder.setVisible(not visible)
-
-        if not visible:
-            # Disconnect tear-down: the plot panel goes too. The view
-            # is destructively reset so a future reconnection starts
-            # from a clean slate.
-            if self._plot_view is not None:
-                self._plot_view.setVisible(False)
-                self._plot_view.reset()
-            # Route through the single setter so the toolbar button
-            # AND the View → Live Plot menu both reflect the new state.
-            # Bypassing this and setting _plot_visible directly was the
-            # cause of the menu showing a stale check after disconnect.
-            self._set_plot_visible(False)
-            # Splitter ratio resets to the 50/50 default for the
-            # next session — old ratios from a different device
-            # shouldn't carry over.
-            self._splitter_ratio = (1, 1)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # CONNECTION
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _refresh_ports(self) -> None:
-        ports = SerialManager.available_ports()
+    def refresh_ports(self) -> None:
+        """Read the list of serial ports again."""
+        ports = available_ports()
         in_use = self._get_in_use_ports()
-        self._connection_panel.set_ports(
-            [(p.device, p.display_name) for p in ports],
-            in_use_ports=in_use,
-        )
+        self._connect_page.set_ports(ports, in_use)
+        self._toolbar.set_ports([(p.device, p.display_name) for p in ports], in_use)
 
     def _get_in_use_ports(self) -> set[str]:
         """Get ports connected in other tabs (via parent MainWindow)."""
@@ -562,593 +623,938 @@ class DeviceTab(QWidget):
             return all_ports - {my_port} if my_port else all_ports
         return set()
 
-    @Slot(str, int)
-    def _on_connect(self, port: str, baud: int) -> None:
-        Toast.info(self, f"Connecting to {port}...")
-        self._status_bar.set_status(f"Connecting to {port}...")
-        if not self._serial_manager.open(port, baud):
-            Toast.error(self, f"Could not open {port} — the port may be in use")
-            self._status_bar.set_status("Connection failed")
-
-    @Slot()
-    def _on_disconnect(self) -> None:
-        # User-initiated. Mark intent, then request the port close. The
-        # manager's ``disconnected`` signal drives the actual teardown in
-        # _on_disconnected, so this path and a device-initiated drop share
-        # one implementation. If the port is somehow already closed (no
-        # signal would fire), tear down directly so the UI still resets.
-        self._user_initiated_disconnect = True
-        port = self._session.port_name
-        if self._serial_manager.is_open():
-            self._serial_manager.close()
-        else:
-            self._teardown_after_disconnect(port, user_initiated=True)
-
-    def _teardown_after_disconnect(
-        self, port_name: str, *, user_initiated: bool,
-    ) -> None:
-        """Single authoritative teardown for any disconnect.
-
-        Re-entrancy guarded: the user path closes the port, which emits
-        ``disconnected`` and re-enters here; ``ordered_shutdown`` also
-        closes the port again. ``close()`` clears its port name before
-        emitting, so the second close does not re-emit — and the guard
-        makes any re-entry a no-op, so teardown runs exactly once.
-        """
-        if self._disconnecting:
-            return
-        self._disconnecting = True
-        try:
-            was_logging = self._session.is_logging
-            self.ordered_shutdown()  # also resets the session (step 6)
-            self._set_connected_ui_visible(False)
-            self._connection_panel.set_connected(False)
-            # Reset status-bar metrics fully (port, baud, data rate, line
-            # count) — leaving stale numbers after a disconnect is
-            # confusing.
-            self._status_bar.set_disconnected()
-            self._status_bar.set_status("Disconnected")
-            self.title_changed.emit("New Tab")
-            self.connection_changed.emit(False)
-            if user_initiated:
-                if port_name:
-                    Toast.info(self, f"Disconnected from {port_name}")
-            else:
-                self._show_unexpected_disconnect_dialog(port_name, was_logging)
-        finally:
-            self._user_initiated_disconnect = False
-            self._disconnecting = False
-
-    def _show_unexpected_disconnect_dialog(
-        self, port_name: str, was_logging: bool,
-    ) -> None:
-        msg = (
-            f"The connection to {port_name} was lost unexpectedly.\n\n"
-            "This typically happens when:\n"
-            "  • The device was unplugged\n"
-            "  • Another application took control of the port\n"
-            "  • The USB connection was interrupted\n"
-        )
-        if was_logging:
-            msg += "\nYour log data has been saved and flushed to disk."
-        msg += "\n\nPlease reconnect when the device is available."
-        QMessageBox.warning(self, "Device Disconnected", msg)
+    def _port_note(self, port: str) -> str:
+        return self._port_memory.note(port, LINE_ENDING_NAMES)
 
     @Slot(str)
-    def _on_connected(self, port_name: str) -> None:
-        baud = self._connection_panel.selected_baud
+    def _on_port_chosen(self, port: str) -> None:
+        """Offer the baud rate this port was last used with."""
+        settings = self._port_memory.get(port)
+        if settings is not None and settings.baud_rate:
+            self._connect_page.set_baud(settings.baud_rate)
 
+    def connect_device(self) -> None:
+        """Connect to the port and baud rate currently chosen."""
+        if self.has_session:
+            port, baud = self._toolbar.selected_port, self._toolbar.selected_baud
+        else:
+            port, baud = self._connect_page.selected_port, self._connect_page.selected_baud
+        if port and baud is not None:
+            self._on_connect(port, baud)
+        else:
+            Toast.warning(self, "Choose a serial port and a valid baud rate first")
+
+    @Slot(str, int)
+    def _on_connect(self, port: str, baud: int) -> None:
+        if self._shut_down or self._connecting or self._session.is_connected:
+            return
+        self._connecting = True
+        self._banners.clear(_BANNER_CONNECT)
+        self._status_bar.set_connecting(port)
+        self._pipeline.open(port, baud)
+
+    @Slot(str, str)
+    def _on_connect_failed(self, port: str, reason: str) -> None:
+        self._connecting = False
+        logger.error("Could not open %s: %s", port, reason)
+        self._banners.show_banner(
+            _BANNER_CONNECT, banners.ERROR,
+            f"Could not open {port}", reason,
+        )
+        if self.has_session:
+            self._status_bar.set_disconnected(port, "could not be opened")
+        else:
+            self._status_bar.set_idle()
+
+    @Slot()
+    def disconnect_device(self) -> None:
+        # The pipeline answers with ``disconnected`` once the session is
+        # on disk; the tab is reset there. A device that drops on its
+        # own arrives at the same place.
+        if self._session.is_connected:
+            self._pipeline.close()
+
+    @Slot(str, int)
+    def _on_connected(self, port_name: str, baud: int) -> None:
+        self._connecting = False
+        self._session.reset_metrics()
+        self._session.reset_logging_state()
         self._session.port_name = port_name
         self._session.baud_rate = baud
         self._session.is_connected = True
+        self._recorded_port = port_name
+        self._recorded_baud = baud
         self._session.session_start = datetime.now()
-        self._session.reset_metrics()
 
-        # Start reader thread (producer-consumer: manager relays bytes → reader processes)
-        self._serial_reader = SerialReader(self._session.display_mode)
-        self._serial_manager.data_received.connect(self._serial_reader.enqueue_data)
-        self._serial_reader.line_received.connect(self._on_line_received)
-        self._serial_reader.rate_updated.connect(self._on_rate_updated)
-        self._serial_reader.error_occurred.connect(self._on_serial_error)
-        self._serial_reader.start()
+        # A new connection starts with a clean console and plot, and
+        # with logging off.
+        self._banners.clear_all()
+        self._console.clear_console()
+        if self._plot_view is not None:
+            self._plot_view.reset_session()
+        else:
+            self._plot_engine.reset()
+        self._skipped_lines = 0
+        self._display_timer.start()
 
-        # Prepare log engine
-        self._log_engine = LogEngine()
-        self._log_engine.error_occurred.connect(self._on_log_error)
-        self._log_engine.start()
-
-        # UI
-        self._connection_panel.set_connected(True)
-        self._set_connected_ui_visible(True)
-        self._status_bar.set_connection_info(port_name, baud)
-
-        # Tab title
-        ports = SerialManager.available_ports()
-        desc = next((p.description for p in ports if p.device == port_name), "")
-        title = f"{port_name} — {desc}" if desc else port_name
-        self.title_changed.emit(title)
-        self.connection_changed.emit(True)
-        Toast.success(self, f"Connected to {port_name} @ {baud} baud")
-
-    @Slot(str)
-    def _on_disconnected(self, port_name: str) -> None:
-        # Authoritative signal that the port is closed — whether the user
-        # asked for it or the device dropped. Drives the single teardown;
-        # _user_initiated_disconnect (set by _on_disconnect) selects the
-        # quiet vs. unexpected-drop presentation. During a programmatic
-        # teardown (tab close / app quit) the port close also emits this,
-        # but there's no live tab to update — skip the UX.
-        logger.info("Disconnected: %s", port_name)
-        if self._suppress_disconnect_ui:
-            return
-        self._teardown_after_disconnect(
-            port_name, user_initiated=self._user_initiated_disconnect,
+        self._port_description = next(
+            (p.description for p in available_ports() if p.device == port_name), "",
         )
+        self._restore_port_settings(port_name)
+        self._port_memory.remember(
+            port_name, baud_rate=baud, line_ending=self.line_ending.name,
+        )
+
+        self._stack.setCurrentWidget(self._session_view)
+        self._toolbar.select(port_name, baud)
+        self._toolbar.set_connected(True)
+        self._command_bar.set_sending_enabled(True)
+        self._status_bar.set_connected(port_name, baud)
+        self._status_bar.set_not_logging()
+        self._status_bar.set_total_lines(0)
+
+        self._show_plot_window_state()
+        self.title_changed.emit(self.title)
+        self.connection_changed.emit(True)
+        self.link_state_changed.emit(self.link_state)
+
+    def _restore_port_settings(self, port: str) -> None:
+        """Bring back what this port was last used with."""
+        settings = self._port_memory.get(port)
+        self._custom_name = settings.tab_name if settings is not None else ""
+        if settings is None:
+            return
+        ending = settings.line_ending_choice()
+        if ending is not None:
+            self._command_bar.set_line_ending(ending)
+        if settings.plot_profile:
+            profile = self._plot_profile_store.get(settings.plot_profile)
+            if profile is not None:
+                self._apply_plot_config_to_engine(profile, emit_toast=False)
+
+    @Slot(str, bool, object)
+    def _on_disconnected(
+        self, port_name: str, unexpected: bool, summary: LogSummary | None,
+    ) -> None:
+        """Settle the tab once the pipeline reports the connection closed.
+
+        By now the session, including its final lines, is on disk, so
+        what the tab says about the log is what actually happened. The
+        console stays on screen with every line received.
+        """
+        logger.info("Disconnected: %s", port_name)
+        self._display_timer.stop()
+        self._show_remaining_lines()
+        self._session.reset_connection_state()
+        self._plot_engine.set_active(False)
+
+        moment = datetime.now().strftime(_CLOCK_FORMAT)
+        self._toolbar.set_connected(False)
+        self._command_bar.set_sending_enabled(False)
+        self._banners.clear(_BANNER_LOG_WRITE)
+        self._banners.clear(_BANNER_SKIPPING)
+        self._status_bar.set_disconnected(
+            port_name, f"lost at {moment}" if unexpected else f"closed at {moment}",
+        )
+        self._status_bar.set_not_logging()
+        self._show_plot_window_state()
+        self.connection_changed.emit(False)
+        self.link_state_changed.emit(self.link_state)
+
+        self._note_log_losses(summary)
+        if unexpected:
+            self.usage_noted.emit(Problem.CONNECTION_LOST)
+            self._add_notice("Connection lost.")
+            self._show_connection_lost(port_name, moment, summary)
+        elif summary is not None and self._log_had_losses(summary):
+            self._show_log_losses(summary)
+        else:
+            message = f"Disconnected from {port_name}"
+            if summary is not None:
+                message += f". {self._log_outcome(summary)}"
+            self._toast_with_folder(Toast.info, message, summary)
+
+    def _show_remaining_lines(self) -> None:
+        """Draw the lines that were still on their way to the console."""
+        while True:
+            records, skipped = self._pipeline.take_display(DISPLAY_CHUNK_LINES)
+            self._skipped_lines += skipped
+            if not records:
+                break
+            self._console.append_records(records)
+        self._last_skip_notice = 0.0
+        self._report_skipped_lines()
+
+    def _show_connection_lost(
+        self, port_name: str, moment: str, summary: LogSummary | None,
+    ) -> None:
+        detail = "The device was unplugged or another program took the port."
+        if summary is not None:
+            detail += f" {self._log_outcome(summary)}"
+        actions = [BannerAction("Connect again", self.connect_device)]
+        if summary is not None and summary.text_paths:
+            folder = os.path.dirname(summary.text_paths[0])
+            actions.insert(0, BannerAction("Open log folder", lambda: self._open_folder(folder)))
+        actions.insert(-1, BannerAction("Export session", self.export_session))
+        self._banners.show_banner(
+            _BANNER_LOST, banners.WARNING,
+            f"The connection to {port_name} was lost at {moment}", detail, tuple(actions),
+        )
+
+    def _note_log_losses(self, summary: LogSummary | None) -> None:
+        if summary is not None and (summary.lines_lost or summary.csv_rows_lost):
+            self.usage_noted.emit(Problem.LINES_LOST)
+
+    @staticmethod
+    def _log_had_losses(summary: LogSummary) -> bool:
+        return bool(summary.error or summary.lines_lost or summary.csv_rows_lost)
+
+    @staticmethod
+    def _log_outcome(summary: LogSummary) -> str:
+        """Describe in one sentence how a log ended."""
+        described = describe_files(summary.text_paths, summary.csv_paths)
+        outcome = f"The log was closed with {format_count(summary.lines_written, 'line')}"
+        if described:
+            outcome += f": {described}"
+        outcome += "."
+        if summary.lines_lost:
+            outcome += f" {format_count(summary.lines_lost, 'line')} could not be written."
+        if summary.csv_rows_lost:
+            outcome += f" {format_count(summary.csv_rows_lost, 'CSV row')} could not be written."
+        if summary.error:
+            outcome += f" {summary.error}."
+        return outcome
+
+    def _show_log_losses(self, summary: LogSummary) -> None:
+        self._banners.show_banner(
+            _BANNER_LOG_END, banners.ERROR,
+            "The log is incomplete", self._log_outcome(summary),
+            self._folder_actions(summary),
+        )
+
+    def _folder_actions(self, summary: LogSummary | None) -> tuple[BannerAction, ...]:
+        if summary is None or not summary.text_paths:
+            return ()
+        folder = os.path.dirname(summary.text_paths[0])
+        return (BannerAction("Open log folder", lambda: self._open_folder(folder)),)
+
+    def _toast_with_folder(self, show, message: str, summary: LogSummary | None) -> None:
+        """Show a toast that offers the log's folder, when there is a log."""
+        if summary is not None and summary.text_paths:
+            folder = os.path.dirname(summary.text_paths[0])
+            show(self, message, "Show", lambda: self._open_folder(folder))
+        else:
+            show(self, message)
 
     @Slot(str)
     def _on_serial_error(self, error_msg: str) -> None:
-        """Surface a serial error.
+        """Report a serial error that did not end the connection.
 
-        A fatal error that drops the link is handled by the manager
-        closing the port and emitting ``disconnected`` (see B1 /
-        _on_disconnected) — by the time this runs the teardown has already
-        set is_connected False, so we don't double-report. If we are still
-        connected but the manager's port is no longer open, the error took
-        the link down without a clean close, so tear down to match the
-        real state. Otherwise it's a transient error — just inform the
-        user. No error-string matching is used to make this decision.
+        An error that does end it is reported by the pipeline as an
+        unexpected disconnect instead.
         """
         logger.error("Serial error: %s", error_msg)
-        if not self._session.is_connected:
+        self._banners.show_banner(
+            _BANNER_SERIAL, banners.WARNING,
+            f"A communication error occurred on {self._session.port_name}",
+            f"{error_msg}. The connection is still open.",
+        )
+
+    # ── Data ─────────────────────────────────────────────────────────────
+
+    @Slot()
+    def _drain_display(self) -> None:
+        """Move received lines from the pipeline into the console and plot.
+
+        A tick spends a share of the refresh interval and leaves the
+        rest for input and painting. If lines arrive faster than this
+        machine draws them, the console skips ahead rather than fall
+        ever further behind the device; what it skips is reported and
+        is still recorded and logged.
+        """
+        budget = (
+            self._display_timer.interval() * DISPLAY_TICK_BUDGET_FRACTION
+            / _MS_PER_SECOND
+        )
+        started = time.perf_counter()
+        drawn = 0
+        while True:
+            records, skipped = self._pipeline.take_display(DISPLAY_CHUNK_LINES)
+            self._skipped_lines += skipped
+            # Reported before the lines that follow the gap are drawn,
+            # so the notice sits where the skipped lines would have been.
+            self._report_skipped_lines()
+            if not records:
+                break
+            self._console.append_records(records)
+            for record in records:
+                if record.origin is RecordOrigin.DEVICE:
+                    self._plot_engine.process(record.text, record.timestamp)
+            drawn += len(records)
+            elapsed = time.perf_counter() - started
+            if elapsed >= budget:
+                lines_per_second = drawn / elapsed * DISPLAY_TICK_BUDGET_FRACTION
+                self._pipeline.limit_display_backlog(max(
+                    DISPLAY_CHUNK_LINES,
+                    int(lines_per_second * DISPLAY_MAX_LAG_MS / _MS_PER_SECOND),
+                ))
+                break
+
+    def _report_skipped_lines(self) -> None:
+        """Tell the user, at most once per interval, how many lines the
+        console skipped. The banner goes once the console keeps up again."""
+        now = time.monotonic()
+        if (now - self._last_skip_notice) * _MS_PER_SECOND < DISPLAY_SKIP_NOTICE_INTERVAL_MS:
             return
-        if not self._serial_manager.is_open():
-            self._teardown_after_disconnect(
-                self._session.port_name, user_initiated=False,
-            )
-        else:
-            Toast.warning(self, "Communication error — connection still active")
+        if not self._skipped_lines:
+            self._banners.clear(_BANNER_SKIPPING)
+            return
+        self._last_skip_notice = now
+        skipped, self._skipped_lines = self._skipped_lines, 0
+        self._add_notice(
+            f"{skipped:,} lines were not shown: the display could not "
+            "keep up. They are in the session and in the log.",
+        )
+        self._banners.show_banner(
+            _BANNER_SKIPPING, banners.WARNING,
+            f"The console is skipping lines to keep up: {skipped:,} not shown",
+            "They are all in the session and in the log.",
+        )
 
-    # ══════════════════════════════════════════════════════════════════════
-    # DATA
-    # ══════════════════════════════════════════════════════════════════════
+    def _add_notice(self, message: str) -> None:
+        """Show a line of WireTrace's own in the console.
 
-    @Slot(str, str)
-    def _on_line_received(self, line: str, tag: str) -> None:
-        now = datetime.now()
-        ts = now.strftime(LOG_TIMESTAMP_FORMAT) + f".{now.microsecond // 1000:03d}"
+        Lines received earlier may still be on their way to the console,
+        so the notice takes the timestamp of the line it follows. The
+        timestamps in the console then never run backwards.
+        """
+        moment = self._console.last_timestamp or datetime.now()
+        self._console.append_records([notice_record(message, moment)])
 
-        # Console (may be filtered)
-        self._console.append_line(line, tag)
-
-        # LogEngine ALWAYS receives everything
-        if self._log_engine and self._log_engine.is_logging:
-            self._log_engine.enqueue(ts, line, tag)
-
-        # Plot engine receives every line; it filters non-DATA tags
-        # internally, mirroring CSV Option C.
-        self._plot_engine.process(line, tag)
-
-        # Metrics
-        self._session.total_lines += 1
-        self._session.total_bytes += len(line.encode("utf-8"))
-
-    @Slot(int)
-    def _on_rate_updated(self, lines_per_sec: int) -> None:
+    @Slot(int, int)
+    def _on_stats_updated(self, lines_per_sec: int, total_lines: int) -> None:
         self._session.data_rate = lines_per_sec
+        self._session.total_lines = total_lines
+        self.line_rate_measured.emit(lines_per_sec)
         self._status_bar.set_data_rate(lines_per_sec)
+        self._status_bar.set_total_lines(total_lines)
+        self._show_log_status()
+
+    @Slot()
+    def _on_level_counts_changed(self) -> None:
+        self._header.set_level_counts(self._console.level_counts())
+
+    @Slot(bool)
+    def _on_following_changed(self, following: bool) -> None:
+        self._header.set_following(following)
+        self.following_changed.emit(following)
 
     @Slot(int)
-    def _on_line_count_changed(self, count: int) -> None:
-        self._status_bar.set_total_lines(count)
-        self._filter_bar.update_counts(self._console.visible_count, self._console.total_count)
+    def _on_unseen_lines_changed(self, count: int) -> None:
+        self._new_lines.setVisible(count > 0)
+        if count:
+            self._new_lines.setText(format_count(count, "new line"))
+            self._place_new_lines_button()
 
-    # ══════════════════════════════════════════════════════════════════════
-    # PLOT TOGGLE
-    # ══════════════════════════════════════════════════════════════════════
+    def _place_new_lines_button(self) -> None:
+        metrics = tokens.METRICS
+        self._new_lines.adjustSize()
+        viewport = self._console.viewport().geometry()
+        self._new_lines.move(
+            viewport.right() - self._new_lines.width() - metrics.space_6,
+            viewport.bottom() - self._new_lines.height() - metrics.space_4,
+        )
+        self._new_lines.raise_()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if self._new_lines.isVisible():
+            self._place_new_lines_button()
+
+    # ── Plot toggle ──────────────────────────────────────────────────────────
 
     @Slot(bool)
     def _on_plot_toggled(self, show: bool) -> None:
-        """Show or hide the live-plot panel below the console.
+        """Show or hide the plot, under the console or in its own window.
 
-        - Default split is 50/50 the first time the panel opens.
-        - Subsequent toggles within the session restore the user's
-          most recent ratio (so dragging the splitter is preserved
-          across hide-show cycles).
-        - Truly hides the plot widget on toggle-off (not just shrinks
-          to zero — Qt splitters with collapsible=False would refuse).
-
-        All state mutation goes through ``_set_plot_visible`` so the
-        toolbar button AND the View menu stay in sync via the
-        ``plot_visibility_changed`` signal.
+        Under the console the split starts even; later the split the
+        user dragged is kept across hiding and showing. Every change
+        goes through ``_set_plot_visible`` so the toolbar button and
+        the View menu stay in step.
         """
         if show:
             self._ensure_plot_constructed()
-            assert self._plot_view is not None
+        if self._plot_window is not None:
+            self._plot_window.setVisible(show)
+        elif show:
             self._plot_view.setVisible(True)
-
-            total_h = self._console_plot_splitter.size().height() or 600
-            # Honor the remembered ratio. Floor each pane at a sensible
-            # minimum so the user can always see both panes.
-            r_console, r_plot = self._splitter_ratio
-            ratio_total = r_console + r_plot
-            console_h = max(120, int(total_h * r_console / ratio_total))
-            plot_h = max(120, total_h - console_h)
-            self._console_plot_splitter.setSizes([console_h, plot_h])
-        else:
-            if self._plot_view is not None:
-                # Remember the user's current ratio for next open.
-                sizes = self._console_plot_splitter.sizes()
-                if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
-                    self._splitter_ratio = (sizes[0], sizes[1])
-                self._plot_view.setVisible(False)
-
+            self._restore_split()
+        elif self._plot_view is not None:
+            self._remember_split()
+            self._plot_view.setVisible(False)
         self._set_plot_visible(show)
 
+    def _remember_split(self) -> None:
+        sizes = self._console_plot_splitter.sizes()
+        if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
+            self._splitter_ratio = (sizes[0], sizes[1])
+
+    def _restore_split(self) -> None:
+        """Give the console and the plot the share of the height they last had."""
+        total = self._console_plot_splitter.size().height()
+        console_share, plot_share = self._splitter_ratio
+        floor = tokens.METRICS.pane_min_height
+        console_height = max(floor, total * console_share // (console_share + plot_share))
+        self._console_plot_splitter.setSizes([console_height, max(floor, total - console_height)])
+
     def _set_plot_visible(self, value: bool) -> None:
-        """Single source of truth for plot-visibility state.
+        """Record whether the plot is shown, and tell everything that shows it.
 
-        Every code path that changes whether the plot panel is shown
-        must go through here. This guarantees:
-          1. ``self._plot_visible`` is the canonical state
-          2. The toolbar Plot button reflects it
-          3. ``plot_visibility_changed`` is emitted so MainWindow can
-             sync the View → Live Plot menu's checkmark
-
-        Without this single setter, the View menu could (and did) lag
-        behind reality — e.g. ``View → Live Plot`` showing checked
-        after disconnect had already hidden the panel.
+        The only place the state changes: the engine reads values from
+        lines only while the plot is open, the toolbar button follows,
+        and ``plot_visibility_changed`` lets the View menu follow too.
+        It announces even when nothing changed, so a listener can
+        bring itself up to date after a tab switch.
         """
-        if self._plot_visible == value:
-            # Idempotent — but still emit so external observers can
-            # re-sync defensively after a tab switch.
-            self._log_control_bar.set_plot_open(value)
-            self.plot_visibility_changed.emit(value)
-            return
         self._plot_visible = value
-        self._log_control_bar.set_plot_open(value)
+        self._plot_engine.set_active(value)
+        if value:
+            self.usage_noted.emit(Feature.PLOT)
+            if self._plot_engine.mode is PlotMode.MANUAL:
+                self.usage_noted.emit(Feature.PLOT_PATTERN)
+        self._toolbar.set_plot_open(value)
         self.plot_visibility_changed.emit(value)
 
     def is_plot_visible(self) -> bool:
-        """True when the plot panel is currently shown."""
+        """True when the plot is shown, wherever it is."""
         return self._plot_visible
 
+    def is_plot_floating(self) -> bool:
+        """True when the plot is in a window of its own."""
+        return self._plot_window is not None
+
     def toggle_plot(self) -> None:
-        """Public API for the View menu to flip the plot panel."""
+        """Show the plot if it is hidden, hide it if it is shown."""
         self._on_plot_toggled(not self._plot_visible)
 
     def _ensure_plot_constructed(self) -> None:
-        """Lazily construct the PlotView on first toggle.
+        """Build the plot view on first use.
 
-        Imports pyqtgraph only when the plot is actually opened, so
-        users who never use the plotter don't pay the import cost.
+        pyqtgraph is imported only here, so a session that never opens
+        the plot does not pay for loading it.
         """
         if self._plot_view is not None:
             return
-        # Lazy import — pyqtgraph is loaded only here.
         from ui.widgets.plot_view import PlotView
+
+        # No minimum of its own: the plot's floor is what its content
+        # needs (a chart at least a pane high, its toolbar, and the
+        # measuring table while measuring). A minimum set here would
+        # replace that, and the splitter would squeeze the table.
         self._plot_view = PlotView(self._plot_engine, self._theme_manager)
-        # Floor on the plot height too — same reasoning as console.
-        self._plot_view.setMinimumHeight(120)
-        # Wire the toolbar's Configure… button and the placeholder's
-        # CTA to the dialog opener.
-        configure_signal = getattr(
-            self._plot_view, "configure_requested", None,
-        )
-        if configure_signal is not None:
-            configure_signal.connect(self.open_plot_config_dialog)
+        self._plot_view.configure_requested.connect(self.open_plot_config_dialog)
+        self._plot_view.float_requested.connect(self.set_plot_floating)
+        self._plot_view.close_requested.connect(lambda: self._on_plot_toggled(False))
+        self._plot_view.height_wanted.connect(self._give_plot_height)
         self._console_plot_splitter.addWidget(self._plot_view)
         self._console_plot_splitter.setStretchFactor(1, 1)
 
-    # ══════════════════════════════════════════════════════════════════════
-    # LOGGING
-    # ══════════════════════════════════════════════════════════════════════
+    @Slot(int)
+    def _give_plot_height(self, pixels: int) -> None:
+        """Add ``pixels`` to the plot's height (fewer, when negative).
+
+        Under the console they are taken from the console, down to its
+        floor, and given back to it. In its own window, the window grows
+        or shrinks by them, never past what the screen holds.
+        """
+        if self._plot_window is not None:
+            window = self._plot_window
+            height = window.height() + pixels
+            screen = window.screen()
+            if screen is not None:
+                height = min(height, screen.availableGeometry().height())
+            window.resize(window.width(), max(height, window.minimumHeight()))
+            return
+        sizes = self._console_plot_splitter.sizes()
+        if len(sizes) != 2 or sizes[1] == 0:
+            return
+        console, plot = sizes
+        if pixels > 0:
+            # Never below the console's floor.
+            moved = max(0, min(pixels, console - tokens.METRICS.pane_min_height))
+        else:
+            # The splitter keeps the plot at least what its content needs.
+            moved = pixels
+        if moved:
+            self._console_plot_splitter.setSizes([console - moved, plot + moved])
+
+    @Slot(bool)
+    def set_plot_floating(self, floating: bool) -> None:
+        """Move the plot to a window of its own, or back under the console."""
+        if self._plot_view is None or floating == self.is_plot_floating():
+            return
+        if floating:
+            from ui.widgets.plot_window import PlotWindow
+
+            self._remember_split()
+            self._plot_window = PlotWindow(self.title, self)
+            self._plot_window.closed.connect(lambda: self.set_plot_floating(False))
+            self._plot_window.take(self._plot_view)
+            self._show_plot_window_state()
+            self._plot_window.show()
+        else:
+            window, self._plot_window = self._plot_window, None
+            window.release()
+            window.hide()
+            window.deleteLater()
+            self._console_plot_splitter.addWidget(self._plot_view)
+            self._console_plot_splitter.setStretchFactor(1, 1)
+            self._plot_view.setVisible(self._plot_visible)
+            if self._plot_visible:
+                self._restore_split()
+        self._plot_view.set_floating(floating)
+
+    def _show_plot_window_state(self) -> None:
+        """Tell the plot's own window which port it shows and whether it is live."""
+        if self._plot_window is None:
+            return
+        self._plot_window.set_title(self.title)
+        port = self._recorded_port
+        self._plot_window.set_state(
+            f"{port}, live" if self._session.is_connected else f"{port}, not connected"
+        )
+
+    # ── Logging ──────────────────────────────────────────────────────────
 
     @Slot()
-    def _on_log_on(self) -> None:
+    def toggle_log(self) -> None:
+        """Start a log, or stop the one that is running."""
+        if self._session.is_logging:
+            self.stop_log()
+        else:
+            self.start_log()
+
+    def start_log(self) -> None:
+        if not self._session.is_connected or self._session.is_logging:
+            return
         from ui.dialogs.new_log_dialog import NewLogDialog
 
+        config = self._config_manager
         dialog = NewLogDialog(
             port_name=self._session.port_name,
-            default_directory=self._get_default_log_dir(),
+            default_directory=config.default_log_directory,
+            default_format=config.default_log_format,
+            split_bytes=config.log_split_bytes,
             parent=self,
         )
         if dialog.exec() != NewLogDialog.DialogCode.Accepted:
             return
-
-        log_name = dialog.log_name
-        log_dir = dialog.log_directory
-        export_format = dialog.export_format
-        description = dialog.description
-
-        timestamp = datetime.now().strftime(FILENAME_TIMESTAMP_FORMAT)
-        safe_name = self._sanitize_filename(log_name)
-        port_safe = self._session.port_name.replace("/", "_")
-        base_name = f"{safe_name}_{port_safe}_{timestamp}"
-
-        txt_path = os.path.join(log_dir, f"{base_name}.txt")
-        csv_path = None
-        if export_format in (ExportFormat.CSV, ExportFormat.BOTH):
-            csv_path = os.path.join(log_dir, f"{base_name}.csv")
-
-        log_config = LogConfig(
-            session_name=log_name, port_name=self._session.port_name,
-            baud_rate=self._session.baud_rate, description=description,
-        )
-        self._log_engine._config = log_config
-
-        csv_engine = None
-        if csv_path:
-            self._csv_engine = CSVEngine()
-            csv_engine = self._csv_engine
-
-        if not self._log_engine.start_logging(txt_path, csv_path, csv_engine):
-            Toast.error(self, "Failed to start logging — check directory permissions")
+        if not self._session.is_connected:
+            # The device went away while the dialog was open.
+            Toast.warning(self, "Logging was not started: the device is no longer connected")
             return
 
+        log_name = dialog.log_name
+        export_format = dialog.export_format
+        description = dialog.description
+        text_path, csv_path = ExportRequest.paths_for(
+            ExportFormat.BOTH if export_format is ExportFormat.CSV else export_format,
+            self._output_base_path(dialog.log_directory, log_name),
+        )
+
+        request = LogRequest(
+            text_path=text_path,
+            csv_path=csv_path,
+            session_name=log_name,
+            port_name=self._session.port_name,
+            baud_rate=self._session.baud_rate,
+            description=description,
+            split_bytes=config.log_split_bytes,
+            line_ending=config.log_line_ending.value,
+        )
+        try:
+            started = self._pipeline.start_log(request)
+        except LogStartError as exc:
+            logger.error("Could not start logging: %s", exc)
+            self._banners.show_banner(
+                _BANNER_LOG_END, banners.ERROR, "Logging could not be started", str(exc),
+            )
+            return
+
+        self._banners.clear(_BANNER_LOG_END)
         self._session.is_logging = True
         self._session.is_paused = False
-        self._session.log_file_path = txt_path
-        self._session.csv_file_path = csv_path
+        self._session.log_file_path = started.text_path
+        self._session.csv_file_path = started.csv_path
         self._session.export_format = export_format
         self._session.log_name = log_name
         self._session.log_comments = description
-        self._log_control_bar.set_logging_state(True, False)
-        Toast.success(self, f"Logging started — {safe_name}")
+        self._log_started = time.monotonic()
+        self._remember_log_folder(dialog.log_directory)
+        self.usage_noted.emit(Feature.LOG)
+        if started.csv_path:
+            self.usage_noted.emit(Feature.CSV)
+        self._toolbar.set_logging(True, False)
+        self._show_log_status()
+        self.link_state_changed.emit(self.link_state)
+        folder = os.path.dirname(started.text_path)
+        Toast.success(
+            self, f"Logging to {os.path.basename(started.text_path)}",
+            "Show", lambda: self._open_folder(folder),
+        )
 
-    @Slot()
-    def _on_log_off(self) -> None:
-        was_logging = self._session.is_logging
-        log_name = self._session.log_name
-        if self._log_engine and self._log_engine.is_logging:
-            self._log_engine.stop_logging()
-        self._csv_engine = None
+    def _remember_log_folder(self, folder: str) -> None:
+        """Make the folder a log was started in the folder of the next one.
+
+        People look for a log where they last put one. The folder is the
+        "Log folder" preference, so every tab and the next start use it.
+        """
+        config = self._config_manager
+        if folder != config.default_log_directory:
+            config.default_log_directory = folder
+            config.save()
+
+    def stop_log(self) -> None:
+        if not self._session.is_logging:
+            return
+        summary = self._pipeline.stop_log()
         self._session.reset_logging_state()
-        self._log_control_bar.set_logging_state(False)
-        if was_logging:
-            Toast.info(self, f"Logging stopped — {log_name or 'session'} saved")
+        self._toolbar.set_logging(False)
+        self._banners.clear(_BANNER_LOG_WRITE)
+        self._show_log_status()
+        self.link_state_changed.emit(self.link_state)
+        if summary is None:
+            return
+        self._note_log_losses(summary)
+        if self._log_had_losses(summary):
+            self._show_log_losses(summary)
+        else:
+            self._toast_with_folder(Toast.success, self._log_outcome(summary), summary)
 
     @Slot()
     def _on_pause_toggle(self) -> None:
-        if not self._log_engine or not self._log_engine.is_logging:
+        if not self._session.is_logging:
             return
-        if self._session.is_paused:
-            self._log_engine.resume()
-            self._session.is_paused = False
-            Toast.info(self, "Logging resumed")
+        paused = not self._session.is_paused
+        self._pipeline.set_log_paused(paused)
+        self._session.is_paused = paused
+        self._toolbar.set_logging(True, paused)
+        self._show_log_status()
+        Toast.info(
+            self,
+            "Logging paused. Lines are still received and shown." if paused
+            else "Logging resumed",
+        )
+
+    def _show_log_status(self) -> None:
+        """Bring the log part of the status bar up to date."""
+        if not self._session.is_logging:
+            self._status_bar.set_not_logging()
+            return
+        self._status_bar.set_logging(
+            os.path.basename(self._session.log_file_path),
+            time.monotonic() - self._log_started,
+            self._pipeline.log_progress(),
+            paused=self._session.is_paused,
+        )
+
+    def open_log_folder(self) -> None:
+        """Open the folder of the running log, or the default log folder."""
+        if self._session.is_logging and self._session.log_file_path:
+            self._open_folder(os.path.dirname(self._session.log_file_path))
         else:
-            self._log_engine.pause()
-            self._session.is_paused = True
-            Toast.warning(self, "Logging paused — data is still being received")
-        self._log_control_bar.set_logging_state(True, self._session.is_paused)
+            self._open_folder(self._config_manager.default_log_directory)
+
+    def _open_folder(self, folder: str) -> None:
+        if not os.path.isdir(folder):
+            Toast.warning(self, f"The folder does not exist yet: {folder}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(folder)):
+            Toast.warning(self, f"The folder could not be opened: {folder}")
 
     @Slot()
-    def _on_clear(self) -> None:
+    def clear_console(self) -> None:
+        """Clear the console. Later exports start from this point."""
         self._console.clear_console()
+        self._pipeline.mark_export_start()
 
     @Slot()
-    def _on_export(self) -> None:
-        """Export current console content to file via dialog."""
-        lines = self._console.get_all_lines()
-        if not lines:
-            Toast.warning(self, "Nothing to export — console is empty")
+    def export_session(self) -> None:
+        """Save the session to a file chosen in the Export dialog."""
+        if self._pipeline.is_exporting:
+            Toast.warning(self, "An export is already running")
             return
 
         from ui.dialogs.export_dialog import ExportDialog
 
+        config = self._config_manager
         dialog = ExportDialog(
-            default_directory=self._get_default_log_dir(),
-            port_name=self._session.port_name,
+            default_directory=config.export_directory,
+            port_name=self._recorded_port,
+            default_format=config.export_format,
             parent=self,
         )
         if dialog.exec() != ExportDialog.DialogCode.Accepted:
             return
-
-        export_name = dialog.export_name
-        export_dir = dialog.export_directory
-        export_format = dialog.export_format
-
-        self._write_export(lines, export_name, export_dir, export_format)
-
-    def quick_save(self) -> None:
-        """Quick save console content as .txt (Ctrl+S) — no dialog."""
-        lines = self._console.get_all_lines()
-        if not lines:
-            Toast.warning(self, "Nothing to save — console is empty")
-            return
-
-        self._write_export(
-            lines, "QuickSave", self._get_default_log_dir(), ExportFormat.TXT,
+        config.export_directory = dialog.export_directory
+        config.export_format = dialog.export_format
+        self._start_export(
+            dialog.export_name, dialog.export_directory, dialog.export_format,
         )
 
-    def _write_export(
-        self,
-        lines: list[tuple[datetime, str, str]],
-        name: str,
-        directory: str,
-        fmt: ExportFormat,
-    ) -> None:
-        """Write console lines to file(s).
-
-        This is the shared implementation for Export (dialog) and Quick Save.
-
-        Args:
-            lines: Console content as (datetime, line_text, tag) tuples.
-            name: User-provided export name (sanitized).
-            directory: Target directory.
-            fmt: Export format (TXT / CSV / BOTH).
-        """
-        import platform
-
-        from version import APP_NAME, APP_VERSION
-
-        # Build filename
-        safe_name = self._sanitize_filename(name)
-        port_safe = (self._session.port_name or "NoPort").replace("/", "_")
-        timestamp = datetime.now().strftime(FILENAME_TIMESTAMP_FORMAT)
-        base_name = f"{safe_name}_{port_safe}_{timestamp}"
-
-        try:
-            os.makedirs(directory, exist_ok=True)
-        except OSError as e:
-            Toast.error(self, f"Cannot create directory — {e}")
+    def _start_export(self, name: str, directory: str, fmt: ExportFormat) -> None:
+        """Save the session in the background. ``_on_export_finished``
+        reports the outcome."""
+        text_path, csv_path = ExportRequest.paths_for(
+            fmt, self._output_base_path(directory, name),
+        )
+        request = ExportRequest(
+            text_path=text_path,
+            csv_path=csv_path,
+            name=name,
+            port_name=self._recorded_port,
+            baud_rate=self._recorded_baud,
+            split_bytes=self._config_manager.log_split_bytes,
+            line_ending=self._config_manager.log_line_ending.value,
+        )
+        self._banners.clear(_BANNER_EXPORT)
+        if not self._pipeline.export(request):
+            Toast.warning(self, "There is nothing to export: no data has been recorded")
             return
+        self.usage_noted.emit(Feature.EXPORT)
 
-        files_written = []
+    @Slot(object)
+    def _on_export_finished(self, result: ExportResult) -> None:
+        if result.cancelled:
+            return
+        if result.error:
+            logger.error("Export failed: %s", result.error)
+            self._banners.show_banner(
+                _BANNER_EXPORT, banners.ERROR, "The export failed", result.error,
+            )
+            return
+        described = describe_files(result.text_paths, result.csv_paths)
+        folder = os.path.dirname(result.paths[0]) if result.paths else ""
+        Toast.success(
+            self, f"Exported {format_count(result.lines, 'line')}: {described}",
+            "Show" if folder else "", lambda: self._open_folder(folder),
+        )
 
-        # ── Write .txt ────────────────────────────────────────────────
-        if fmt in (ExportFormat.TXT, ExportFormat.BOTH):
-            txt_path = os.path.join(directory, f"{base_name}.txt")
-            try:
-                with open(txt_path, "w", encoding="utf-8") as f:
-                    # Header
-                    sep = "=" * 80
-                    now_str = datetime.now().strftime(LOG_TIMESTAMP_FORMAT)
-                    platform_info = f"{platform.system()} {platform.release()}"
-                    header_lines = [
-                        sep,
-                        f"{APP_NAME} v{APP_VERSION} — Exported Data",
-                        sep,
-                        f"Export Name   : {name}",
-                        f"Port          : {self._session.port_name or 'N/A'}",
-                        f"Baud Rate     : {self._session.baud_rate or 'N/A'}",
-                        f"Exported      : {now_str}",
-                        f"Platform      : {platform_info}",
-                        f"Lines         : {len(lines):,}",
-                        sep,
-                        "",
-                    ]
-                    f.write("\n".join(header_lines) + "\n")
+    def _output_base_path(self, directory: str, name: str) -> str:
+        """Build the path, without extension, of a log or export file."""
+        return output_base_path(directory, name, self._recorded_port, datetime.now())
 
-                    # Data lines
-                    for dt, line, tag in lines:
-                        ts = dt.strftime(LOG_TIMESTAMP_FORMAT)
-                        ms = f".{dt.microsecond // 1000:03d}"
-                        f.write(f"[{ts}{ms}] {line}\n")
-
-                files_written.append(txt_path)
-            except OSError as e:
-                Toast.error(self, f"Export failed — {e}")
-                return
-
-        # ── Write .csv ────────────────────────────────────────────────
-        if fmt in (ExportFormat.CSV, ExportFormat.BOTH):
-            csv_path = os.path.join(directory, f"{base_name}.csv")
-            try:
-                with open(csv_path, "w", encoding="utf-8", newline="") as f:
-                    # CSV header comment
-                    now_str = datetime.now().strftime(LOG_TIMESTAMP_FORMAT)
-                    f.write(f"# {APP_NAME} v{APP_VERSION} — Exported Data\n")
-                    f.write(
-                        f"# Export: {name}"
-                        f" | Port: {self._session.port_name or 'N/A'}"
-                        f" | Baud: {self._session.baud_rate or 'N/A'}\n"
-                    )
-                    f.write(f"# Exported: {now_str}\n")
-
-                    # Try auto-detect mode on first 50 lines.
-                    # Filter the sample to DATA-tagged lines only —
-                    # severity messages would pollute the column
-                    # intersection and force a RAW fallback.
-                    csv_engine = CSVEngine()
-                    sample = [
-                        ln for _, ln, tg in lines[:50] if tg == "DATA"
-                    ]
-                    csv_engine.detect_mode(sample)
-                    csv_engine.write_header(f)
-
-                    # Data rows — write_row applies Option C internally:
-                    # in AUTO mode, severity/command rows are excluded
-                    # so the structured CSV stays rectangular.
-                    for dt, line, tag in lines:
-                        ts = dt.strftime(LOG_TIMESTAMP_FORMAT)
-                        ms = f".{dt.microsecond // 1000:03d}"
-                        csv_engine.write_row(f, f"{ts}{ms}", line, tag)
-
-                files_written.append(csv_path)
-            except OSError as e:
-                Toast.error(self, f"CSV export failed — {e}")
-                return
-
-        # Success
-        count = len(lines)
-        file_names = " + ".join(os.path.basename(p) for p in files_written)
-        Toast.success(self, f"Exported {count:,} lines — {file_names}")
+    # ── Writer reports ───────────────────────────────────────────────────
 
     @Slot(str)
-    def _on_log_error(self, msg: str) -> None:
-        logger.error("Log error: %s", msg)
-        Toast.error(self, f"Log write error — {msg}")
+    def _on_log_write_failed(self, message: str) -> None:
+        logger.error("Log write failed: %s", message)
+        self._add_notice(f"The log cannot be written: {message}. Still trying.")
+        self._banners.show_banner(
+            _BANNER_LOG_WRITE, banners.ERROR,
+            f"The log cannot be written: {message}",
+            "WireTrace keeps trying. Logging continues by itself once the file "
+            "can be written again.",
+            (
+                BannerAction("Open log folder", self.open_log_folder),
+                BannerAction("Stop log", self.stop_log),
+            ),
+            dismissible=False,
+        )
 
-    # ══════════════════════════════════════════════════════════════════════
-    # COMMAND / FILTER / SEARCH
-    # ══════════════════════════════════════════════════════════════════════
+    @Slot()
+    def _on_log_write_recovered(self) -> None:
+        self._add_notice("The log is being written again.")
+        self._banners.clear(_BANNER_LOG_WRITE)
+        Toast.success(self, "The log is being written again")
+
+    @Slot(int)
+    def _on_lines_dropped(self, count: int) -> None:
+        self.usage_noted.emit(Problem.LINES_LOST)
+        self._add_notice(
+            f"{count:,} lines were not recorded: the disk could not keep up.",
+        )
+        self._banners.show_banner(
+            _BANNER_DROPPED, banners.ERROR,
+            f"{format_count(count, 'line')} were not recorded",
+            "The disk could not keep up with the device. The lines are marked "
+            "in the console and in the log.",
+        )
+
+    @Slot(str)
+    def _on_writer_error(self, message: str) -> None:
+        logger.error("Recording error: %s", message)
+        self._add_notice(f"{message}. Recording continues.")
+        self._banners.show_banner(
+            _BANNER_RECORDING, banners.ERROR,
+            "An unexpected error occurred while recording", f"{message}. Recording continues.",
+        )
+
+    @Slot(str)
+    def _on_spool_unavailable(self, message: str) -> None:
+        logger.warning("Session recording unavailable: %s", message)
+        self._banners.show_banner(
+            _BANNER_SPOOL, banners.WARNING,
+            "Export is unavailable for this session", message,
+        )
+
+    # ── Command / filter / search ────────────────────────────────────────────
 
     @Slot(str)
     def _on_command_sent(self, command: str) -> None:
-        if not self._serial_manager.is_open():
-            Toast.warning(self, "Cannot send — device is not connected")
+        if not self._session.is_connected:
+            Toast.warning(self, "The command was not sent: no device is connected")
             return
-        data = (command + "\n").encode("utf-8")
-        if self._serial_manager.write(data):
-            self._console.append_line(f">>> {command}", "COMMAND")
-            if self._log_engine and self._log_engine.is_logging:
-                now = datetime.now()
-                ts = now.strftime(LOG_TIMESTAMP_FORMAT) + f".{now.microsecond // 1000:03d}"
-                self._log_engine.enqueue(ts, f">>> {command}", "COMMAND")
+        self._banners.clear(_BANNER_COMMAND)
+        self._pipeline.send_command(command, self._command_bar.line_ending)
+
+    @Slot(str)
+    def _on_command_failed(self, reason: str) -> None:
+        logger.error("Command not sent: %s", reason)
+        self._banners.show_banner(
+            _BANNER_COMMAND, banners.ERROR, "The command was not sent", reason,
+        )
+
+    @property
+    def saved_commands(self) -> SavedCommands:
+        return self._saved_commands
+
+    def fill_saved_command(self, number: int) -> None:
+        """Put saved command ``number`` (from 1) in the command box.
+
+        Nothing is sent: the command waits there for Enter.
+        """
+        commands = self._saved_commands.all()
+        if not self._session.is_connected:
+            Toast.warning(self, "Commands can be sent only while a device is connected")
+        elif number > len(commands):
+            Toast.info(self, f"There is no saved command {number}")
         else:
-            Toast.error(self, "Failed to send command — connection may be lost")
+            self._command_bar.set_text(commands[number - 1])
+            self.usage_noted.emit(Feature.SAVED_COMMANDS)
+
+    @Slot()
+    def edit_saved_commands(self) -> None:
+        """Open the dialog that edits the saved commands."""
+        from ui.dialogs.saved_commands_dialog import SavedCommandsDialog
+
+        dialog = SavedCommandsDialog(self._saved_commands.all(), self)
+        if dialog.exec() == SavedCommandsDialog.DialogCode.Accepted:
+            self._saved_commands.replace(dialog.commands())
+
+    @Slot(object)
+    def _on_line_ending_changed(self, ending: LineEnding) -> None:
+        if self._recorded_port:
+            self._port_memory.remember(self._recorded_port, line_ending=ending.name)
+        self.line_ending_changed.emit(ending)
 
     @Slot(str)
     def _on_filter_changed(self, text: str) -> None:
+        # Choosing the rows again costs time in proportion to the lines
+        # held, so it waits until typing pauses.
         self._session.filter_text = text
-        self._console.set_filter(text)
-        self._filter_bar.update_counts(self._console.visible_count, self._console.total_count)
+        if text:
+            self.usage_noted.emit(Feature.FILTER)
+        self._filter_timer.start()
 
-    @Slot(object)
-    def _on_timestamp_toggled(self, mode: TimestampMode) -> None:
-        """Handle timestamp mode change from ANY source (View menu or status bar).
+    @Slot()
+    def _apply_filter(self) -> None:
+        self._console.set_filter(self._session.filter_text)
 
-        Syncs all three: session state, console display, status bar indicator.
-        Emits timestamp_mode_changed so MainWindow can sync the View menu.
-        """
-        self._session.timestamp_mode = mode
-        self._console.set_timestamp_mode(mode)
-        self._status_bar.set_timestamp_mode(mode)
-        self.timestamp_mode_changed.emit(mode)
-
-    # Keyboard shortcuts (called from MainWindow)
     def activate_search(self) -> None:
-        self._search_bar.activate()
+        if self.has_session:
+            self._search_bar.activate()
 
     def activate_filter(self) -> None:
-        self._filter_bar.focus_input()
+        if self.has_session:
+            self._header.focus_filter()
 
     def search_next(self) -> None:
-        self._search_bar._on_next()
+        self._search_bar.find_next()
 
     def search_prev(self) -> None:
-        self._search_bar._on_prev()
+        self._search_bar.find_previous()
 
     def clear_search_filter(self) -> None:
         self._search_bar.deactivate()
-        self._filter_bar.clear_filter()
+        self._header.clear_filter()
 
-    # ══════════════════════════════════════════════════════════════════════
-    # UTILITY
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Console menu ─────────────────────────────────────────────────────
 
-    def _get_default_log_dir(self) -> str:
-        if self._config_manager:
-            return self._config_manager.default_log_directory
-        from app.constants import get_default_log_dir
-        return get_default_log_dir()
+    def _selected_phrase(self) -> str:
+        """The selected text, if it is a short piece of one line."""
+        text = self._console.selected_messages().strip()
+        return text if text and "\n" not in text else ""
 
-    @staticmethod
-    def _sanitize_filename(name: str) -> str:
-        if not name or not name.strip():
-            return FILENAME_DEFAULT_NAME
-        sanitized = name.strip().replace(" ", "_")
-        sanitized = re.sub(r'[<>:"/\\|?*]', '', sanitized)
-        if len(sanitized) > FILENAME_MAX_LENGTH:
-            sanitized = sanitized[:FILENAME_MAX_LENGTH]
-        return sanitized or FILENAME_DEFAULT_NAME
+    @Slot(QPoint)
+    def _show_console_menu(self, position: QPoint) -> None:
+        menu = self.console_menu()
+        menu.exec(self._console.viewport().mapToGlobal(position))
+        menu.deleteLater()
+
+    def console_menu(self) -> QMenu:
+        """The menu of the console, for what is selected right now."""
+        console = self._console
+        menu = QMenu(self)
+
+        copy = menu.addAction(shortcuts.menu_text("Copy", "copy"), console.copy)
+        copy_messages = menu.addAction(
+            shortcuts.menu_text("Copy without timestamps", "copy_messages"), console.copy_messages,
+        )
+        select_all = menu.addAction(
+            shortcuts.menu_text("Select all", "select_all"), console.select_all,
+        )
+        menu.addSeparator()
+
+        phrase = self._selected_phrase()
+        shown = phrase
+        if len(shown) > MENU_SELECTION_PREVIEW_CHARS:
+            shown = shown[:MENU_SELECTION_PREVIEW_CHARS] + "..."
+        only = menu.addAction(
+            f'Show only lines with "{shown}"' if phrase else "Show only lines with the selection",
+            lambda: self._header.set_filter_text(phrase),
+        )
+        find = menu.addAction(
+            f'Find "{shown}"' if phrase else "Find the selection",
+            lambda: self._search_bar.search_for(phrase),
+        )
+        menu.addSeparator()
+        export = menu.addAction("Export selection...", self.export_selection)
+        menu.addSeparator()
+        menu.addAction("Clear console", self.clear_console)
+
+        for action in (copy, copy_messages, export):
+            action.setEnabled(console.has_selection)
+        select_all.setEnabled(console.visible_count > 0)
+        for action in (only, find):
+            action.setEnabled(bool(phrase))
+        return menu
+
+    def export_selection(self) -> None:
+        """Save the selected text to a file the user chooses."""
+        text = self._console.selected_text()
+        if not text:
+            return
+        suggested = self._output_base_path(
+            self._config_manager.default_log_directory, _SELECTION_NAME,
+        ) + ".txt"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export selection", suggested, "Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            atomic_write_text(path, text + "\n")
+        except OSError as exc:
+            logger.error("Could not export the selection: %s", exc)
+            self._banners.show_banner(
+                _BANNER_EXPORT, banners.ERROR, "The selection could not be saved", str(exc),
+            )
+            return
+        self.usage_noted.emit(Feature.EXPORT)
+        folder = os.path.dirname(path)
+        Toast.success(
+            self, f"Saved {format_count(text.count(chr(10)) + 1, 'line')}: {os.path.basename(path)}",
+            "Show", lambda: self._open_folder(folder),
+        )

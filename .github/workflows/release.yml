@@ -1,0 +1,332 @@
+name: Release
+
+# Builds a release on GitHub's own machines and leaves it as a DRAFT.
+# Nothing is public until the maintainer signs the update manifest on
+# their own computer and publishes the draft. See BUILD_GUIDE.md.
+#
+# Started by pushing a version tag. Started by hand instead, it is a
+# rehearsal: everything is built and checked, the result is kept as a
+# workflow artifact, and no release is created.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.12'
+  # The tools that make the AppImage, pinned by SHA-256.
+  APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+  APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+  APPIMAGE_RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+  APPIMAGE_RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+  # Dependency Walker, which the compiler uses on Windows to find the
+  # libraries a program needs, pinned by SHA-256 (as published with the
+  # Chocolatey package of the same file).
+  DEPENDS_URL: https://dependencywalker.com/depends22_x64.zip
+  DEPENDS_SHA256: 35db68a613874a2e8c1422eb0ea7861f825fc71717d46dabf1f249ce9634b4f1
+
+jobs:
+  # ─── The tag names the version in the source ─────────────────────────
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: The tag is the version in version.py
+        if: github.ref_type == 'tag'
+        run: |
+          python -c "import sys, version; expected = 'v' + version.APP_VERSION; sys.exit(0 if sys.argv[1] == expected else f'The tag is {sys.argv[1]}, but version.py says {expected}')" "$GITHUB_REF_NAME"
+
+  # ─── Every check that runs on a push ─────────────────────────────────
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+
+  # ─── Linux: AppImage and .deb ────────────────────────────────────────
+  # Built on the oldest Ubuntu offered, so that the result runs there
+  # and on everything newer. The build fails if it needs a newer C
+  # library than that system has.
+  build-linux:
+    name: Build for Linux
+    needs: [version, checks]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # patchelf and dpkg-dev: used by the build. xvfb: a display for
+      # the smoke test, which starts the window system. The libraries
+      # are those Qt loads to do so; the build carries the X11 ones
+      # along, and stops with the name of any that is missing here.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            patchelf dpkg-dev xvfb \
+            libegl1 libgl1 libfontconfig1 libdbus-1-3 \
+            libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-shm0 libxcb-sync1 libxcb-util1 libxcb-xfixes0 libxcb-xkb1
+
+      - name: Fetch the AppImage tools
+        run: |
+          tools="$RUNNER_TEMP/appimage"
+          mkdir -p "$tools"
+          curl --fail --location --silent --show-error --output "$tools/appimagetool" "$APPIMAGETOOL_URL"
+          curl --fail --location --silent --show-error --output "$tools/runtime-x86_64" "$APPIMAGE_RUNTIME_URL"
+          echo "$APPIMAGETOOL_SHA256  $tools/appimagetool" | sha256sum --check
+          echo "$APPIMAGE_RUNTIME_SHA256  $tools/runtime-x86_64" | sha256sum --check
+          chmod +x "$tools/appimagetool"
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Install the locked dependencies
+        run: python -m pip install --require-hashes --requirement requirements-release.txt
+
+      - name: Build
+        run: xvfb-run --auto-servernum python build/build.py --appimage-runtime "$RUNNER_TEMP/appimage/runtime-x86_64"
+
+      - name: Keep the result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux
+          path: deployment/linux/
+          if-no-files-found: error
+
+  # ─── Linux: the .deb installs and starts on a bare system ────────────
+  check-deb:
+    name: Install the .deb on a bare Ubuntu 22.04
+    needs: build-linux
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    steps:
+      - name: Fetch the build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux
+          path: linux
+
+      - name: Install it, with what it says it depends on
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends xvfb xauth ./linux/*.deb
+
+      - name: Start it
+        run: xvfb-run --auto-servernum wiretrace --smoke-test
+
+  # ─── Windows: the installer ──────────────────────────────────────────
+  # Code signing runs only for a tag, and only once the repository
+  # variables that name the SignPath project are set. Until then the
+  # same steps produce an unsigned installer.
+  build-windows:
+    name: Build for Windows
+    needs: [version, checks]
+    runs-on: windows-2022
+    env:
+      SIGN: ${{ github.ref_type == 'tag' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the locked dependencies
+        run: python -m pip install --require-hashes --requirement requirements-release.txt
+
+      # Put the pinned Dependency Walker where the compiler looks for its
+      # downloads, so that it downloads nothing itself.
+      - name: Fetch Dependency Walker, pinned
+        shell: pwsh
+        run: |
+          $downloads = Join-Path $env:RUNNER_TEMP 'nuitka-downloads'
+          $folder = Join-Path $downloads 'depends/x86_64'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $zip = Join-Path $folder 'depends22_x64.zip'
+          Invoke-WebRequest -Uri $env:DEPENDS_URL -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $env:DEPENDS_SHA256) { throw "Dependency Walker has SHA-256 $hash, not the pinned $env:DEPENDS_SHA256" }
+          "NUITKA_CACHE_DIR_DOWNLOADS=$downloads" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Compile and check the program
+        run: python build/build.py --stage compile
+
+      # The program is signed first, so that the installer is made from
+      # the signed file. Only WireTrace's own executable is signed; the
+      # libraries of others beside it are left as their makers shipped
+      # them.
+      - name: Keep the unsigned program
+        if: env.SIGN == 'true'
+        id: unsigned-program
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-program-unsigned
+          path: build/dist/WireTrace/WireTrace.exe
+          if-no-files-found: error
+
+      - name: Sign the program
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: program
+          github-artifact-id: ${{ steps.unsigned-program.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: build/signed-program
+
+      - name: Put the signed program in place
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          Copy-Item build/signed-program/WireTrace.exe build/dist/WireTrace/WireTrace.exe -Force
+          $signature = Get-AuthenticodeSignature build/dist/WireTrace/WireTrace.exe
+          if ($signature.Status -ne 'Valid') { throw "The program's signature is $($signature.Status)" }
+
+      - name: Make the installer
+        run: python build/build.py --stage package
+
+      - name: Keep the unsigned installer
+        if: env.SIGN == 'true'
+        id: unsigned-installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-installer-unsigned
+          path: deployment/windows/*.exe
+          if-no-files-found: error
+
+      - name: Sign the installer
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: build/signed-installer
+
+      - name: Put the signed installer in place
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          $installer = Get-Item deployment/windows/*.exe
+          Copy-Item (Join-Path build/signed-installer $installer.Name) $installer.FullName -Force
+          $signature = Get-AuthenticodeSignature $installer.FullName
+          if ($signature.Status -ne 'Valid') { throw "The installer's signature is $($signature.Status)" }
+
+      - name: Keep the result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows
+          path: deployment/windows/*.exe
+          if-no-files-found: error
+
+  # ─── The draft release ───────────────────────────────────────────────
+  release:
+    name: Draft release
+    needs: [build-linux, check-deb, build-windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the locked dependencies
+        run: python -m pip install --require-hashes --requirement requirements-release.txt
+
+      - name: Fetch the Linux build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux
+          path: release
+
+      - name: Fetch the Windows build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows
+          path: release
+
+      # The licence texts, a bill of materials, the checksums of every
+      # file, and the update manifest, which is not yet signed.
+      - name: Describe the release
+        run: |
+          version="$(python -c 'import version; print(version.APP_VERSION)')"
+          cp resources/licenses/THIRD_PARTY_LICENSES.txt release/
+          python tools/collect_licenses.py --sbom "release/WireTrace-v${version}.cdx.json"
+          python tools/release_manifest.py release
+          cat release/SHA256SUMS
+
+      # A signed statement, kept by GitHub, that these files were built
+      # by this workflow from this commit. Offered for public
+      # repositories only.
+      - name: Attest where the files were built
+        if: github.ref_type == 'tag' && !github.event.repository.private
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
+
+      - name: Create the draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --draft --verify-tag \
+            --title "WireTrace $GITHUB_REF_NAME" \
+            --notes-file build/release_notes.txt
+
+      - name: Keep the rehearsal
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-rehearsal
+          path: release/
+          if-no-files-found: error

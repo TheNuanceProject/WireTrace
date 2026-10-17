@@ -1,7 +1,7 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for the live-plot parser pipeline and engine.
 
-These tests cover the pure-data layer only — no Qt, no GUI. The
+These tests cover the pure-data layer only: no Qt, no GUI. The
 PlotEngine subscribes to Qt signals at runtime, but its state machine
 (detection, ring buffer, schema-change behaviour) is exercised here
 by calling ``process()`` directly and reading back via ``snapshot()``.
@@ -12,11 +12,11 @@ from __future__ import annotations
 import time
 
 import numpy as np
-import pytest
 
 from core.plot_engine import (
     PLOT_AUTODETECT_SAMPLE_SIZE,
     PLOT_DETECTION_GIVE_UP_LINES,
+    PLOT_MAX_SERIES,
     PLOT_RING_BUFFER_SIZE,
     PlotEngine,
 )
@@ -26,6 +26,9 @@ from core.plot_parsers import (
     KvParser,
     ParserPipeline,
 )
+from tests.clock import TickClock
+
+_tick = TickClock()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JsonParser
@@ -170,7 +173,7 @@ class TestDelimitedParser:
     def test_explicit_delimiter_beats_whitespace_on_ties(self):
         """If a line could split on either comma or whitespace, comma wins."""
         p = DelimitedParser()
-        # Lines with explicit comma — whitespace splitting would also work
+        # Lines with explicit comma: whitespace splitting would also work
         sample = [f"{25 + i}, {55 + i}, {1013 + i}" for i in range(10)]
         p.detect(sample)
         assert p._delimiter == ","
@@ -208,11 +211,11 @@ class TestDelimitedParser:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ParserPipeline — auto mode
+# ParserPipeline: auto mode
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPipelineAutoMode:
-    """No prefix, no plt! — pipeline picks the best parser."""
+    """No prefix, no plt!: pipeline picks the best parser."""
 
     def test_picks_json_when_json_present(self):
         p = ParserPipeline()
@@ -248,7 +251,7 @@ class TestPipelineAutoMode:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ParserPipeline — prefix mode
+# ParserPipeline: prefix mode
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPipelinePrefixMode:
@@ -319,7 +322,7 @@ class TestPipelinePrefixMode:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — detection state machine
+# PlotEngine: detection state machine
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineDetection:
@@ -328,24 +331,31 @@ class TestPlotEngineDetection:
     def test_detection_runs_at_sample_size(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}, H: {i + 1}", "DATA")
+            eng.process(f"T: {i}, H: {i + 1}", _tick())
         assert eng.detection_complete
         assert "T" in eng.columns
         assert "H" in eng.columns
 
-    def test_data_only_filter(self):
-        """Severity-tagged lines must not feed detection."""
+    def test_lines_are_chosen_by_content_not_by_wording(self):
+        """Readings that contain a severity word are still plotted."""
         eng = PlotEngine()
-        # 50 INFO lines should produce no detection
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"INFO: T: {i}, H: {i + 1}", "INFO")
-        assert not eng.detection_complete
-        assert eng.columns == []
+            eng.process(f"errors={i} temp={20 + i}", _tick())
+        assert eng.detection_complete
+        assert eng.columns == ["errors", "temp"]
 
-    def test_command_tag_excluded(self):
+    def test_a_device_naming_hundreds_of_values_gets_only_the_most_the_plot_follows(self):
+        eng = PlotEngine()
+        line = ", ".join(f"k{n:03d}={n}" for n in range(300))
+        for _ in range(PLOT_AUTODETECT_SAMPLE_SIZE):
+            eng.process(line, _tick())
+        assert eng.detection_complete
+        assert len(eng.columns) == PLOT_MAX_SERIES
+
+    def test_lines_without_values_do_not_detect(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f">>> set {i}", "COMMAND")
+            eng.process(f">>> set mode {'abc'[i % 3]}", _tick())
         assert not eng.detection_complete
 
     def test_buffered_lines_replayed_after_detection(self):
@@ -353,7 +363,7 @@ class TestPlotEngineDetection:
         the ring buffer after detection completes."""
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         x, y = eng.snapshot("T")
         # Every parseable sample line should have produced a point
         assert len(x) == PLOT_AUTODETECT_SAMPLE_SIZE
@@ -365,10 +375,10 @@ class TestPlotEngineDetection:
     def test_post_detection_lines_appended(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         # 10 more lines after detection
         for i in range(10):
-            eng.process(f"T: {100 + i}", "DATA")
+            eng.process(f"T: {100 + i}", _tick())
         _x, y = eng.snapshot("T")
         assert len(y) == PLOT_AUTODETECT_SAMPLE_SIZE + 10
         # Last 10 values are 100..109
@@ -380,23 +390,23 @@ class TestPlotEngineDetection:
         """Unstructured stream gives up cleanly."""
         eng = PlotEngine()
         for i in range(PLOT_DETECTION_GIVE_UP_LINES + 5):
-            eng.process(f"hello world line {i}", "DATA")
+            eng.process(f"hello world line {i}", _tick())
         assert not eng.detection_complete
         assert eng.detection_gave_up
 
     def test_after_give_up_no_more_processing(self):
         eng = PlotEngine()
         for i in range(PLOT_DETECTION_GIVE_UP_LINES):
-            eng.process(f"unstructured {i}", "DATA")
-        # Now feed valid KV — engine must NOT come back to life mid-session.
+            eng.process(f"unstructured {i}", _tick())
+        # Now feed valid KV: engine must NOT come back to life mid-session.
         for i in range(20):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         assert not eng.detection_complete
         assert eng.snapshot("T")[0].size == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — ring buffer behaviour
+# PlotEngine: ring buffer behaviour
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineRingBuffer:
@@ -405,7 +415,7 @@ class TestPlotEngineRingBuffer:
     def test_snapshot_oldest_first_before_wrap(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         _x, y = eng.snapshot("T")
         # Values strictly increasing (oldest first)
         assert np.all(np.diff(y) > 0)
@@ -415,7 +425,7 @@ class TestPlotEngineRingBuffer:
         # Push enough samples to wrap the ring buffer
         total = PLOT_RING_BUFFER_SIZE + 100
         for i in range(total):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         _x, y = eng.snapshot("T")
         # Buffer holds exactly RING_BUFFER_SIZE most-recent samples
         assert len(y) == PLOT_RING_BUFFER_SIZE
@@ -427,7 +437,7 @@ class TestPlotEngineRingBuffer:
         """Mutating the snapshot must not corrupt engine state."""
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         _x, y = eng.snapshot("T")
         y[0] = 9999.0
         _x2, y2 = eng.snapshot("T")
@@ -435,33 +445,31 @@ class TestPlotEngineRingBuffer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — robustness
+# PlotEngine: robustness
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineRobustness:
     """Schema changes, malformed lines, severity bursts mid-stream."""
 
-    def test_severity_burst_does_not_break_detection(self):
-        """Severity bursts mid-stream don't pollute the sample.
-        DATA lines accumulate toward the sample threshold; severity
-        is silently filtered, just like CSV Option C."""
+    def test_unstructured_lines_mixed_in_do_not_break_detection(self):
+        """Occasional lines without values don't stop detection."""
         eng = PlotEngine()
-        # Send sample-size DATA lines, with severity sprinkled in between.
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}, H: {i + 1}", "DATA")
+            eng.process(f"T: {i}, H: {i + 1}", _tick())
             if i % 5 == 0:
-                eng.process("WARNING: noise", "WARNING")
+                eng.process("WARNING: noise", _tick())
         assert eng.detection_complete
+        assert eng.columns == ["T", "H"]
 
     def test_schema_change_unknown_columns_ignored(self):
         """A new column appearing mid-stream is silently ignored."""
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}, H: {i + 1}", "DATA")
-        # Now a line with a new "P" column — should not crash, P ignored
-        eng.process("T: 99, H: 88, P: 1013", "DATA")
+            eng.process(f"T: {i}, H: {i + 1}", _tick())
+        # Now a line with a new "P" column: should not crash, P ignored
+        eng.process("T: 99, H: 88, P: 1013", _tick())
         _x_t, y_t = eng.snapshot("T")
-        # Last T value is 99 — line was parsed, P just ignored
+        # Last T value is 99: line was parsed, P just ignored
         assert y_t[-1] == 99.0
         x_p, _y_p = eng.snapshot("P")
         assert x_p.size == 0  # no buffer for P
@@ -470,8 +478,8 @@ class TestPlotEngineRobustness:
         """Lines with only some detected columns produce partial data."""
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}, H: {i + 1}", "DATA")
-        eng.process("T: 99", "DATA")  # missing H — only T appended
+            eng.process(f"T: {i}, H: {i + 1}", _tick())
+        eng.process("T: 99", _tick())  # missing H: only T appended
         _x_t, y_t = eng.snapshot("T")
         _x_h, y_h = eng.snapshot("H")
         assert y_t[-1] == 99.0
@@ -482,9 +490,9 @@ class TestPlotEngineRobustness:
         """Once detected as numeric KV, a non-numeric value is ignored."""
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         _before_x, before_y = eng.snapshot("T")
-        eng.process("T: not_a_number", "DATA")
+        eng.process("T: not_a_number", _tick())
         _after_x, after_y = eng.snapshot("T")
         # No new sample appended
         assert len(after_y) == len(before_y)
@@ -492,37 +500,37 @@ class TestPlotEngineRobustness:
     def test_reset_returns_engine_to_clean_state(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         eng.reset()
         assert not eng.detection_complete
         assert eng.columns == []
         assert eng.snapshot("T")[0].size == 0
         # Re-detection works after reset
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"V: {i}", "DATA")
+            eng.process(f"V: {i}", _tick())
         assert eng.detection_complete
         assert "V" in eng.columns
 
     def test_clear_buffers_keeps_columns(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         cols_before = eng.columns
         eng.clear_buffers()
         assert eng.columns == cols_before  # detection retained
         assert eng.snapshot("T")[0].size == 0  # but buffers empty
 
-    @pytest.mark.parametrize("tag", ["INFO", "WARNING", "ERROR",
-                                     "CRITICAL", "DEBUG", "COMMAND"])
-    def test_all_non_data_tags_filtered(self, tag):
+    def test_lines_that_do_not_parse_add_no_samples(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", tag)
-        assert not eng.detection_complete
+            eng.process(f"T: {i}", _tick())
+        eng.process("ERROR: sensor timeout", _tick())
+        eng.process(">>> status", _tick())
+        assert eng.snapshot("T")[0].size == PLOT_AUTODETECT_SAMPLE_SIZE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — prefix protocol end-to-end
+# PlotEngine: prefix protocol end-to-end
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEnginePrefixProtocol:
@@ -531,13 +539,13 @@ class TestPlotEnginePrefixProtocol:
     def test_prefix_protocol_with_named_columns(self):
         eng = PlotEngine()
         # 1 config line + 50 prefixed data lines + assorted noise
-        eng.process("plt!Voltage,Current,Power", "DATA")
+        eng.process("plt!Voltage,Current,Power", _tick())
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
             eng.process(f"plt:{3.3 + i * 0.01:.3f},"
                         f"{0.5 + i * 0.005:.3f},"
-                        f"{1.65 + i * 0.01:.3f}", "DATA")
+                        f"{1.65 + i * 0.01:.3f}", _tick())
             if i % 7 == 0:
-                eng.process("INFO: heartbeat", "INFO")
+                eng.process("INFO: heartbeat", _tick())
         assert eng.detection_complete
         assert eng.columns == ["Voltage", "Current", "Power"]
         x, _y = eng.snapshot("Voltage")
@@ -546,31 +554,30 @@ class TestPlotEnginePrefixProtocol:
     def test_unprefixed_lines_ignored_in_prefix_mode(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"plt:{i},{i + 1}", "DATA")
-        # Unprefixed line — must be ignored even though it's structured
-        eng.process("99,100", "DATA")
+            eng.process(f"plt:{i},{i + 1}", _tick())
+        # Unprefixed line: must be ignored even though it's structured
+        eng.process("99,100", _tick())
         _x, y = eng.snapshot("ch0")
         # No new sample after the 50 from sample replay
         assert len(y) == PLOT_AUTODETECT_SAMPLE_SIZE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — real-world regression scenarios
+# PlotEngine: realistic mixed streams
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineRealWorld:
-    """Regression tests for realistic mixed-content streams.
+    """Realistic streams that mix readings with other lines.
 
-    Older strict-intersection detection collapsed when boot banners,
-    debug lines, or stray colons produced KV-shaped tokens that did
-    not appear in the telemetry. Frequency-based detection (a column
-    must appear in >= 70% of matching sample lines) handles this
-    cleanly without losing legitimate columns.
+    Boot banners, debug lines and stray colons produce key-value shaped
+    tokens that are not in the readings. Detection keeps a column only
+    if it appears in most of the matching sample lines, so those tokens
+    do not become columns and no real column is lost.
     """
 
-    def test_esp32_boot_then_telemetry(self):
-        """ESP32-style boot banner followed by KV telemetry must
-        detect the telemetry columns and ignore the boot lines."""
+    def test_esp32_boot_then_readings(self):
+        """ESP32-style boot banner followed by KV readings must
+        detect the columns of the readings and ignore the boot lines."""
         eng = PlotEngine()
         boot = [
             "ets Jul 29 2019 12:21:46",
@@ -579,13 +586,13 @@ class TestPlotEngineRealWorld:
             "load:0x3fff0030,len:1184",
         ]
         for line in boot:
-            eng.process(line, "DATA")
+            eng.process(line, _tick())
         for i in range(50):
             eng.process(
                 f"Temperature: {23.4 + i * 0.05:.2f}, "
                 f"Humidity: {51.2 + i * 0.1:.2f}, "
                 f"Pressure: {1011.0 + i * 0.02:.2f}",
-                "DATA",
+                _tick(),
             )
         assert eng.detection_complete
         assert eng.columns == ["Temperature", "Humidity", "Pressure"]
@@ -594,15 +601,15 @@ class TestPlotEngineRealWorld:
             assert noise_key not in eng.columns
 
     def test_sporadic_dropouts_keep_column(self):
-        """A column missing from a few telemetry lines (sensor glitch)
+        """A column missing from a few lines of readings (sensor glitch)
         is still detected if it appears in >= 70% of matching lines."""
         eng = PlotEngine()
         # 50 lines, 45 with all 3 keys, 5 with only 2 (P at 90%)
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
             if i % 10 == 0:  # 5/50 lines drop P
-                eng.process(f"T: {i}, H: {i + 1}", "DATA")
+                eng.process(f"T: {i}, H: {i + 1}", _tick())
             else:
-                eng.process(f"T: {i}, H: {i + 1}, P: {1000 + i}", "DATA")
+                eng.process(f"T: {i}, H: {i + 1}, P: {1000 + i}", _tick())
         assert eng.detection_complete
         assert "T" in eng.columns
         assert "H" in eng.columns
@@ -610,14 +617,14 @@ class TestPlotEngineRealWorld:
 
     def test_borderline_dropouts_excluded(self):
         """A column appearing in only ~50% of lines is below the 70%
-        threshold and excluded — keeps the plot focused on stable
+        threshold and excluded: keeps the plot focused on stable
         signals."""
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
             if i % 2 == 0:  # P appears in 50% of lines
-                eng.process(f"T: {i}, H: {i + 1}, P: {1000 + i}", "DATA")
+                eng.process(f"T: {i}, H: {i + 1}, P: {1000 + i}", _tick())
             else:
-                eng.process(f"T: {i}, H: {i + 1}", "DATA")
+                eng.process(f"T: {i}, H: {i + 1}", _tick())
         assert eng.detection_complete
         assert "T" in eng.columns
         assert "H" in eng.columns
@@ -625,22 +632,15 @@ class TestPlotEngineRealWorld:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — latest_x semantics
+# PlotEngine: latest_x semantics
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineLatestX:
     """latest_x must follow the data, not the wall clock.
 
-    Earlier versions exposed ``session_seconds`` driven directly by
-    a free-running clock. That made the X view drift forward into
-    empty space when data stopped flowing (paused stream, disconnect).
     ``latest_x`` is the X of the most recently appended sample; it
-    only moves when data moves.
-
-    The engine uses ``time.perf_counter`` rather than ``time.monotonic``
-    so per-sample timestamps stay distinct even when ``process()`` is
-    called in a tight loop on Windows (where ``monotonic`` has ~15.6 ms
-    resolution and would collapse 50 calls into one tick).
+    only moves when data moves, so the view does not drift into empty
+    space when a stream pauses or the device disconnects.
     """
 
     def test_latest_x_starts_at_zero(self):
@@ -650,44 +650,36 @@ class TestPlotEngineLatestX:
     def test_latest_x_advances_with_data(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         x_after_initial = eng.latest_x
         assert x_after_initial > 0.0
 
         # Push more data; latest_x should advance further
         for i in range(20):
-            eng.process(f"T: {100 + i}", "DATA")
+            eng.process(f"T: {100 + i}", _tick())
         assert eng.latest_x >= x_after_initial
 
     def test_latest_x_does_not_drift_when_idle(self):
-        """No new ``process`` calls means no advance in latest_x —
+        """No new ``process`` calls means no advance in latest_x:
         even if real wall-clock time passes."""
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         snapshot_latest = eng.latest_x
 
-        # Sleep briefly — latest_x must not budge.
+        # Sleep briefly: latest_x must not budge.
         time.sleep(0.05)
         assert eng.latest_x == snapshot_latest
 
     def test_replay_preserves_individual_timestamps(self):
         """Buffered samples must replay at their ORIGINAL timestamps,
-        not all clustered at the detection moment. This is what made
-        pyqtgraph autorange to a microscopic X cluster in earlier
-        builds.
-
-        No artificial sleep is needed between calls: ``time.perf_counter``
-        has sub-microsecond resolution on all supported platforms, so
-        a tight loop still produces distinct, monotonically-increasing
-        timestamps. (On Windows ``time.monotonic`` would collapse them
-        into a single ~15.6 ms tick — see the class docstring.)
-        """
+        not all clustered at the detection moment, which would make
+        the plot autorange to a microscopic X cluster."""
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         x, _ = eng.snapshot("T")
-        # X values must be strictly increasing — proves each buffered
+        # X values must be strictly increasing: proves each buffered
         # sample got its OWN timestamp, not all the same replay value.
         assert np.all(np.diff(x) > 0), \
             "buffered-sample replay collapsed timestamps"
@@ -695,7 +687,7 @@ class TestPlotEngineLatestX:
     def test_clear_buffers_resets_latest_x(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         assert eng.latest_x > 0.0
         eng.clear_buffers()
         assert eng.latest_x == 0.0
@@ -704,41 +696,27 @@ class TestPlotEngineLatestX:
         eng = PlotEngine()
         assert not eng.has_any_data
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
+            eng.process(f"T: {i}", _tick())
         assert eng.has_any_data
         eng.clear_buffers()
         assert not eng.has_any_data
 
-    def test_tight_loop_produces_distinct_timestamps(self):
-        """Regression: every per-sample timestamp must be distinct even
-        when ``process()`` is called in a tight loop.
+    def test_x_is_seconds_since_the_first_plotted_line(self):
+        from datetime import datetime, timedelta
 
-        On Linux/macOS this has always worked because ``time.monotonic``
-        has nanosecond resolution. On Windows ``time.monotonic`` has
-        ~15.6 ms resolution by default - without a high-resolution
-        clock, 50 calls inside one tick all stamp the same X value, and
-        the plot autoranges to a microscopic cluster.
-
-        Switching the engine to ``time.perf_counter`` (sub-microsecond
-        on every platform) is what makes this test pass cross-platform.
-        Original symptom was "X axis at -2500.x" in screenshots — that
-        cluster came from ts=0.0 for all 50 replayed samples combined
-        with pyqtgraph's autorange to a microscopic span.
-        """
         eng = PlotEngine()
-        for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}", "DATA")
-        x, _ = eng.snapshot("T")
-        # Every X must be distinct
-        assert len(set(x.tolist())) == PLOT_AUTODETECT_SAMPLE_SIZE, \
-            "timestamps collapsed in tight loop — clock resolution issue"
-        # And monotonically increasing
-        import numpy as _np
-        assert _np.all(_np.diff(x) > 0)
+        eng.set_manual_config(r"T:\s*(?P<T>\d+)")
+        start = datetime(2026, 3, 4, 5, 6, 7)
+        for i in range(4):
+            eng.process(f"T: {i}", start + timedelta(milliseconds=250 * i))
+        x, y = eng.snapshot("T")
+        assert list(x) == [0.0, 0.25, 0.5, 0.75]
+        assert list(y) == [0.0, 1.0, 2.0, 3.0]
+        assert eng.latest_x == 0.75
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — late-bind capability
+# PlotEngine: late-bind capability
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineLateBind:
@@ -751,8 +729,8 @@ class TestPlotEngineLateBind:
     def test_columns_query_after_detection(self):
         eng = PlotEngine()
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"T: {i}, H: {i + 1}", "DATA")
-        # View constructed AFTER this point — it queries:
+            eng.process(f"T: {i}, H: {i + 1}", _tick())
+        # View constructed AFTER this point: it queries:
         assert eng.detection_complete
         assert eng.columns == ["T", "H"]
         # And can pull existing buffer state
@@ -763,30 +741,24 @@ class TestPlotEngineLateBind:
     def test_gave_up_query_after_failure(self):
         eng = PlotEngine()
         for i in range(PLOT_DETECTION_GIVE_UP_LINES + 5):
-            eng.process(f"unstructured noise {i}", "DATA")
+            eng.process(f"unstructured noise {i}", _tick())
         assert eng.detection_gave_up
         assert eng.columns == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotEngine — connect / disconnect / reconnect cycle (Bug B regression)
+# PlotEngine: connect / disconnect / reconnect cycle
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPlotEngineReconnectCycle:
-    """Bug B: in v1.1.0 draft, disconnecting a tab and then reconnecting
-    on the same tab left the plot empty even though detection succeeded.
-
-    The engine layer has always handled this correctly — these tests pin
-    that down so a regression at the engine boundary can't slip back in.
-    The view-side fix is in PlotView (split shutdown vs reset_session)
-    so the redraw timer survives the cycle.
-    """
+    """Disconnecting a tab and connecting again on the same tab must not
+    leave the plot empty: after a reset the engine detects afresh."""
 
     def test_engine_reset_then_redetects_cleanly(self):
         eng = PlotEngine()
         # First session
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"RPM: {1400 + i}, Voltage: {12.0 + i * 0.01:.2f}", "DATA")
+            eng.process(f"RPM: {1400 + i}, Voltage: {12.0 + i * 0.01:.2f}", _tick())
         assert eng.detection_complete
         assert eng.columns == ["RPM", "Voltage"]
 
@@ -799,7 +771,7 @@ class TestPlotEngineReconnectCycle:
         # Reconnect: same format
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
             eng.process(
-                f"RPM: {1500 + i}, Voltage: {12.5 + i * 0.01:.2f}", "DATA",
+                f"RPM: {1500 + i}, Voltage: {12.5 + i * 0.01:.2f}", _tick(),
             )
         assert eng.detection_complete
         assert eng.columns == ["RPM", "Voltage"]
@@ -814,14 +786,14 @@ class TestPlotEngineReconnectCycle:
         eng = PlotEngine()
         # Session 1: motor format
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"RPM: {1400 + i}", "DATA")
+            eng.process(f"RPM: {1400 + i}", _tick())
         assert eng.columns == ["RPM"]
 
         eng.reset()
 
         # Session 2: weather format
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"Temp: {25.0 + i * 0.1:.1f}, Humidity: {50 + i}", "DATA")
+            eng.process(f"Temp: {25.0 + i * 0.1:.1f}, Humidity: {50 + i}", _tick())
         assert eng.detection_complete
         assert eng.columns == ["Temp", "Humidity"]
 
@@ -840,7 +812,7 @@ class TestPlotEngineReconnectCycle:
         eng.columns_detected.connect(on_columns)
 
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"A: {i}, B: {i * 2}", "DATA")
+            eng.process(f"A: {i}, B: {i * 2}", _tick())
         assert emit_count[0] == 1
         assert last_columns[-1] == ["A", "B"]
 
@@ -849,7 +821,7 @@ class TestPlotEngineReconnectCycle:
         assert emit_count[0] == 1
 
         for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-            eng.process(f"A: {i}, B: {i * 2}", "DATA")
+            eng.process(f"A: {i}, B: {i * 2}", _tick())
         assert emit_count[0] == 2, \
             "columns_detected did not re-fire after reset+redetect"
         assert last_columns[-1] == ["A", "B"]
@@ -860,7 +832,7 @@ class TestPlotEngineReconnectCycle:
         eng = PlotEngine()
         for cycle in range(3):
             for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
-                eng.process(f"V: {3.0 + cycle + i * 0.01:.3f}", "DATA")
+                eng.process(f"V: {3.0 + cycle + i * 0.01:.3f}", _tick())
             assert eng.detection_complete, f"cycle {cycle} did not detect"
             assert eng.columns == ["V"]
             _x, y = eng.snapshot("V")
@@ -868,3 +840,83 @@ class TestPlotEngineReconnectCycle:
             # Each cycle's data starts from its own baseline
             assert y.min() >= 3.0 + cycle - 0.01
             eng.reset()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PlotEngine: activation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPlotEngineActivation:
+    """An inactive engine does no parsing; activating it catches up."""
+
+    def test_engine_parses_by_default(self):
+        eng = PlotEngine()
+        for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
+            eng.process(f"temp: {i}", _tick())
+        assert eng.columns == ["temp"]
+
+    def test_inactive_engine_parses_nothing_but_remembers_recent_lines(self):
+        eng = PlotEngine()
+        eng.set_active(False)
+        for i in range(PLOT_AUTODETECT_SAMPLE_SIZE * 2):
+            eng.process(f"T: {i}, H: {i + 1}", _tick())
+        assert not eng.detection_complete
+        assert not eng.has_any_data
+        assert len(eng.recent_lines()) == PLOT_AUTODETECT_SAMPLE_SIZE * 2
+
+    def test_activation_detects_and_plots_from_the_recent_lines(self):
+        eng = PlotEngine()
+        eng.set_active(False)
+        for i in range(PLOT_AUTODETECT_SAMPLE_SIZE * 2):
+            eng.process(f"T: {i}, H: {i + 1}", _tick())
+        eng.set_active(True)
+        assert eng.detection_complete
+        assert eng.columns == ["T", "H"]
+        x, y = eng.snapshot("T")
+        assert y.size == PLOT_AUTODETECT_SAMPLE_SIZE * 2
+        assert np.all(np.diff(x) > 0)
+
+    def test_activation_with_few_recent_lines_keeps_collecting(self):
+        eng = PlotEngine()
+        eng.set_active(False)
+        for i in range(10):
+            eng.process(f"T: {i}", _tick())
+        eng.set_active(True)
+        assert not eng.detection_complete
+        for i in range(10, PLOT_AUTODETECT_SAMPLE_SIZE):
+            eng.process(f"T: {i}", _tick())
+        assert eng.detection_complete
+        assert eng.snapshot("T")[1].size == PLOT_AUTODETECT_SAMPLE_SIZE
+
+    def test_deactivation_keeps_what_was_plotted(self):
+        eng = PlotEngine()
+        for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
+            eng.process(f"T: {i}", _tick())
+        eng.set_active(False)
+        assert eng.detection_complete
+        assert eng.snapshot("T")[1].size == PLOT_AUTODETECT_SAMPLE_SIZE
+
+    def test_reactivation_does_not_duplicate_samples(self):
+        eng = PlotEngine()
+        for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
+            eng.process(f"T: {i}", _tick())
+        eng.set_active(False)
+        eng.set_active(True)
+        assert eng.snapshot("T")[1].size == PLOT_AUTODETECT_SAMPLE_SIZE
+
+    def test_setting_the_same_state_changes_nothing(self):
+        eng = PlotEngine()
+        for i in range(PLOT_AUTODETECT_SAMPLE_SIZE):
+            eng.process(f"T: {i}", _tick())
+        eng.set_active(True)
+        assert eng.snapshot("T")[1].size == PLOT_AUTODETECT_SAMPLE_SIZE
+
+    def test_manual_mode_catches_up_on_activation(self):
+        eng = PlotEngine()
+        eng.set_manual_config(r"RPM:\s*(?P<RPM>\d+)")
+        eng.set_active(False)
+        for i in range(5):
+            eng.process(f"RPM: {1400 + i}", _tick())
+        assert not eng.has_any_data
+        eng.set_active(True)
+        assert list(eng.snapshot("RPM")[1]) == [1400.0, 1401.0, 1402.0, 1403.0, 1404.0]

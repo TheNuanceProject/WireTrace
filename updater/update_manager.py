@@ -1,882 +1,292 @@
-# SPDX-License-Identifier: MIT
-"""WireTrace auto-update manager per spec section 12.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""When updates are looked for, and what is remembered about them.
 
-Production-grade update system:
-  - Background check (QThread) — never blocks UI
-  - Background download (QThread) — UI fully responsive during download
-  - Cancellable download with partial file cleanup
-  - Installer cache: reuses existing valid download (SHA-256 verified)
-  - Temp file cleanup: removes stale WireTrace installers on startup
-  - Close dialog always works (confirms if download in progress)
-  - SHA-256 hash verification before install
-  - HTTPS only with certificate validation
+A check fetches the signed manifest, verifies it and compares versions.
+Nothing is downloaded here: the update window does that once the user
+has chosen to update.
 
-Download location:
-  - Windows: %TEMP%/WireTrace-Setup-v{VER}.exe
-  - macOS:   /tmp/WireTrace-v{VER}.dmg
-  - Linux:   /tmp/WireTrace-v{VER}-x86_64.AppImage
+Automatic checks are made once shortly after start and then once per
+interval for as long as the application stays open, while checks are
+switched on in Preferences. A check the user asks for from the Help menu
+is always made.
 
-Files are overwritten on re-download, not accumulated.
+What a check sends is the ``User-Agent`` of ``updater.install`` and one
+more header: the day of the previous check, as the server itself named
+it in its answer then, or a fixed word on the first check. The same day
+number is given to everyone who checks on that day, so it identifies no
+one, and it lets the server count how many installations are in use
+without any identifier. A day the server names is kept only if it is
+close to today's, so no installation can be handed a number of its own.
+The application's own clock is never sent.
+
+"Skip this version" and "Remind later" are kept in the preferences, so
+they hold across restarts.
 """
 
 from __future__ import annotations
 
-import contextlib
-import glob
-import hashlib
-import json
 import logging
-import os
-import platform
-import shutil
-import subprocess
-import tempfile
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from urllib.request import Request, urlopen
+import re
+from collections.abc import Callable, Sequence
+from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import (
-    QApplication,
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QTextEdit,
-    QVBoxLayout,
+from PySide6.QtCore import QObject, QTimer, Signal
+
+from app.config import ConfigManager
+from app.constants import (
+    UPDATE_CHECK_INTERVAL_HOURS,
+    UPDATE_CHECK_STARTUP_DELAY_S,
+    UPDATE_FIRST_CHECK_VALUE,
+    UPDATE_LAST_CHECK_HEADER,
+    UPDATE_SERVER_DAY_HEADER,
+    UPDATE_SERVER_DAY_TOLERANCE,
+    UPDATE_SNOOZE_HOURS,
 )
-
-from version import APP_NAME, APP_VERSION, UPDATE_BASE_URL, UPDATE_JSON_FILE
+from updater.background import Task
+from updater.download import DownloadError, Opener, fetch, remove_legacy_downloads
+from updater.install import user_agent
+from updater.manifest import (
+    ManifestError,
+    ReleaseManifest,
+    decode_public_key,
+    format_signed_at,
+    is_newer,
+    parse_signed_at,
+    read_signed_manifest,
+)
+from version import APP_VERSION, UPDATE_MANIFEST_URL, UPDATE_PUBLIC_KEYS
 
 logger = logging.getLogger(__name__)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CONSTANTS
-# ══════════════════════════════════════════════════════════════════════════════
+_MS_PER_SECOND = 1000
+_MS_PER_HOUR = 3_600_000
 
-STARTUP_DELAY_MS = 10_000  # 10 seconds after startup
-SNOOZE_HOURS = 24
-DOWNLOAD_CHUNK_SIZE = 65536  # 64KB chunks
-STALE_FILE_MAX_AGE_DAYS = 7  # Clean up downloads older than 7 days
+#: What a check that failed says. The cause is logged; what a server
+#: answered is never shown, so it cannot put words in the window.
+CHECK_UNREACHABLE = "The server could not be reached"
+CHECK_UNVERIFIED = "The update information could not be verified"
+CHECK_OUTDATED = "The update information is older than what this copy has already seen"
+#: A day number as the server writes it: days since 1 January 1970.
+_SERVER_DAY = re.compile(r"\d{1,6}")
+_SECONDS_PER_DAY = 86_400
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECURITY
-# ══════════════════════════════════════════════════════════════════════════════
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
-def _require_https(url: str) -> None:
-    """Raise ValueError if ``url`` is not an HTTPS URL.
-
-    Defense-in-depth against a compromised or tampered update JSON.
-    The update manifest is served over HTTPS, but the download URL
-    inside it is attacker-controllable if the manifest is ever
-    compromised. Refusing any non-HTTPS URL ensures a malicious
-    manifest cannot redirect the download to an insecure scheme
-    (``http://``, ``file://``, ``ftp://``) before SHA-256 verification
-    would even have a chance to fail.
-    """
-    if not isinstance(url, str) or not url.startswith("https://"):
-        raise ValueError(
-            f"Refusing to fetch non-HTTPS URL: {url!r}"
-        )
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATA
-# ══════════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class PlatformUpdate:
-    """Update info for a single platform."""
-    download_url: str = ""
-    file_size: int = 0
-    sha256_hash: str = ""
-
-
-@dataclass
-class UpdateInfo:
-    """Parsed update JSON."""
-    latest_version: str = ""
-    release_notes: str = ""
-    min_version: str = ""
-    platform_update: PlatformUpdate | None = None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# VERSION COMPARISON (Semantic Versioning — MAJOR.MINOR.PATCH)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def parse_version(version_str: str) -> tuple[int, ...]:
-    """Parse a MAJOR.MINOR.PATCH version string to a comparable tuple.
-
-    Strips an optional leading 'v' (so 'v1.0.0' and '1.0.0' both work).
-    Returns (0, 0, 0) if the string can't be parsed, which ensures the
-    comparison logic treats malformed versions as lower than any real
-    release and never triggers a spurious update prompt.
-    """
-    try:
-        clean = version_str.strip().lstrip("vV")
-        parts = clean.split(".")
-        return tuple(int(p) for p in parts)
-    except (ValueError, AttributeError):
-        return (0, 0, 0)
-
-
-def is_newer(remote: str, local: str) -> bool:
-    """Return True if remote version is newer than local."""
-    return parse_version(remote) > parse_version(local)
-
-
-def get_current_platform() -> str:
-    """Return platform key: 'windows', 'macos', or 'linux'."""
-    system = platform.system().lower()
-    if system == "darwin":
-        return "macos"
-    elif system == "windows":
-        return "windows"
-    return "linux"
-
-
-def _install_channel() -> str:
-    """Install channel for the update request.
-
-    Derived from runtime markers — never hardcoded:
-    - 'appimage' : the AppImage runtime exports the APPIMAGE env var.
-    - 'exe'/'deb'/'app' : a Nuitka standalone build (Nuitka sets the
-      module-level ``__compiled__`` marker) on Windows/Linux/macOS.
-    - 'source' : running from a Python interpreter (dev/source checkout).
-    """
-    if os.environ.get("APPIMAGE"):
-        return "appimage"
-    if "__compiled__" not in globals():
-        return "source"
-    return {"windows": "exe", "linux": "deb", "macos": "app"}.get(
-        get_current_platform(), "packaged",
-    )
-
-
-def _user_agent() -> str:
-    """Build the User-Agent header sent with update requests.
-
-    Identifies the application and the platform it runs on (version,
-    OS, CPU architecture, install channel). All fields are derived at
-    runtime — nothing hardcoded. Example:
-    ``WireTrace/1.2.0 (linux; x86_64; appimage)``.
-    """
-    return (
-        f"{APP_NAME}/{APP_VERSION} "
-        f"({get_current_platform()}; {platform.machine()}; {_install_channel()})"
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TEMP FILE MANAGEMENT
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _get_download_path(url: str) -> str:
-    """Return the deterministic local path for a download URL.
-
-    Always uses the same filename for the same version, so repeated
-    downloads overwrite rather than accumulate.
-    """
-    filename = url.rsplit("/", 1)[-1]
-    return os.path.join(tempfile.gettempdir(), filename)
-
-
-def _verify_cached_file(path: str, expected_hash: str) -> bool:
-    """Return True if a cached file exists and its SHA-256 matches."""
-    if not os.path.isfile(path):
-        return False
-    if not expected_hash:
-        return False  # Can't verify — must re-download
-
-    try:
-        hasher = hashlib.sha256()
-        with open(path, "rb") as f:
-            while True:
-                chunk = f.read(DOWNLOAD_CHUNK_SIZE)
-                if not chunk:
-                    break
-                hasher.update(chunk)
-        matches = hasher.hexdigest().lower() == expected_hash.lower()
-        if matches:
-            logger.info("Cached installer verified: %s", path)
-        return matches
-    except OSError:
-        return False
-
-
-def cleanup_stale_downloads() -> None:
-    """Remove old WireTrace installer files from temp directory.
-
-    Called once at startup. Removes WireTrace-Setup-*.exe,
-    WireTrace-*.dmg, WireTrace-*.AppImage older than 7 days.
-    """
-    temp = tempfile.gettempdir()
-    patterns = [
-        os.path.join(temp, "WireTrace-Setup-*.exe"),
-        os.path.join(temp, "WireTrace-*.dmg"),
-        os.path.join(temp, "WireTrace-*.AppImage"),
-    ]
-    cutoff = datetime.now().timestamp() - (STALE_FILE_MAX_AGE_DAYS * 86400)
-    removed = 0
-
-    for pattern in patterns:
-        for path in glob.glob(pattern):
-            try:
-                if os.path.getmtime(path) < cutoff:
-                    os.remove(path)
-                    removed += 1
-            except OSError:
-                pass
-
-    if removed:
-        logger.info("Cleaned up %d stale installer file(s) from temp", removed)
-
-
-def _replace_appimage(src: str, target: str) -> None:
-    """Atomically replace the running AppImage at *target* with *src*.
-
-    The new file is copied into the target's own directory first, so the
-    final swap is a same-filesystem ``os.replace`` (atomic; no torn file
-    if interrupted). The executable bit is set before the swap. Replacing
-    the path of a currently-running executable is safe on Linux — the
-    kernel keeps the old inode alive for the live process until it exits.
-
-    Raises ``OSError`` if the target directory is not writable (e.g. a
-    root-owned system location); the caller handles that as a fallback.
-    """
-    target_dir = os.path.dirname(target) or "."
-    fd, tmp = tempfile.mkstemp(prefix=".wiretrace-update-", dir=target_dir)
-    os.close(fd)
-    try:
-        shutil.copyfile(src, tmp)
-        os.chmod(tmp, 0o755)
-        os.replace(tmp, target)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
-        raise
-
-
-def _apply_linux_update(installer_path: str) -> None:
-    """Apply a downloaded Linux update and close the app.
-
-    A real self-update is only possible when the app is itself running as
-    an AppImage: the runtime exports ``APPIMAGE`` (the absolute path of the
-    running image), which we replace with the freshly downloaded one and
-    then relaunch. Any other install type — a ``.deb`` or a source
-    checkout — cannot be replaced from user space (a ``.deb`` would need
-    root), so we open the downloaded file for the user to install manually.
-    """
-    appimage = os.environ.get("APPIMAGE")
-    if appimage and os.path.isfile(appimage):
-        try:
-            _replace_appimage(installer_path, appimage)
-            subprocess.Popen([appimage])
-            QApplication.quit()
-            return
-        except OSError as exc:
-            logger.error(
-                "AppImage self-update failed (%s); opening the download "
-                "for manual install", exc,
-            )
-    else:
-        logger.info(
-            "Not running as an AppImage; opening the download for manual "
-            "install",
-        )
-    # Fallback: hand the downloaded file to the desktop so the user can
-    # install/run it themselves.
-    subprocess.Popen(["xdg-open", installer_path])
-    QApplication.quit()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CHECK WORKER (runs in QThread — never blocks UI)
-# ══════════════════════════════════════════════════════════════════════════════
-
-class _CheckWorker(QThread):
-    """Background thread for update check (network I/O)."""
-
-    finished = Signal(object)  # UpdateInfo or None
-    failed = Signal(str)       # error message
-
-    def run(self) -> None:
-        try:
-            if not UPDATE_BASE_URL:
-                logger.info("Update URL not configured — skipping update check")
-                self.finished.emit(None)
-                return
-
-            url = f"{UPDATE_BASE_URL}/{UPDATE_JSON_FILE}"
-            _require_https(url)
-            logger.info("Checking for updates at %s", url)
-
-            req = Request(url)
-            req.add_header("User-Agent", _user_agent())
-
-            with urlopen(req, timeout=15) as response:
-                data = json.loads(response.read().decode("utf-8"))
-
-            info = UpdateInfo(
-                latest_version=data.get("latest_version", ""),
-                release_notes=data.get("release_notes", ""),
-                min_version=data.get("min_version", ""),
-            )
-
-            plat_key = get_current_platform()
-            platforms = data.get("platforms", {})
-            if plat_key in platforms:
-                pd = platforms[plat_key]
-                info.platform_update = PlatformUpdate(
-                    download_url=pd.get("download_url", ""),
-                    file_size=pd.get("file_size", 0),
-                    sha256_hash=pd.get("sha256_hash", ""),
-                )
-
-            self.finished.emit(info)
-
-        except Exception as e:
-            logger.warning("Update check failed: %s", e)
-            self.failed.emit(str(e))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DOWNLOAD WORKER (runs in QThread — cancellable)
-# ══════════════════════════════════════════════════════════════════════════════
-
-class _DownloadWorker(QThread):
-    """Background thread for downloading an update installer.
-
-    Supports cancellation via request_cancel(). On cancel:
-      - Download stops at the next chunk boundary
-      - Partial file is deleted
-      - cancelled signal is emitted
-    """
-
-    progress = Signal(int, int)    # (bytes_downloaded, total_bytes)
-    finished = Signal(str)         # path to downloaded file
-    failed = Signal(str)           # error message
-    cancelled = Signal()           # download was cancelled
-
-    def __init__(self, info: UpdateInfo, dest_path: str, parent=None) -> None:
-        super().__init__(parent)
-        self._info = info
-        self._dest_path = dest_path
-        self._cancel_requested = False
-
-    def request_cancel(self) -> None:
-        """Request cancellation. Thread-safe (checked at chunk boundaries)."""
-        self._cancel_requested = True
-
-    def run(self) -> None:
-        try:
-            pu = self._info.platform_update
-            if not pu or not pu.download_url:
-                self.failed.emit("No download URL available for this platform")
-                return
-
-            url = pu.download_url
-            _require_https(url)
-
-            logger.info("Downloading update from %s", url)
-            req = Request(url)
-            req.add_header("User-Agent", _user_agent())
-
-            with urlopen(req, timeout=60) as response:
-                total = pu.file_size or int(
-                    response.headers.get("Content-Length", 0)
-                )
-                downloaded = 0
-                hasher = hashlib.sha256()
-
-                with open(self._dest_path, "wb") as f:
-                    while True:
-                        # Check for cancellation at each chunk boundary
-                        if self._cancel_requested:
-                            logger.info("Download cancelled by user")
-                            break
-
-                        chunk = response.read(DOWNLOAD_CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        hasher.update(chunk)
-                        downloaded += len(chunk)
-                        self.progress.emit(downloaded, total)
-
-            # Handle cancellation — clean up partial file
-            if self._cancel_requested:
-                self._cleanup_partial()
-                self.cancelled.emit()
-                return
-
-            # Verify SHA-256 (spec section 11)
-            if pu.sha256_hash:
-                actual = hasher.hexdigest()
-                if actual.lower() != pu.sha256_hash.lower():
-                    self._cleanup_partial()
-                    self.failed.emit(
-                        "Download verification failed — the file may be "
-                        "corrupted. Please try again."
-                    )
-                    return
-                logger.info("SHA-256 verified: %s", actual[:16] + "...")
-
-            self.finished.emit(self._dest_path)
-
-        except Exception as e:
-            logger.error("Download failed: %s", e)
-            self._cleanup_partial()
-            self.failed.emit(str(e))
-
-    def _cleanup_partial(self) -> None:
-        """Remove the partially downloaded file."""
-        try:
-            if os.path.exists(self._dest_path):
-                os.remove(self._dest_path)
-                logger.info("Removed partial download: %s", self._dest_path)
-        except OSError:
-            pass
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# UPDATE MANAGER
-# ══════════════════════════════════════════════════════════════════════════════
 
 class UpdateManager(QObject):
-    """Manages automatic update checks.
+    """Looks for updates and remembers the user's answers.
 
     Signals:
-        update_available(UpdateInfo):  New version found.
-        update_not_available():        Current version is latest.
-        check_failed(str):             Network/parse error.
+        update_available(object, bool):  A newer release, and whether the
+                                         user asked for this check.
+        up_to_date():                    A check the user asked for found
+                                         nothing newer.
+        check_failed(str):               A check the user asked for failed.
     """
 
-    update_available = Signal(object)
-    update_not_available = Signal()
+    update_available = Signal(object, bool)
+    up_to_date = Signal()
     check_failed = Signal(str)
 
-    def __init__(self, config_manager=None, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        config: ConfigManager,
+        parent: QObject | None = None,
+        *,
+        opener: Opener | None = None,
+        public_keys: Sequence[str] = UPDATE_PUBLIC_KEYS,
+        now: Callable[[], datetime] = _utc_now,
+    ) -> None:
         super().__init__(parent)
-        self._config = config_manager
-        self._startup_timer: QTimer | None = None
-        self._check_worker: _CheckWorker | None = None
+        self._config = config
+        self._opener = opener
+        self._keys = tuple(decode_public_key(key) for key in public_keys)
+        self._now = now
+        self._task: Task | None = None
+        #: Whether the check under way was asked for by the user.
+        self._checking_manually = False
+        self._found: ReleaseManifest | None = None
 
-        # Snooze/skip state
-        self._skipped_version: str = ""
-        self._snoozed_until: datetime | None = None
+        self._first_check = QTimer(self)
+        self._first_check.setSingleShot(True)
+        self._first_check.setInterval(UPDATE_CHECK_STARTUP_DELAY_S * _MS_PER_SECOND)
+        self._first_check.timeout.connect(self._check_automatically)
+        self._next_check = QTimer(self)
+        self._next_check.setInterval(UPDATE_CHECK_INTERVAL_HOURS * _MS_PER_HOUR)
+        self._next_check.timeout.connect(self._check_automatically)
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────
-
-    def start(self) -> None:
-        """Start the update manager with a 10-second delay.
-
-        Also cleans up stale installer files from temp.
-        """
-        # Clean up old downloads
-        cleanup_stale_downloads()
-
-        if self._config and not self._config.check_updates_on_startup:
-            logger.info("Update checks disabled in preferences")
-            return
-
-        self._startup_timer = QTimer(self)
-        self._startup_timer.setSingleShot(True)
-        self._startup_timer.timeout.connect(self._on_startup_check)
-        self._startup_timer.start(STARTUP_DELAY_MS)
-        logger.info(
-            "Update check scheduled in %d seconds",
-            STARTUP_DELAY_MS // 1000,
-        )
-
-    def stop(self) -> None:
-        """Stop the update manager."""
-        if self._startup_timer:
-            self._startup_timer.stop()
-            self._startup_timer = None
-
-    # ── Public API ────────────────────────────────────────────────────────
-
-    def check_now(self, silent: bool = False) -> None:
-        """Perform an update check in a background thread.
-
-        Results delivered via signals: update_available,
-        update_not_available, or check_failed.
-        """
-        if self._check_worker and self._check_worker.isRunning():
-            return
-
-        self._check_worker = _CheckWorker(self)
-        self._check_worker.finished.connect(
-            lambda info: self._on_check_result(info, silent)
-        )
-        self._check_worker.failed.connect(
-            lambda msg: self._on_check_error(msg, silent)
-        )
-        self._check_worker.start()
-
-    def snooze(self) -> None:
-        """Snooze update reminder for 24 hours."""
-        self._snoozed_until = datetime.now() + timedelta(hours=SNOOZE_HOURS)
-        logger.info("Update snoozed until %s", self._snoozed_until)
-
-    def skip_version(self, version: str) -> None:
-        """Skip a specific version — don't show again."""
-        self._skipped_version = version
-        logger.info("Skipped update version: %s", version)
-
-    # ── Internal ──────────────────────────────────────────────────────────
-
-    def _on_check_result(self, info: UpdateInfo, silent: bool) -> None:
-        if not info or not info.latest_version:
-            if not silent:
-                self.check_failed.emit("Invalid update response from server")
-            return
-
-        if not is_newer(info.latest_version, APP_VERSION):
-            logger.info(
-                "No update (current: %s, remote: %s)",
-                APP_VERSION, info.latest_version,
-            )
-            if not silent:
-                self.update_not_available.emit()
-            return
-
-        if info.latest_version == self._skipped_version:
-            logger.info("Version %s was skipped by user", info.latest_version)
-            if not silent:
-                self.update_not_available.emit()
-            return
-
-        logger.info(
-            "Update available: %s → %s", APP_VERSION, info.latest_version
-        )
-        self.update_available.emit(info)
-
-    def _on_check_error(self, msg: str, silent: bool) -> None:
-        if not silent:
-            self.check_failed.emit(msg)
-
-    @Slot()
-    def _on_startup_check(self) -> None:
-        if self._snoozed_until and datetime.now() < self._snoozed_until:
-            logger.info("Update check snoozed until %s", self._snoozed_until)
-            return
-        self.check_now(silent=True)
-
-    @staticmethod
-    def launch_installer(installer_path: str) -> None:
-        """Apply the downloaded update and close the application.
-
-        Windows/macOS hand the file to the OS. Linux routes through the
-        AppImage self-update path (with a manual-install fallback for
-        non-AppImage installs); see _apply_linux_update.
-        """
-        if not os.path.exists(installer_path):
-            logger.error("Installer not found: %s", installer_path)
-            return
-
-        system = platform.system().lower()
-        try:
-            if system == "windows":
-                os.startfile(installer_path)  # type: ignore[attr-defined]
-            elif system == "darwin":
-                subprocess.Popen(["open", installer_path])
-            elif system == "linux":
-                _apply_linux_update(installer_path)  # handles relaunch + quit
-                return
-            else:
-                subprocess.Popen(["xdg-open", installer_path])
-
-            QApplication.quit()
-        except Exception as e:
-            logger.error("Failed to launch installer: %s", e)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# UPDATE DIALOG — self-contained download + install UI
-# ══════════════════════════════════════════════════════════════════════════════
-
-class UpdateDialog(QDialog):
-    """Dialog shown when an update is available.
-
-    Features:
-      - Checks for cached installer before downloading (SHA-256 verified)
-      - Downloads in background thread — UI stays fully responsive
-      - Cancel button stops download and cleans up partial file
-      - Close button always works (confirms if download in progress)
-      - Progress bar with MB and percentage display
-      - Install & Restart launches installer and quits application
-
-    Three initial options:
-      - Update Now: download (or use cache) → verify → install
-      - Remind Later: snooze for 24 hours
-      - Skip This Version: don't show again for this version
-    """
-
-    def __init__(self, info: UpdateInfo, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Update Available")
-        self.setFixedWidth(480)
-        self.setModal(True)
-
-        self._info = info
-        self._result_action = "dismiss"
-        self._download_worker: _DownloadWorker | None = None
-        self._downloaded_path: str | None = None
-
-        self._setup_ui()
+    # ── Public API ───────────────────────────────────────────────────────
 
     @property
-    def result_action(self) -> str:
-        """Return 'update', 'remind', 'skip', or 'dismiss'."""
-        return self._result_action
+    def found(self) -> ReleaseManifest | None:
+        """The newer release the last check found, if any."""
+        return self._found
 
-    def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(24, 20, 24, 20)
+    @property
+    def opener(self) -> Opener | None:
+        """What requests are sent through; None means the network."""
+        return self._opener
 
-        # Title
-        title = QLabel(
-            f"<b style='font-size:14px;'>{APP_NAME} v"
-            f"{self._info.latest_version} is available</b>"
-        )
-        layout.addWidget(title)
+    @property
+    def checking(self) -> bool:
+        return self._task is not None and self._task.running
 
-        current = QLabel(f"You are currently running v{APP_VERSION}.")
-        layout.addWidget(current)
+    def start(self) -> None:
+        """Begin the automatic checks. Whether one is made is decided each
+        time, so a change in Preferences takes effect without a restart."""
+        remove_legacy_downloads()
+        self._first_check.start()
+        self._next_check.start()
 
-        # Release notes
-        if self._info.release_notes:
-            notes_label = QLabel("<b>Release Notes</b>")
-            layout.addWidget(notes_label)
+    def stop(self) -> None:
+        self._first_check.stop()
+        self._next_check.stop()
 
-            notes = QTextEdit()
-            notes.setPlainText(self._info.release_notes)
-            notes.setReadOnly(True)
-            notes.setMaximumHeight(100)
-            layout.addWidget(notes)
+    def check_now(self) -> None:
+        """Check because the user asked. The answer always arrives as a signal."""
+        self._check(manual=True)
 
-        # File size
-        if self._info.platform_update and self._info.platform_update.file_size:
-            size_mb = self._info.platform_update.file_size / (1024 * 1024)
-            size_label = QLabel(f"Download size: {size_mb:.1f} MB")
-            size_label.setProperty("secondary", True)
-            layout.addWidget(size_label)
+    def snooze(self) -> None:
+        """Announce no update until the snooze time has passed."""
+        self._config.update_snoozed_until = self._now() + timedelta(hours=UPDATE_SNOOZE_HOURS)
+        self._config.save()
 
-        # Progress bar (hidden initially)
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 100)
-        self._progress.setFixedHeight(20)
-        self._progress.setVisible(False)
-        layout.addWidget(self._progress)
+    def skip_version(self, version: str) -> None:
+        """Never announce ``version`` by itself again."""
+        self._config.skipped_update_version = version
+        self._config.save()
 
-        # Status label (hidden initially)
-        self._status = QLabel("")
-        self._status.setProperty("secondary", True)
-        self._status.setVisible(False)
-        layout.addWidget(self._status)
+    # ── Checking ─────────────────────────────────────────────────────────
 
-        layout.addSpacing(4)
+    def _may_check_automatically(self) -> bool:
+        return self._config.check_updates_on_startup
 
-        # Buttons — horizontal row
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(8)
+    def _check_automatically(self) -> None:
+        if self._may_check_automatically():
+            self._check(manual=False)
 
-        self._skip_btn = QPushButton("Skip This Version")
-        self._skip_btn.setObjectName("clearBtn")
-        self._skip_btn.clicked.connect(self._on_skip)
-
-        self._remind_btn = QPushButton("Remind Later")
-        self._remind_btn.setObjectName("clearBtn")
-        self._remind_btn.clicked.connect(self._on_remind)
-
-        self._cancel_btn = QPushButton("Cancel")
-        self._cancel_btn.setObjectName("clearBtn")
-        self._cancel_btn.setVisible(False)
-        self._cancel_btn.clicked.connect(self._on_cancel)
-
-        self._update_btn = QPushButton("  Update Now  ")
-        self._update_btn.setDefault(True)
-        self._update_btn.clicked.connect(self._on_update)
-
-        btn_layout.addWidget(self._skip_btn)
-        btn_layout.addWidget(self._remind_btn)
-        btn_layout.addWidget(self._cancel_btn)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self._update_btn)
-
-        layout.addLayout(btn_layout)
-
-    # ── Button Handlers ───────────────────────────────────────────────────
-
-    def _on_update(self) -> None:
-        """Start downloading the update (or use cached installer)."""
-        self._result_action = "update"
-
-        pu = self._info.platform_update
-        if not pu or not pu.download_url:
-            self._show_status("No download available for this platform")
+    def _check(self, *, manual: bool) -> None:
+        if self.checking:
             return
-
-        dest_path = _get_download_path(pu.download_url)
-
-        # Check for cached installer (skip download if SHA-256 matches)
-        if _verify_cached_file(dest_path, pu.sha256_hash):
-            self._downloaded_path = dest_path
-            self._show_download_complete(from_cache=True)
+        if not self._keys:
+            logger.warning("This build holds no key to verify updates with")
+            if manual:
+                self.check_failed.emit("This build cannot verify updates")
             return
+        headers = {
+            "User-Agent": user_agent(),
+            UPDATE_LAST_CHECK_HEADER: self._previous_day() or UPDATE_FIRST_CHECK_VALUE,
+        }
+        opener, keys = self._opener, self._keys
 
-        # Start download — switch to download UI state
-        self._set_downloading_state(True)
-        self._show_status("Connecting to server...")
-
-        self._download_worker = _DownloadWorker(
-            self._info, dest_path, self
-        )
-        self._download_worker.progress.connect(self._on_download_progress)
-        self._download_worker.finished.connect(self._on_download_finished)
-        self._download_worker.failed.connect(self._on_download_failed)
-        self._download_worker.cancelled.connect(self._on_download_cancelled)
-        self._download_worker.start()
-
-    def _on_remind(self) -> None:
-        self._result_action = "remind"
-        self.accept()
-
-    def _on_skip(self) -> None:
-        self._result_action = "skip"
-        self.accept()
-
-    def _on_cancel(self) -> None:
-        """Cancel an in-progress download."""
-        if self._download_worker and self._download_worker.isRunning():
-            self._show_status("Cancelling download...")
-            self._cancel_btn.setEnabled(False)
-            self._download_worker.request_cancel()
-        else:
-            self._set_downloading_state(False)
-
-    # ── Download Signal Handlers ──────────────────────────────────────────
-
-    @Slot(int, int)
-    def _on_download_progress(self, downloaded: int, total: int) -> None:
-        if total > 0:
-            pct = int((downloaded / total) * 100)
-            self._progress.setValue(pct)
-            mb_done = downloaded / (1024 * 1024)
-            mb_total = total / (1024 * 1024)
-            self._status.setText(
-                f"Downloading... {mb_done:.1f} / {mb_total:.1f} MB ({pct}%)"
+        def work(_task: Task) -> tuple[ReleaseManifest, str]:
+            try:
+                data, answer = fetch(UPDATE_MANIFEST_URL, headers, opener=opener)
+            except DownloadError as exc:
+                logger.warning("The update check could not reach the server: %s", exc)
+                raise DownloadError(CHECK_UNREACHABLE) from exc
+            day = next(
+                (value for name, value in answer.items()
+                 if name.lower() == UPDATE_SERVER_DAY_HEADER.lower()),
+                "",
             )
-        else:
-            mb_done = downloaded / (1024 * 1024)
-            self._status.setText(f"Downloading... {mb_done:.1f} MB")
+            try:
+                return read_signed_manifest(data, keys), day
+            except ManifestError as exc:
+                logger.warning("The update manifest was refused: %s", exc)
+                raise ManifestError(CHECK_UNVERIFIED) from exc
 
-    @Slot(str)
-    def _on_download_finished(self, path: str) -> None:
-        self._downloaded_path = path
-        self._show_download_complete(from_cache=False)
+        # The task announces its end on its own thread; bound methods of
+        # this object are called on the main thread, where it lives.
+        task = Task(work, (DownloadError, ManifestError), self)
+        task.succeeded.connect(self._on_check_answered)
+        task.failed.connect(self._on_check_failed)
+        self._task, self._checking_manually = task, manual
+        task.start()
 
-    @Slot(str)
-    def _on_download_failed(self, error: str) -> None:
-        self._set_downloading_state(False)
-        self._show_status(f"Download failed: {error}")
+    def _on_check_answered(self, result: tuple[ReleaseManifest, str]) -> None:
+        manifest, day = result
+        self._on_checked(manifest, day, manual=self._checking_manually)
 
-    @Slot()
-    def _on_download_cancelled(self) -> None:
-        self._set_downloading_state(False)
-        self._progress.setVisible(False)
-        self._status.setVisible(False)
+    def _on_check_failed(self, reason: str) -> None:
+        self._on_failed(reason, manual=self._checking_manually)
 
-    def _on_install(self) -> None:
-        """Launch the downloaded installer and close the application."""
-        if not self._downloaded_path or not os.path.exists(
-            self._downloaded_path
-        ):
-            self._show_status("Installer file not found — please retry")
+    def _on_checked(self, manifest: ReleaseManifest, day: str, *, manual: bool) -> None:
+        if self._is_plausible_day(day) and day != self._config.update_last_check_day:
+            self._config.update_last_check_day = day
+            self._config.save()
+
+        if not self._is_fresh(manifest):
+            self._found = None
+            logger.warning("An update manifest signed before the newest one already accepted was refused")
+            if manual:
+                self.check_failed.emit(CHECK_OUTDATED)
             return
 
-        self._show_status("Launching installer...")
-        QApplication.processEvents()
-        UpdateManager.launch_installer(self._downloaded_path)
+        if not is_newer(manifest.version, APP_VERSION):
+            self._found = None
+            logger.info("No update: installed %s, latest %s", APP_VERSION, manifest.version)
+            if manual:
+                self.up_to_date.emit()
+            return
 
-    # ── UI State Management ───────────────────────────────────────────────
+        self._found = manifest
+        if not manual and self._held_back(manifest.version):
+            return
+        logger.info("Update available: %s to %s", APP_VERSION, manifest.version)
+        self.update_available.emit(manifest, manual)
 
-    def _set_downloading_state(self, downloading: bool) -> None:
-        """Switch between initial state and downloading state."""
-        self._progress.setVisible(downloading)
-        self._progress.setValue(0)
-        self._status.setVisible(downloading)
+    def _is_fresh(self, manifest: ReleaseManifest) -> bool:
+        """Whether ``manifest`` was signed no earlier than the newest one
+        accepted before; if it is newer, it becomes the newest.
 
-        # Downloading: show Cancel, hide Skip/Remind, disable Update
-        self._cancel_btn.setVisible(downloading)
-        self._cancel_btn.setEnabled(downloading)
-        self._skip_btn.setVisible(not downloading)
-        self._remind_btn.setVisible(not downloading)
+        A manifest that was genuinely signed for an earlier release could
+        otherwise be served again to hold this installation back.
+        """
+        signed_at = manifest.signed_at
+        if signed_at is None:
+            return False
+        stored = self._config.update_newest_manifest_signed_at
+        try:
+            newest = parse_signed_at(stored) if stored else None
+        except ManifestError:
+            # Edited by hand into something else: start again from this one.
+            newest = None
+        if newest is not None and signed_at < newest:
+            return False
+        if newest is None or signed_at > newest:
+            self._config.update_newest_manifest_signed_at = format_signed_at(signed_at)
+            self._config.save()
+        return True
 
-        if downloading:
-            self._update_btn.setEnabled(False)
-            self._update_btn.setText("Downloading...")
-        else:
-            self._update_btn.setEnabled(True)
-            self._update_btn.setText("  Update Now  ")
-            # Reconnect button to update action (may have been swapped)
-            with contextlib.suppress(RuntimeError):
-                self._update_btn.clicked.disconnect()
-            self._update_btn.clicked.connect(self._on_update)
+    def _is_plausible_day(self, day: str) -> bool:
+        """Whether ``day`` is a day number close to today's.
 
-    def _show_download_complete(self, from_cache: bool) -> None:
-        """Show the Install & Restart state."""
-        self._progress.setVisible(True)
-        self._progress.setValue(100)
-        self._status.setVisible(True)
+        Only such a value is stored and sent back. A server could
+        otherwise hand each installation a number of its own and
+        recognise it at the next check.
+        """
+        if _SERVER_DAY.fullmatch(day) is None:
+            return False
+        today = int(self._now().timestamp()) // _SECONDS_PER_DAY
+        return abs(int(day) - today) <= UPDATE_SERVER_DAY_TOLERANCE
 
-        if from_cache:
-            self._status.setText("Installer already downloaded — verified ✓")
-        else:
-            self._status.setText("Download complete — verified ✓")
+    def _previous_day(self) -> str:
+        """The stored day of the previous check, if it is a day number.
+        The preferences file can be edited; nothing else is ever sent."""
+        day = self._config.update_last_check_day
+        return day if _SERVER_DAY.fullmatch(day) else ""
 
-        self._cancel_btn.setVisible(False)
-        self._skip_btn.setVisible(False)
-        self._remind_btn.setVisible(False)
+    def _held_back(self, version: str) -> bool:
+        """Whether the user asked not to be told of ``version`` for now."""
+        if version == self._config.skipped_update_version:
+            return True
+        until = self._config.update_snoozed_until
+        return until is not None and self._now() < until
 
-        self._update_btn.setText("  Install && Restart  ")
-        self._update_btn.setEnabled(True)
-        with contextlib.suppress(RuntimeError):
-            self._update_btn.clicked.disconnect()
-        self._update_btn.clicked.connect(self._on_install)
-
-    def _show_status(self, text: str) -> None:
-        """Show a status message."""
-        self._status.setText(text)
-        self._status.setVisible(True)
-
-    # ── Close Handling ────────────────────────────────────────────────────
-
-    def closeEvent(self, event) -> None:
-        """Allow closing — cancel download if in progress."""
-        if self._download_worker and self._download_worker.isRunning():
-            reply = QMessageBox.question(
-                self,
-                "Cancel Download?",
-                "A download is in progress. Cancel and close?",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.No:
-                event.ignore()
-                return
-
-            # Cancel the download and wait for thread to finish
-            self._download_worker.request_cancel()
-            self._download_worker.wait(3000)
-
-        event.accept()
+    def _on_failed(self, reason: str, *, manual: bool) -> None:
+        logger.warning("Update check failed: %s", reason)
+        if manual:
+            self.check_failed.emit(reason)

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Pure geometry helpers for restoring window position safely.
 
 Restoring a saved window position blindly is unsafe: the saved coordinates
@@ -6,7 +6,7 @@ may lie on a monitor that is no longer connected (e.g. an external display
 on a laptop that has since been undocked). The window would then be placed
 off-screen and appear only as a taskbar entry.
 
-This module contains the screen-clamping *policy* as a pure function over
+This module contains the screen-clamping policy as a pure function over
 plain ``(x, y, w, h)`` rectangles so it can be unit-tested without Qt. The
 Qt-facing caller (``MainWindow._restore_window_state``) only gathers the
 current screen rectangles and delegates here.

@@ -1,147 +1,176 @@
-; ══════════════════════════════════════════════════════════════════════════════
-; WireTrace — Windows Installer (Inno Setup 6)
-; ══════════════════════════════════════════════════════════════════════════════
+; WireTrace: the Windows installer (Inno Setup 6).
 ;
-; Supports BOTH admin and non-admin installation:
-;   Admin:     C:\Program Files\WireTrace          (all users)
-;   Non-Admin: C:\Users\{user}\AppData\Local\WireTrace (current user)
+; Compiled by build/build.py, which passes every value that the checks
+; below ask for. They come from version.py, app/constants.py and
+; updater/install.py, so the installer cannot state a version, a name or
+; a wording that differs from the application's. This file is not
+; compiled on its own.
 ;
-; The user is prompted to choose at install time via the privilege dialog.
-;
-; Build prerequisites:
-;   1. Nuitka standalone output in build\dist\WireTrace\
-;   2. Inno Setup 6.x (iscc.exe on PATH)
-;
-; Usage:
-;   iscc build\windows\installer.iss
-; ══════════════════════════════════════════════════════════════════════════════
+; Installs for all users (as administrator) or for the current user
+; only; the person installing chooses.
 
-#define MyAppName        "WireTrace"
-#define MyAppVersion     "1.1.0"
-#define MyAppPublisher   "The Nuance Project"
-#define MyAppURL         "https://thenuanceproject.com"
-#define MyAppExeName     "WireTrace.exe"
-#define MyAppDescription "Professional Serial Data Monitor"
-#define MyAppCopyright   "© 2026 The Nuance Project"
-
-; ── Source paths (relative to this .iss file) ─────────────────────────────────
-; Nuitka standalone output directory
-#define NuitkaDistDir    "..\..\build\dist\WireTrace"
+#ifndef AppName
+  #error Not given: AppName. Compile through build/build.py.
+#endif
+#ifndef AppVersion
+  #error Not given: AppVersion. Compile through build/build.py.
+#endif
+#ifndef AppPublisher
+  #error Not given: AppPublisher. Compile through build/build.py.
+#endif
+#ifndef AppUrl
+  #error Not given: AppUrl. Compile through build/build.py.
+#endif
+#ifndef AppDescription
+  #error Not given: AppDescription. Compile through build/build.py.
+#endif
+#ifndef AppCopyright
+  #error Not given: AppCopyright. Compile through build/build.py.
+#endif
+#ifndef AppExeName
+  #error Not given: AppExeName. Compile through build/build.py.
+#endif
+#ifndef AppMutexName
+  #error Not given: AppMutexName. Compile through build/build.py.
+#endif
+#ifndef SourceDir
+  #error Not given: SourceDir. Compile through build/build.py.
+#endif
+#ifndef OutputDir
+  #error Not given: OutputDir. Compile through build/build.py.
+#endif
+#ifndef OutputName
+  #error Not given: OutputName. Compile through build/build.py.
+#endif
+#ifndef IconFile
+  #error Not given: IconFile. Compile through build/build.py.
+#endif
+#ifndef PrivacyFile
+  #error Not given: PrivacyFile. Compile through build/build.py.
+#endif
+#ifndef UpdateOption
+  #error Not given: UpdateOption. Compile through build/build.py.
+#endif
+#ifndef ChoicesFile
+  #error Not given: ChoicesFile. Compile through build/build.py.
+#endif
+#ifndef ChoicesSection
+  #error Not given: ChoicesSection. Compile through build/build.py.
+#endif
+#ifndef ChoicesKey
+  #error Not given: ChoicesKey. Compile through build/build.py.
+#endif
 
 [Setup]
-; Unique application identifier (do NOT change between versions)
+; Identifies the application to Windows. Must stay the same in every version.
 AppId={{COM.THENUANCEPROJECT.WIRETRACE}
 
-; Application metadata
-AppName={#MyAppName}
-AppVersion={#MyAppVersion}
-AppVerName={#MyAppName} v{#MyAppVersion}
-AppPublisher={#MyAppPublisher}
-AppPublisherURL={#MyAppURL}
-AppSupportURL={#MyAppURL}
-AppCopyright={#MyAppCopyright}
-VersionInfoVersion={#MyAppVersion}.0
-VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription={#MyAppDescription}
-VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion={#MyAppVersion}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppVerName={#AppName} v{#AppVersion}
+AppPublisher={#AppPublisher}
+AppPublisherURL={#AppUrl}
+AppSupportURL={#AppUrl}
+AppCopyright={#AppCopyright}
+VersionInfoVersion={#AppVersion}.0
+VersionInfoCompany={#AppPublisher}
+VersionInfoDescription={#AppDescription}
+VersionInfoProductName={#AppName}
+VersionInfoProductVersion={#AppVersion}
 
-; ── Installation mode: Admin OR Non-Admin ─────────────────────────────────────
-; PrivilegesRequired=lowest makes non-admin the default.
-; PrivilegesRequiredOverridesAllowed=dialog shows a choice on launch:
-;   "Install for all users" (admin) vs "Install for me only" (non-admin)
+; For the current user unless the person installing chooses all users.
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
-; ── Install directories ───────────────────────────────────────────────────────
-; {autopf} = Program Files (admin) or AppData\Local\Programs (non-admin)
-DefaultDirName={autopf}\{#MyAppName}
-DefaultGroupName={#MyAppName}
+; {autopf} is Program Files for all users, AppData\Local\Programs for one.
+DefaultDirName={autopf}\{#AppName}
+DefaultGroupName={#AppName}
+AllowNoIcons=yes
 
-; ── Output ────────────────────────────────────────────────────────────────────
-OutputDir=..\..\deployment\windows
-OutputBaseFilename=WireTrace-Setup-v{#MyAppVersion}
+OutputDir={#OutputDir}
+OutputBaseFilename={#OutputName}
 
-; ── Compression ───────────────────────────────────────────────────────────────
 Compression=lzma2/max
 SolidCompression=yes
 
-; ── Appearance ────────────────────────────────────────────────────────────────
-SetupIconFile=..\..\resources\app_icon.ico
-UninstallDisplayIcon={app}\{#MyAppExeName}
-UninstallDisplayName={#MyAppName}
-WizardStyle=modern
-WizardSizePercent=100
-
-; ── Architecture ──────────────────────────────────────────────────────────────
-ArchitecturesInstallIn64BitMode=x64compatible
-ArchitecturesAllowed=x64compatible
-
-; ── Uninstaller ───────────────────────────────────────────────────────────────
-CreateUninstallRegKey=yes
+SetupIconFile={#IconFile}
+UninstallDisplayIcon={app}\{#AppExeName}
+UninstallDisplayName={#AppName}
 UninstallFilesDir={app}\uninstall
+WizardStyle=modern
 
-; ── Misc ──────────────────────────────────────────────────────────────────────
-; Prevent installing over a running instance
-AppMutex=WireTrace_SingleInstance_Mutex
-; Show setup size on disk
-DiskSpanning=no
-; Allow user to select directory
-AllowNoIcons=yes
-; Minimum Windows version (Windows 10 1809+)
+; Shown before anything is installed: what WireTrace keeps on this
+; computer and what its update check sends.
+InfoBeforeFile={#PrivacyFile}
+
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+
+; The application holds this mutex while it runs, so the installer can
+; ask for it to be closed before replacing its files.
+AppMutex={#AppMutexName}
+
+; Windows 10 version 1809 or later
 MinVersion=10.0.17763
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-; ── Installation Tasks ────────────────────────────────────────────────────────
 [Tasks]
-Name: "desktopicon";   Description: "Create a desktop shortcut";       GroupDescription: "Additional shortcuts:"
-Name: "startmenuicon"; Description: "Create a Start Menu shortcut";    GroupDescription: "Additional shortcuts:"; Flags: checkedonce
+Name: "desktopicon";   Description: "Create a desktop shortcut";    GroupDescription: "Additional shortcuts:"
+Name: "startmenuicon"; Description: "Create a Start Menu shortcut"; GroupDescription: "Additional shortcuts:"; Flags: checkedonce
+; Ticked unless the person installing unticks it. Not offered again when
+; an installation that already holds a choice is updated.
+Name: "updatecheck";   Description: "{#UpdateOption}";          GroupDescription: "Updates:"; Check: not AlreadyChosen
 
-; ── Files to Install ──────────────────────────────────────────────────────────
-; Bundle the entire Nuitka standalone directory
 [Files]
-; Main executable (renamed from main.exe)
-Source: "{#NuitkaDistDir}\WireTrace.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; All Nuitka runtime dependencies (DLLs, Python stdlib, PySide6, etc.)
-Source: "{#NuitkaDistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "WireTrace.exe"
-
-; ── Shortcuts ─────────────────────────────────────────────────────────────────
 [Icons]
-; Start Menu (program group)
-Name: "{group}\{#MyAppName}";           Filename: "{app}\{#MyAppExeName}"; Comment: "{#MyAppDescription}"; Tasks: startmenuicon
-Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}";        Tasks: startmenuicon
+Name: "{group}\{#AppName}";           Filename: "{app}\{#AppExeName}"; Comment: "{#AppDescription}"; Tasks: startmenuicon
+Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}";      Tasks: startmenuicon
+Name: "{autodesktop}\{#AppName}";     Filename: "{app}\{#AppExeName}"; Comment: "{#AppDescription}"; Tasks: desktopicon
 
-; Desktop shortcut
-Name: "{autodesktop}\{#MyAppName}";     Filename: "{app}\{#MyAppExeName}"; Comment: "{#MyAppDescription}"; Tasks: desktopicon
+[INI]
+; What was chosen about update checks. The application takes it over on
+; its first start.
+Filename: "{app}\{#ChoicesFile}"; Section: "{#ChoicesSection}"; Key: "{#ChoicesKey}"; String: "true";  Tasks: updatecheck;     Check: ShouldRecordChoice
+Filename: "{app}\{#ChoicesFile}"; Section: "{#ChoicesSection}"; Key: "{#ChoicesKey}"; String: "false"; Tasks: not updatecheck; Check: ShouldRecordChoice
 
-; ── Registry ──────────────────────────────────────────────────────────────────
-[Registry]
-; Store install path for the auto-updater to find
-Root: HKCU; Subkey: "Software\{#MyAppPublisher}\{#MyAppName}"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\{#MyAppPublisher}\{#MyAppName}"; ValueType: string; ValueName: "Version";     ValueData: "{#MyAppVersion}"; Flags: uninsdeletekey
-
-; ── Post-Install ──────────────────────────────────────────────────────────────
 [Run]
-; Offer to launch after install
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent unchecked
 
-; ── Uninstall Cleanup ─────────────────────────────────────────────────────────
 [UninstallDelete]
-; Clean up config directory (only if user confirms uninstall)
-Type: filesandordirs; Name: "{localappdata}\{#MyAppName}"
+Type: files; Name: "{app}\{#ChoicesFile}"
+; Working files that can be made again: downloaded updates, the filled
+; user guide. Settings and logs are the user's own and are left alone.
+Type: filesandordirs; Name: "{localappdata}\{#AppName}\Cache"
 
 [Code]
-// ── Custom Code: Display install mode info on the Ready page ─────────────────
+function ChoicesPath: String;
+begin
+  Result := AddBackslash(WizardDirValue) + '{#ChoicesFile}';
+end;
+
+// An installation that already holds a choice is being updated: the
+// option is not offered and the choice is left as it is. A silent
+// installation records nothing, so the setting keeps its default.
+function AlreadyChosen: Boolean;
+begin
+  Result := FileExists(ChoicesPath);
+end;
+
+function ShouldRecordChoice: Boolean;
+begin
+  Result := (not WizardSilent) and (not AlreadyChosen);
+end;
+
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
 begin
-  Result := '';
   if IsAdminInstallMode then
-    Result := Result + 'Installation mode:' + NewLine + Space + 'All users (administrator)' + NewLine + NewLine
+    Result := 'Installation mode:' + NewLine + Space + 'All users (administrator)' + NewLine + NewLine
   else
-    Result := Result + 'Installation mode:' + NewLine + Space + 'Current user only' + NewLine + NewLine;
+    Result := 'Installation mode:' + NewLine + Space + 'Current user only' + NewLine + NewLine;
   Result := Result + MemoDirInfo + NewLine;
   if MemoGroupInfo <> '' then
     Result := Result + NewLine + MemoGroupInfo + NewLine;

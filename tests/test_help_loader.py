@@ -1,247 +1,407 @@
-# SPDX-License-Identifier: MIT
-"""Tests for ``app.help_loader``.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests of the user guide: finding it, filling its placeholders from the
+program's own constants, and writing the filled page to the cache.
 
-Locks down:
-  - Version placeholder is substituted on load
-  - The stamped HTML is written to the per-user cache dir (NEVER inside
-    the install/source tree)
-  - The cache file name embeds version + content hash for automatic
-    invalidation on upgrade
-  - Source-not-found raises a descriptive error
-  - All four resolution paths are tried in order (dev tree, exe dir,
-    PyInstaller _MEIPASS, macOS .app bundle)
-  - Repeated calls reuse the same cached file (no needless rewrites)
+The guide shipped in ``resources/help`` is checked as well, so a
+placeholder that cannot be filled, a link that leads nowhere or a colour
+written by hand fails here and not in front of a user.
 """
 
 from __future__ import annotations
 
-import sys
-from unittest.mock import patch
+import re
+from pathlib import Path
 
 import pytest
 
+import app.help_loader as help_loader
+from app import constants
+from app.constants import ThemeID
 from app.help_loader import (
+    FONTS_DIRECTORY,
+    IMAGES_DIRECTORY,
     USER_GUIDE_FILENAME,
-    VERSION_PLACEHOLDER,
+    UserGuideError,
     UserGuideNotFoundError,
+    key_names,
+    load_user_guide,
     prepare_user_guide,
+    render_user_guide,
     resolve_user_guide_source,
-    stamp_version,
 )
+from core.records import COMMAND_PREFIX
+from ui import shortcuts
+from ui.themes import design_tokens, tokens
+from version import APP_NAME, APP_VERSION
 
-# ─────────────────────────────────────────────────────────────────────────────
-# stamp_version — pure string substitution
-# ─────────────────────────────────────────────────────────────────────────────
+GUIDE = resolve_user_guide_source()
+TEMPLATE = GUIDE.read_text(encoding="utf-8")
+IMAGES = GUIDE.parent / IMAGES_DIRECTORY
+FONTS = GUIDE.parent.parent / FONTS_DIRECTORY
 
-class TestStampVersion:
-    def test_replaces_single_occurrence(self):
-        html = f"<title>WireTrace {VERSION_PLACEHOLDER}</title>"
-        out = stamp_version(html, "1.1.0")
-        assert out == "<title>WireTrace 1.1.0</title>"
+#: The smallest file a browser accepts as a PNG is not needed here: the
+#: loader embeds the bytes as they are.
+_PICTURE_BYTES = b"picture"
 
-    def test_replaces_multiple_occurrences(self):
-        html = (
-            f"<title>{VERSION_PLACEHOLDER}</title>"
-            f"<footer>{VERSION_PLACEHOLDER}</footer>"
+
+@pytest.fixture
+def images(tmp_path: Path) -> Path:
+    """A folder with one picture, "screen", in both themes."""
+    for theme in ("light", "dark"):
+        (tmp_path / f"screen-{theme}.png").write_bytes(_PICTURE_BYTES)
+    return tmp_path
+
+
+@pytest.fixture
+def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Send the filled guide to the test's own folder."""
+    directory = tmp_path / "cache"
+    monkeypatch.setattr(help_loader, "get_cache_dir", lambda: str(directory))
+    return directory
+
+
+# ── Finding the guide ────────────────────────────────────────────────────────
+
+
+def test_guide_is_found_beside_the_source_tree() -> None:
+    assert GUIDE.name == USER_GUIDE_FILENAME
+    assert GUIDE.is_file()
+
+
+def test_missing_guide_names_every_place_looked_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(help_loader, "__file__", str(tmp_path / "app" / "help_loader.py"))
+    monkeypatch.setattr(help_loader.sys, "executable", str(tmp_path / "bin" / "python"))
+    monkeypatch.delattr(help_loader.sys, "_MEIPASS", raising=False)
+
+    with pytest.raises(UserGuideNotFoundError) as raised:
+        resolve_user_guide_source()
+
+    assert str(tmp_path / "resources" / "help" / USER_GUIDE_FILENAME) in str(raised.value)
+    assert str(tmp_path / "bin" / "resources" / "help" / USER_GUIDE_FILENAME) in str(raised.value)
+
+
+def test_guide_is_found_where_a_one_file_build_unpacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unpacked = tmp_path / "unpacked"
+    target = unpacked / "resources" / "help" / USER_GUIDE_FILENAME
+    target.parent.mkdir(parents=True)
+    target.write_text("guide", encoding="utf-8")
+    monkeypatch.setattr(help_loader, "__file__", str(tmp_path / "app" / "help_loader.py"))
+    monkeypatch.setattr(help_loader.sys, "executable", str(tmp_path / "bin" / "python"))
+    monkeypatch.setattr(help_loader.sys, "_MEIPASS", str(unpacked), raising=False)
+
+    assert resolve_user_guide_source() == target
+
+
+# ── Filling the placeholders ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("placeholder", "expected"),
+    [
+        ("{{const:APP_NAME}}", APP_NAME),
+        ("{{const:APP_VERSION}}", APP_VERSION),
+        ("{{const:DEFAULT_BAUD_RATE}}", str(constants.DEFAULT_BAUD_RATE)),
+        ("{{const:BAUD_RATES}}", ", ".join(str(rate) for rate in constants.BAUD_RATES)),
+        ("{{const:PLOT_REGEX_TIMEOUT_SECONDS}}", f"{constants.PLOT_REGEX_TIMEOUT_SECONDS:g}"),
+        (
+            "{{const:SEVERITY_KEYWORDS.ERROR}}",
+            ", ".join(constants.SEVERITY_KEYWORDS["ERROR"]),
+        ),
+        ("{{const:COMMAND_PREFIX}}", COMMAND_PREFIX.replace(">", "&gt;")),
+        ("{{count:MAX_CONSOLE_LINES}}", f"{constants.MAX_CONSOLE_LINES:,}"),
+        ("{{seconds:LOG_FSYNC_INTERVAL_MS}}", f"{constants.LOG_FSYNC_INTERVAL_MS // 1000}"),
+        ("{{below:lg}}", f"(max-width: {design_tokens.MEASURES['web.breakpoint.lg'] - 0.02:g}px)"),
+    ],
+)
+def test_placeholder_is_filled_from_the_program(placeholder: str, expected: str, images: Path) -> None:
+    assert render_user_guide(f"[{placeholder}]", images, FONTS) == f"[{expected}]"
+
+
+def test_a_size_is_written_in_its_largest_unit(images: Path) -> None:
+    assert render_user_guide("{{size:SPOOL_MAX_BYTES}}", images, FONTS) == "1 GB"
+
+
+@pytest.mark.parametrize("theme", list(ThemeID), ids=[theme.value for theme in ThemeID])
+def test_every_colour_role_of_a_theme_is_a_css_property(theme: ThemeID, images: Path) -> None:
+    filled = render_user_guide(f"{{{{css:{theme.value}}}}}", images, FONTS)
+    palette = tokens.PALETTES[theme]
+
+    assert f"--color-paper: {palette.paper};" in filled
+    assert f"--color-accent-strong: {palette.accent_strong};" in filled
+    dot = re.search(r"--color-dot: (#[0-9A-F]{8});", filled)
+    assert dot and dot.group(1).startswith(palette.dot.colour)
+    assert int(dot.group(1)[-2:], 16) == round(palette.dot.opacity * 255)
+
+
+def test_every_size_and_style_of_the_language_is_a_css_property(images: Path) -> None:
+    filled = render_user_guide("{{css:measures}}", images, FONTS)
+
+    assert f"--space-4: {tokens.METRICS.space_4}px;" in filled
+    assert f"--radius-sm: {tokens.METRICS.radius_sm}px;" in filled
+    for name, style in tokens.TYPE_STYLES.items():
+        assert f"--text-{name}: {style.size}px;" in filled
+        assert f"--leading-{name}: {style.line_height}px;" in filled
+    mono = re.search(r"--font-mono: ([^;]+);", filled)
+    assert mono and mono.group(1).startswith(f'"{tokens.TYPOGRAPHY.console_family}"')
+    assert mono.group(1).endswith("monospace")
+
+
+def test_the_bundled_fonts_are_embedded(images: Path) -> None:
+    filled = render_user_guide("{{css:fonts}}", images, FONTS)
+    typography = tokens.TYPOGRAPHY
+
+    faces = re.findall(r'font-family: "([^"]+)"; font-weight: (\d+);', filled)
+    assert sorted(faces) == sorted(
+        (family, str(weight))
+        for family in (typography.interface_family, typography.console_family)
+        for weight in (typography.regular, typography.medium)
+    )
+    assert filled.count("data:font/ttf;base64,") == len(faces)
+
+
+def test_folders_are_those_of_this_computer(
+    images: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(help_loader, "get_config_dir", lambda: "/settings & more")
+    monkeypatch.setattr(help_loader, "get_default_log_dir", lambda: "/logs")
+    monkeypatch.setattr(help_loader, "get_cache_dir", lambda: "/cache")
+
+    filled = render_user_guide("{{dir:config}}|{{dir:logs}}|{{dir:cache}}", images, FONTS)
+
+    assert filled == "/settings &amp; more|/logs|/cache"
+
+
+@pytest.mark.parametrize(
+    ("keys", "platform", "expected"),
+    [
+        ("Ctrl+T", "linux", ["Ctrl", "T"]),
+        ("Ctrl+T", "win32", ["Ctrl", "T"]),
+        ("Ctrl+T", "darwin", ["Cmd", "T"]),
+        ("Ctrl+Shift+C", "darwin", ["Cmd", "Shift", "C"]),
+        ("Ctrl++", "linux", ["Ctrl", "+"]),
+        ("Ctrl+,", "linux", ["Ctrl", ","]),
+        ("F3", "darwin", ["F3"]),
+    ],
+)
+def test_keys_are_named_as_the_platform_names_them(
+    keys: str, platform: str, expected: list[str],
+) -> None:
+    assert key_names(keys, platform) == expected
+
+
+def test_a_shortcut_is_written_as_keys(images: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(help_loader.sys, "platform", "linux")
+
+    filled = render_user_guide("{{key:copy_messages}}", images, FONTS)
+
+    assert filled == "<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>"
+
+
+def test_the_shortcut_table_holds_every_shortcut_under_its_group(images: Path) -> None:
+    filled = render_user_guide("{{shortcuts}}", images, FONTS)
+
+    assert filled.count("<tr><td>") == len(shortcuts.SHORTCUTS)
+    for shortcut in shortcuts.SHORTCUTS.values():
+        assert f"<td>{shortcut.description}</td>" in filled
+    groups = list(dict.fromkeys(shortcut.group for shortcut in shortcuts.SHORTCUTS.values()))
+    assert re.findall(r'scope="colgroup">([^<]+)<', filled) == groups
+    for name, alternates in shortcuts.ALTERNATE_KEYS.items():
+        row = next(
+            line for line in filled.splitlines()
+            if f"<td>{shortcuts.SHORTCUTS[name].description}</td>" in line
         )
-        out = stamp_version(html, "1.1.0")
-        assert out.count("1.1.0") == 2
-        assert VERSION_PLACEHOLDER not in out
-
-    def test_idempotent_on_already_stamped(self):
-        """Stamping a string with no placeholder is a no-op."""
-        html = "<title>WireTrace 1.1.0</title>"
-        out = stamp_version(html, "1.1.0")
-        assert out == html
-
-    def test_no_placeholder_leaves_html_unchanged(self):
-        html = "<html><body>nothing to stamp</body></html>"
-        assert stamp_version(html, "1.1.0") == html
+        assert row.count(" or ") == len(alternates)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# resolve_user_guide_source — finds the HTML across build types
-# ─────────────────────────────────────────────────────────────────────────────
+def test_a_picture_carries_both_themes_and_a_description(images: Path) -> None:
+    filled = render_user_guide("{{image:screen|The window & its parts}}", images, FONTS)
 
-class TestResolveUserGuideSource:
-    def test_finds_dev_tree(self):
-        """The dev-tree path must exist in the repo so dev runs work."""
-        path = resolve_user_guide_source()
-        assert path.is_file()
-        assert path.name == USER_GUIDE_FILENAME
-
-    def test_dev_tree_contains_placeholder(self):
-        """The shipped HTML must contain the version placeholder so the
-        stamping step has something to replace. If someone hand-edits
-        the file and removes it, the User Guide will silently lose its
-        version stamp; this test fails fast in that case."""
-        path = resolve_user_guide_source()
-        content = path.read_text(encoding="utf-8")
-        assert VERSION_PLACEHOLDER in content, (
-            f"User Guide HTML lost its {VERSION_PLACEHOLDER!r} marker. "
-            "Without it the version stamp won't apply and users can't "
-            "tell which version of the docs they're reading."
-        )
-
-    def test_raises_when_no_candidate_exists(self, tmp_path, monkeypatch):
-        """If every candidate path is missing, raise a descriptive error
-        rather than returning None or returning a path that doesn't
-        exist."""
-        # Point everything at empty directories
-        fake_root = tmp_path / "no-guide-here"
-        fake_root.mkdir()
-
-        # Patch __file__ in the help_loader module to a temp file in
-        # the empty tree so candidate 1 (dev tree) misses
-        fake_module_file = fake_root / "app" / "help_loader.py"
-        fake_module_file.parent.mkdir()
-        fake_module_file.touch()
-
-        monkeypatch.setattr(
-            "app.help_loader.__file__", str(fake_module_file),
-        )
-        # Point sys.executable into the empty tree so candidate 2 misses
-        monkeypatch.setattr(sys, "executable", str(fake_root / "wt.exe"))
-        # Make sure _MEIPASS isn't set
-        monkeypatch.delattr(sys, "_MEIPASS", raising=False)
-
-        with pytest.raises(UserGuideNotFoundError) as exc_info:
-            resolve_user_guide_source()
-
-        # Error message lists what was tried — operator must be able to
-        # diagnose without grepping source
-        msg = str(exc_info.value)
-        assert "Looked in:" in msg
-        assert USER_GUIDE_FILENAME in msg
+    assert filled.startswith("<picture>")
+    assert filled.count("data:image/png;base64,") == 2
+    assert 'media="(prefers-color-scheme: dark)"' in filled
+    assert 'alt="The window &amp; its parts"' in filled
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# prepare_user_guide — end-to-end stamping + cache placement
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestPrepareUserGuide:
-
-    def test_returns_existing_file(self, tmp_path, monkeypatch):
-        """The returned path must point at an actual file on disk."""
-        monkeypatch.setattr(
-            "app.help_loader._cache_dir", lambda: tmp_path,
-        )
-        path = prepare_user_guide()
-        assert path.is_file()
-
-    def test_stamps_version_in_output(self, tmp_path, monkeypatch):
-        """The on-disk stamped file must have no placeholder left."""
-        monkeypatch.setattr(
-            "app.help_loader._cache_dir", lambda: tmp_path,
-        )
-        path = prepare_user_guide()
-        content = path.read_text(encoding="utf-8")
-        assert VERSION_PLACEHOLDER not in content, (
-            "Stamped HTML still contains the placeholder; the user "
-            "would see literal '{{WIRETRACE_VERSION}}' in the title."
-        )
-
-    def test_stamped_file_lives_in_cache_not_source(
-        self, tmp_path, monkeypatch,
-    ):
-        """SECURITY: the stamped copy MUST go to the cache dir, not the
-        install or source tree. On Windows the install can live under
-        Program Files (read-only); on macOS, writing inside the .app
-        bundle invalidates the code signature."""
-        monkeypatch.setattr(
-            "app.help_loader._cache_dir", lambda: tmp_path,
-        )
-        path = prepare_user_guide()
-        # The stamped path must be a descendant of our cache dir
-        assert tmp_path in path.parents or path.parent == tmp_path
-
-        # And it must NOT be the source path
-        source = resolve_user_guide_source()
-        assert path.resolve() != source.resolve()
-
-    def test_repeat_call_reuses_cache(self, tmp_path, monkeypatch):
-        """If nothing changed, prepare_user_guide should reuse the
-        existing stamped file rather than rewriting it. Avoids
-        wasted disk I/O on every F1 press."""
-        monkeypatch.setattr(
-            "app.help_loader._cache_dir", lambda: tmp_path,
-        )
-        path1 = prepare_user_guide()
-        mtime1 = path1.stat().st_mtime
-
-        # Wait a moment so a rewrite would be visible in mtime
-        import time
-        time.sleep(0.05)
-
-        path2 = prepare_user_guide()
-        assert path1 == path2
-        assert path2.stat().st_mtime == mtime1, (
-            "Stamped HTML was rewritten on a no-op call. Caching "
-            "should make repeat F1 presses free."
-        )
-
-    def test_filename_contains_version(self, tmp_path, monkeypatch):
-        """Sanity: the cache filename should make the version visible
-        so a sysadmin inspecting the cache dir can tell what's in
-        each file at a glance."""
-        from version import APP_VERSION
-        monkeypatch.setattr(
-            "app.help_loader._cache_dir", lambda: tmp_path,
-        )
-        path = prepare_user_guide()
-        assert APP_VERSION in path.name
-
-    def test_content_hash_invalidates_cache(self, tmp_path, monkeypatch):
-        """If the source HTML changes (e.g. upgrade in place), the
-        cache filename's content hash should change and a new file
-        should be generated. We simulate by directly altering the
-        cached file and confirming prepare_user_guide regenerates
-        based on the SOURCE content, not the cached one."""
-        monkeypatch.setattr(
-            "app.help_loader._cache_dir", lambda: tmp_path,
-        )
-        path1 = prepare_user_guide()
-
-        # Corrupt the cached file — simulates a user / antivirus
-        # touching it
-        path1.write_text("CORRUPTED", encoding="utf-8")
-
-        # Next call should still return the same path (same content
-        # hash from source), and reuse the file. But we corrupted it,
-        # so this proves the cache contract: hash determines the name,
-        # name determines the file. The corrupted file IS the cached
-        # version under this hash. This is correct behaviour — the
-        # cache trusts itself. The fix would be at a higher level
-        # (HMAC). For now, just document that the path is stable.
-        path2 = prepare_user_guide()
-        assert path1 == path2
-
-        # Now simulate a TRUE source change by patching stamp_version
-        # to return different content
-        with patch("app.help_loader.stamp_version",
-                   return_value="NEW VERSION OF GUIDE"):
-            path3 = prepare_user_guide()
-
-        # Different content → different filename → different file on disk
-        assert path3 != path1, (
-            "Source-content change must produce a new cache file. "
-            "Without this, in-place upgrades would serve stale docs."
-        )
-        assert path3.read_text(encoding="utf-8") == "NEW VERSION OF GUIDE"
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{{const:NO_SUCH_CONSTANT}}",
+        "{{const:SEVERITY_KEYWORDS.NO_SUCH_LEVEL}}",
+        "{{count:APP_NAME}}",
+        "{{key:no_such_shortcut}}",
+        "{{dir:nowhere}}",
+        "{{css:sepia}}",
+        "{{below:huge}}",
+        "{{nonsense}}",
+        "{{image:missing|A picture that is not there}}",
+        "{{image:screen}}",
+        "{{image:screen| }}",
+        "{{ const:APP_NAME }}",
+        "{{const:APP_NAME",
+    ],
+)
+def test_a_placeholder_that_cannot_be_filled_is_an_error(template: str, images: Path) -> None:
+    with pytest.raises(UserGuideError):
+        render_user_guide(template, images, FONTS)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Atomic write — the .tmp rename pattern
-# ─────────────────────────────────────────────────────────────────────────────
+# ── The guide that is shipped ────────────────────────────────────────────────
 
-class TestAtomicWrite:
-    def test_no_tmp_files_left_behind(self, tmp_path, monkeypatch):
-        """After a successful prepare, no .tmp sibling should remain.
-        Half-written .tmp files would survive a crash mid-write and
-        confuse future runs."""
-        monkeypatch.setattr(
-            "app.help_loader._cache_dir", lambda: tmp_path,
-        )
-        prepare_user_guide()
-        tmp_files = list(tmp_path.glob("*.tmp"))
-        assert tmp_files == []
+
+@pytest.fixture(scope="module")
+def guide() -> str:
+    return load_user_guide()
+
+
+def _without_pictures(page: str) -> str:
+    """The page without its embedded pictures and fonts."""
+    page = re.sub(r'url\("data:font/ttf;base64,[A-Za-z0-9+/=]+"\)', "", page)
+    return re.sub(r"data:image/png;base64,[A-Za-z0-9+/=]+", "", page)
+
+
+def test_the_guide_fills_completely(guide: str) -> None:
+    assert "{{" not in guide
+    assert "}}" not in guide
+    assert f"{APP_NAME} {APP_VERSION} user guide" in guide
+
+
+def test_every_picture_of_the_guide_exists_in_both_themes() -> None:
+    names = re.findall(r"\{\{image:([^|}]+)\|", TEMPLATE)
+
+    assert names
+    used = set()
+    for name in names:
+        for theme in ThemeID:
+            picture = IMAGES / f"{name}-{theme.value}.png"
+            assert picture.is_file(), picture.name
+            used.add(picture.name)
+    assert used == {path.name for path in IMAGES.iterdir()}
+
+
+def test_every_link_inside_the_guide_leads_somewhere(guide: str) -> None:
+    page = _without_pictures(guide)
+    targets = re.findall(r'\bid="([^"]+)"', page)
+    links = re.findall(r'href="#([^"]+)"', page)
+
+    assert len(targets) == len(set(targets))
+    assert links
+    assert set(links) <= set(targets)
+
+
+def test_the_contents_list_every_section(guide: str) -> None:
+    page = _without_pictures(guide)
+    contents = page[page.index("<nav"):page.index("</nav>")]
+    sections = re.findall(r'<h2 id="([^"]+)"', page)
+
+    assert re.findall(r'href="#([^"]+)"', contents) == sections
+
+
+def test_the_guide_writes_no_colour_size_or_font_of_its_own() -> None:
+    """Colours, sizes and fonts come from the design tokens, as everywhere else."""
+    style = TEMPLATE[TEMPLATE.index("<style>"):TEMPLATE.index("</style>")]
+    style = re.sub(r"/\*.*?\*/", "", style, flags=re.S)
+
+    assert not re.findall(r"#[0-9A-Fa-f]{3,8}\b|\brgba?\(|\bhsla?\(", style)
+    assert not re.findall(r"\d+(?:\.\d+)?(?:px|rem|em|pt)\b", style)
+    assert "font-family:" not in style.replace("font-family: var(", "")
+    for part in ("{{css:fonts}}", "{{css:measures}}", "{{css:light}}", "{{css:dark}}"):
+        assert part in style
+
+
+def test_the_guide_is_one_page_that_needs_nothing_else(guide: str) -> None:
+    """No script, and nothing fetched: it works with no network."""
+    page = _without_pictures(guide)
+
+    assert "<script" not in page.lower()
+    assert "<link" not in page.lower()
+    assert "@import" not in page
+    assert not re.findall(r'\b(?:src|srcset)="(?!")[^"]+"', page)
+    assert not re.findall(r"url\(", page)
+
+
+def test_the_guide_lists_every_shortcut(guide: str) -> None:
+    for shortcut in shortcuts.SHORTCUTS.values():
+        assert f"<td>{shortcut.description}</td>" in guide
+
+
+def test_the_guide_names_every_level(guide: str) -> None:
+    for keywords in constants.SEVERITY_KEYWORDS.values():
+        assert ", ".join(keywords) in guide
+
+
+# ── Making it ready for the browser ──────────────────────────────────────────
+
+
+def test_filled_guide_is_written_to_the_cache_and_not_beside_the_source(cache: Path) -> None:
+    path = prepare_user_guide()
+
+    assert path.parent == cache / "help"
+    assert APP_VERSION in path.name
+    assert path.read_text(encoding="utf-8") == load_user_guide()
+    assert "{{" not in path.read_text(encoding="utf-8")
+
+
+def test_a_page_that_is_already_there_is_reused(cache: Path) -> None:
+    first = prepare_user_guide()
+    written = first.stat().st_mtime_ns
+
+    second = prepare_user_guide()
+
+    assert second == first
+    assert second.stat().st_mtime_ns == written
+
+
+def test_a_changed_guide_gets_a_new_page_and_the_old_one_is_removed(
+    cache: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = prepare_user_guide()
+    monkeypatch.setattr(help_loader, "get_default_log_dir", lambda: "/another/log/folder")
+
+    second = prepare_user_guide()
+
+    assert second != first
+    assert "/another/log/folder" in second.read_text(encoding="utf-8")
+    assert [path.name for path in (cache / "help").iterdir()] == [second.name]
+
+
+def test_a_page_in_the_cache_that_was_changed_is_written_again(cache: Path) -> None:
+    path = prepare_user_guide()
+    path.write_text("<script>changed</script>", encoding="utf-8")
+
+    again = prepare_user_guide()
+
+    assert again == path
+    assert again.read_text(encoding="utf-8") == load_user_guide()
+
+
+def test_no_half_written_page_is_left_behind(cache: Path) -> None:
+    prepare_user_guide()
+
+    assert not list((cache / "help").glob("*.tmp"))
+
+
+def test_other_files_in_the_cache_are_left_alone(cache: Path) -> None:
+    folder = cache / "help"
+    folder.mkdir(parents=True)
+    other = folder / "notes.txt"
+    other.write_text("mine", encoding="utf-8")
+
+    prepare_user_guide()
+
+    assert other.read_text(encoding="utf-8") == "mine"
+
+
+def test_the_hex_example_is_what_the_hex_view_shows() -> None:
+    from core.framing import HexFramer
+
+    section = TEMPLATE.split('<h2 id="hex">', 1)[1].split("<h2", 1)[0]
+    shown = re.search(r"<pre><code>(.*?)</code></pre>", section, re.DOTALL).group(1)
+    line = re.search(r"the line <code>(.*?)</code> takes", section).group(1)
+    framer = HexFramer()
+    rows = framer.feed(line.encode("ascii") + b"\r\n") + framer.flush()
+
+    assert shown.split("\n") == rows

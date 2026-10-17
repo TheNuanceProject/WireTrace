@@ -1,4 +1,4 @@
-# WireTrace — headless test / CI dependencies.
+# WireTrace: headless test / CI dependencies.
 #
 # The Qt stack (PySide6, pyqtgraph) is intentionally NOT installed for the
 # test suite: the tests stub Qt (see tests/conftest.py) so they run fast and
@@ -7,9 +7,10 @@
 #
 # CI installs EXACTLY this file. A non-Qt runtime dependency that the tests
 # import must be listed here, or CI cannot collect the suite. This is the one
-# place that set is declared — keep it in step with the non-Qt imports under
+# place that set is declared: keep it in step with the non-Qt imports under
 # test rather than hand-editing the workflow.
 
 -r requirements-dev.txt   # pytest, ruff
 numpy>=1.24               # imported by core/plot_engine.py and tests
 regex>=2024.0.0           # imported by core/plot_parsers.py (ReDoS-guarded patterns)
+cryptography>=42.0        # imported by updater/manifest.py (signature verification)

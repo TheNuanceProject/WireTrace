@@ -1,137 +1,152 @@
-# SPDX-License-Identifier: MIT
-"""WireTrace About dialog — professional product information."""
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""The About dialog: what WireTrace is, who makes it, where it lives."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (
-    QDialog,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-)
+import logging
 
+from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QWidget
+
+from app.icon_loader import app_icon_pixmap
+from app.licenses import LicensesNotFoundError
+from ui.dialogs.common import action_button, button_row, dialog_layout, heading, note, rule
+from ui.dialogs.messages import tell
+from ui.themes import tokens
+from ui.themes.theme_manager import ThemeManager
+from ui.widgets.dot_grid import DotGridDialog
+from ui.widgets.styling import plain_label
 from version import (
     APP_AUTHOR,
     APP_DEVELOPER,
+    APP_LICENSE,
+    APP_LICENSE_URL,
     APP_NAME,
+    APP_REPOSITORY_URL,
+    APP_SUPPORT_URL,
     APP_VERSION,
     APP_WEBSITE,
+    COPYRIGHT,
+)
+
+logger = logging.getLogger(__name__)
+
+_SUPPORT_TEXT = (
+    f"{APP_NAME} is free and open source. If it saves you time, you can support the work."
 )
 
 
-class AboutDialog(QDialog):
-    """Professional About dialog with structured product information."""
+#: What the licence asks an interactive program to state.
+_LEGAL_NOTICE = f"{APP_NAME} is free software and comes with no warranty."
 
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
+
+def _without_scheme(url: str) -> str:
+    return url.split("://", 1)[-1]
+
+
+class AboutDialog(DotGridDialog):
+    """Product name and version, the people behind it, and its links."""
+
+    def __init__(
+        self, theme_manager: ThemeManager | None = None, parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent, glow=True)
         self.setWindowTitle(f"About {APP_NAME}")
-        self.setFixedSize(440, 360)
         self.setModal(True)
-        self._setup_ui()
+        metrics = tokens.METRICS
 
-    def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 20)
-        layout.setSpacing(0)
+        layout = dialog_layout(self)
 
-        # App icon (48x48)
-        from app.icon_loader import app_icon_pixmap
-        pix = app_icon_pixmap(48)
-        if not pix.isNull():
-            icon_label = QLabel()
-            icon_label.setPixmap(pix)
-            icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(icon_label)
-            layout.addSpacing(10)
+        logo = app_icon_pixmap(metrics.logo_medium)
+        if not logo.isNull():
+            picture = plain_label()
+            picture.setPixmap(logo)
+            picture.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(picture)
 
-        # App name
-        name = QLabel(APP_NAME)
-        nf = QFont()
-        nf.setPointSize(22)
-        nf.setWeight(QFont.Weight.Bold)
-        name.setFont(nf)
-        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # Version
-        ver = QLabel(f"Version {APP_VERSION}")
-        ver.setProperty("secondary", True)
-        vf = ver.font()
-        vf.setPointSize(11)
-        ver.setFont(vf)
-        ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
+        name = heading(APP_NAME, "displayTitle")
+        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(name)
-        layout.addSpacing(4)
-        layout.addWidget(ver)
-        layout.addSpacing(18)
+        layout.addWidget(note(f"Version {APP_VERSION}", centred=True))
+        layout.addWidget(rule())
 
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFixedHeight(1)
-        layout.addWidget(sep)
-        layout.addSpacing(14)
-
-        # Info grid
-        info_items = [
-            ("Developer", APP_DEVELOPER),
-            ("Company", APP_AUTHOR),
-            (
-                "Website",
-                f'<a href="{APP_WEBSITE}" style="color: #1976D2; '
-                f'text-decoration: none;">{APP_WEBSITE}</a>',
-            ),
-            ("License", "MIT"),
-        ]
-
-        for label_text, value_text in info_items:
-            row = QHBoxLayout()
-            row.setSpacing(12)
-            lbl = QLabel(label_text)
-            lf = lbl.font()
-            lf.setWeight(QFont.Weight.DemiBold)
-            lf.setPointSize(10)
-            lbl.setFont(lf)
-            lbl.setFixedWidth(80)
-
-            val = QLabel(value_text)
-            val.setTextFormat(Qt.TextFormat.RichText)
-            val.setOpenExternalLinks(True)
-            valf = val.font()
-            valf.setPointSize(10)
-            val.setFont(valf)
-
-            row.addWidget(lbl)
-            row.addWidget(val, 1)
-            layout.addLayout(row)
-            layout.addSpacing(4)
-
-        layout.addStretch()
-        layout.addSpacing(8)
-
-        # Copyright
-        copy_lbl = QLabel(
-            f"\u00A9 2026 {APP_AUTHOR}"
+        # Links are coloured when the theme changes, so the labels are kept.
+        self._links: list[tuple[QLabel, str, str]] = []
+        facts = QGridLayout()
+        facts.setHorizontalSpacing(metrics.space_6)
+        facts.setVerticalSpacing(metrics.space_2)
+        facts.setColumnStretch(1, 1)
+        rows: tuple[tuple[str, str, str], ...] = (
+            ("Developer", APP_DEVELOPER, ""),
+            ("Company", APP_AUTHOR, ""),
+            ("Website", APP_WEBSITE, APP_WEBSITE),
+            ("Source", _without_scheme(APP_REPOSITORY_URL), APP_REPOSITORY_URL),
+            ("Licence", APP_LICENSE, APP_LICENSE_URL),
         )
-        copy_lbl.setProperty("secondary", True)
-        cf = copy_lbl.font()
-        cf.setPointSize(9)
-        copy_lbl.setFont(cf)
-        copy_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(copy_lbl)
+        self._facts: list[tuple[str, str]] = []
+        for row, (label, text, url) in enumerate(rows):
+            facts.addWidget(heading(label), row, 0)
+            value = plain_label(text)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            if url:
+                # A link is markup, written by _colour_links.
+                value.setTextFormat(Qt.TextFormat.RichText)
+                value.setOpenExternalLinks(True)
+                self._links.append((value, text, url))
+            facts.addWidget(value, row, 1)
+            self._facts.append((label, text))
+        layout.addLayout(facts)
+        layout.addWidget(note(_LEGAL_NOTICE, small=True))
+        self._colour_links()
+        if theme_manager is not None:
+            theme_manager.theme_changed.connect(self._colour_links)
 
-        layout.addSpacing(12)
+        self.support_button = None
+        if APP_SUPPORT_URL:
+            layout.addWidget(rule())
+            support = QHBoxLayout()
+            support.setSpacing(metrics.space_4)
+            support.addWidget(note(_SUPPORT_TEXT), 1)
+            self.support_button = action_button("Support")
+            self.support_button.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl(APP_SUPPORT_URL))
+            )
+            support.addWidget(self.support_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            layout.addLayout(support)
 
-        # Close button (outlined)
-        close_btn = QPushButton("Close")
-        close_btn.setObjectName("clearBtn")
-        close_btn.setFixedSize(80, 28)
-        close_btn.clicked.connect(self.close)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
+        layout.addStretch(1)
+        self.licenses_button = action_button("Third-party licences...")
+        self.licenses_button.clicked.connect(self._show_licenses)
+        close = action_button("Close", primary=True)
+        close.clicked.connect(self.accept)
+        layout.addLayout(button_row(
+            self.licenses_button, close, leading=note(COPYRIGHT, small=True, wrap=False),
+        ))
+
+        # Its size is fixed: what its content asks for, and never less
+        # than a form dialog's floor.
+        self.setFixedSize(self.sizeHint().expandedTo(QSize(metrics.dialog_width, 0)))
+
+    def _show_licenses(self) -> None:
+        from ui.dialogs.licenses_dialog import LicensesDialog
+
+        try:
+            dialog = LicensesDialog(self)
+        except LicensesNotFoundError as exc:
+            logger.error("%s", exc)
+            tell(
+                self, "Third-party licences",
+                f"The licence texts are not installed. Please reinstall {APP_NAME}.",
+            )
+            return
+        dialog.exec()
+
+    def facts(self) -> list[tuple[str, str]]:
+        """Each line of the dialog as (label, text)."""
+        return list(self._facts)
+
+    def _colour_links(self, *_: object) -> None:
+        colour = tokens.palette().accent_strong
+        for label, text, url in self._links:
+            label.setText(f'<a href="{url}" style="color: {colour};">{text}</a>')

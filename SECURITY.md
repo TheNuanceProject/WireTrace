@@ -3,9 +3,12 @@
 ## Reporting a vulnerability
 
 If you find a security issue in WireTrace, please **do not open a
-public issue**. Send the details by email to:
+public issue**. Report it privately, in either way:
 
-**shahin@thenuanceproject.com**
+- On GitHub: the **Report a vulnerability** button on the
+  [Security page](https://github.com/TheNuanceProject/WireTrace/security)
+  of this repository.
+- By email: **shahin@thenuanceproject.com**
 
 Include:
 
@@ -33,15 +36,34 @@ that would be taken seriously include:
 
 - Arbitrary code execution triggered by malformed serial data
 - Arbitrary file writes outside the configured log directory
-- Tampering with the auto-update mechanism
-- Unauthorized access to the update channel
+- Tampering with the update mechanism
+- Unauthorised access to the update channel
 
 Issues that are **not** security issues:
 
 - A hardware device misbehaving because of data you sent it
   (that's a device issue, not a WireTrace issue)
 - Performance degradation under unrealistic load
-- Feature requests framed as security concerns
+- Requests for new features
+
+## How updates are protected
+
+From version 2.0, WireTrace acts on an update only if its description
+carries a valid Ed25519 signature from one of the trusted keys, whose
+public halves are in `version.py`. The download is
+used only if its size and SHA-256 are those the signed description
+states, and it is fetched from this repository's releases, from an
+address the application builds itself.
+
+## Verifying a download
+
+Every release carries a `SHA256SUMS` file. Releases are built by the
+[Release workflow](.github/workflows/release.yml) on GitHub's machines,
+and each file has a build provenance attestation:
+
+```
+gh attestation verify FILE --repo TheNuanceProject/WireTrace
+```
 
 ## Supported versions
 

@@ -1,20 +1,16 @@
-# SPDX-License-Identifier: MIT
-"""Add or verify SPDX license identifiers on every source file.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Add or verify the SPDX licence identifier of every source file.
 
-Per the SPDX standard (https://spdx.dev), license identification is a
-single machine-parseable comment at the top of each source file:
+The SPDX standard (https://spdx.dev) identifies the licence of a file
+with one comment line at its top, which tools can read:
 
-    # SPDX-License-Identifier: MIT
-
-Used by the Linux kernel, most modern open-source projects, and
-automated license-compliance tools (FOSSology, REUSE, GitHub's
-license detector).
+    # SPDX-License-Identifier: GPL-3.0-or-later
 
 Usage:
     python tools/add_spdx_headers.py              # add missing headers
     python tools/add_spdx_headers.py --check      # verify only (exit 1 if missing)
 
-Idempotent: running twice does nothing the second time.
+Running it twice changes nothing the second time.
 """
 
 from __future__ import annotations
@@ -24,7 +20,7 @@ import sys
 from pathlib import Path
 
 # The SPDX identifier to add. See https://spdx.org/licenses/
-SPDX_LINE = "# SPDX-License-Identifier: MIT"
+SPDX_LINE = "# SPDX-License-Identifier: GPL-3.0-or-later"
 
 # Files we add headers to. Glob patterns relative to repo root.
 INCLUDE_GLOBS: tuple[str, ...] = (
@@ -35,13 +31,14 @@ INCLUDE_GLOBS: tuple[str, ...] = (
     "updater/**/*.py",
     "build/**/*.py",
     "tests/**/*.py",
+    "tests_gui/**/*.py",
     "tools/**/*.py",
 )
 
 # Directories to skip even if files match.
 EXCLUDE_DIRS: frozenset[str] = frozenset({
     ".venv", "venv", "env",
-    "build/dist", "build/WireTrace.build", "build/WireTrace.dist",
+    "build/dist",
     "deployment",
     ".git", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache",
 })
@@ -54,8 +51,8 @@ def is_excluded(path: Path, repo_root: Path) -> bool:
     any path component, e.g. ``__pycache__``) or a relative path prefix
     (matched against the start of the path, e.g. ``build/dist``). The
     prefix form is what excludes generated Nuitka build trees such as
-    ``build/dist/main.build`` — previously these slipped through because
-    a slash-joined entry can never equal a single path component.
+    ``build/dist/main.build``, because a slash-joined entry can never
+    equal a single path component.
     """
     try:
         rel = path.relative_to(repo_root)
@@ -102,7 +99,7 @@ def collect_files(repo_root: Path) -> list[Path]:
         for path in repo_root.glob(pattern):
             if path.is_file() and not is_excluded(path, repo_root):
                 found.add(path)
-    return sorted(found)
+    return sorted(found, key=lambda path: path.relative_to(repo_root).as_posix())
 
 
 def main() -> int:
@@ -142,19 +139,19 @@ def main() -> int:
 
     if args.check:
         if missing:
-            print(f"✗ {len(missing)} file(s) missing SPDX header:")
+            print(f"{len(missing)} file(s) missing the SPDX header:")
             for p in missing:
                 print(f"    {p.relative_to(repo_root)}")
             return 1
-        print(f"✓ All {len(files)} source files have SPDX headers.")
+        print(f"All {len(files)} source files have SPDX headers.")
         return 0
 
     if added:
-        print(f"✓ Added SPDX header to {len(added)} file(s).")
+        print(f"Added the SPDX header to {len(added)} file(s).")
         for p in added:
             print(f"    {p.relative_to(repo_root)}")
     else:
-        print(f"✓ All {len(files)} source files already have SPDX headers.")
+        print(f"All {len(files)} source files already have SPDX headers.")
     return 0
 
 

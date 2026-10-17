@@ -8,7 +8,7 @@ body:
     attributes:
       value: |
         Thanks for taking the time to report a bug. A good report saves everyone
-        time — please fill in as much of this form as you reasonably can.
+        time. Please fill in as much of this form as you reasonably can.
 
         Before you submit, please check the [existing issues](https://github.com/TheNuanceProject/WireTrace/issues?q=is%3Aissue)
         to avoid duplicates.
@@ -17,8 +17,8 @@ body:
     id: version
     attributes:
       label: WireTrace version
-      description: Find this in Help → About (or check the window title).
-      placeholder: "e.g., 1.0.0"
+      description: Find this in Help > About WireTrace, or in the window title.
+      placeholder: "e.g., 2.0.0"
     validations:
       required: true
 
@@ -29,9 +29,21 @@ body:
       options:
         - Windows 11
         - Windows 10
-        - macOS (built from source)
-        - Linux (built from source)
+        - Linux
+        - macOS
         - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How WireTrace was installed
+      options:
+        - Windows installer
+        - Linux AppImage
+        - Linux .deb
+        - From source
     validations:
       required: true
 
@@ -63,18 +75,18 @@ body:
       placeholder: |
         1. Open WireTrace
         2. Connect to a device at 115200 baud
-        3. Click "Log On"
+        3. Choose "Start log"
         4. ...
 
   - type: textarea
     id: logs
     attributes:
-      label: Relevant logs or screenshots
+      label: Messages or screenshots
       description: |
-        Paste any crash logs, error messages, or screenshots. Log locations:
-        - Windows: `%APPDATA%\WireTrace\Logs\`
-        - macOS: `~/Library/Application Support/WireTrace/Logs/`
-        - Linux: `~/.config/WireTrace/Logs/`
+        The exact words of any message WireTrace showed, or a screenshot.
+        On Linux, or when running from source, start it from a terminal and
+        paste what the terminal printed.
+        Remove anything from your device's data that you do not want public.
       render: shell
 
   - type: textarea

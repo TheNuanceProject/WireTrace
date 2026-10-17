@@ -1,29 +1,16 @@
-# SPDX-License-Identifier: MIT
-"""Regression tests for B4 — non-atomic config file save.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests that saving the preferences is atomic.
 
-The bug: ``ConfigManager.save`` used ``open(path, "w")`` directly, which
-truncates ``preferences.ini`` before writing. A crash, power loss, or
-disk-full between truncate and complete write left the file empty or
-partial, so the next launch silently fell back to defaults — losing
-every preference and saved plot profile.
-
-The fix routes the write through ``app._atomic.atomic_write_text``
-(temp sibling → flush → fsync → ``os.replace``). These tests pin the
-two invariants that matter:
+``ConfigManager.save`` writes through ``app._atomic.atomic_write_text``:
+a temporary file, flushed and synced, then renamed over the destination.
+Two things are held to:
 
   1. A successful save produces a complete, parseable file and leaves no
-     ``.tmp`` sibling behind.
-  2. A save interrupted at *any* point never corrupts the destination:
-     it stays the previous complete file. This is the property the old
-     code could not provide, so these tests fail against it.
+     temporary file behind.
+  2. A save interrupted at any point leaves the destination as the
+     previous complete file.
 
-Plot-profile persistence (``PlotProfileStore._save``) flows through the
-same ``ConfigManager.save``, so its atomicity is covered here too.
-
-These run at the data layer with the PySide6 stubs from ``conftest`` —
-no Qt, no real process kills (which are flaky in CI). Interruption is
-simulated by injecting failures into the atomic write's filesystem
-calls, which exercises the exact corruption window the bug describes.
+Plot profiles are saved through the same call, so they are covered too.
 """
 
 from __future__ import annotations
@@ -36,6 +23,7 @@ import pytest
 import app._atomic as atomic
 from app import config as config_module
 from app.config import ConfigManager
+from app.constants import SHARED_FILE_LOCK_SUFFIX
 from app.plot_config import PlotConfig, PlotProfileStore
 
 
@@ -53,8 +41,12 @@ def _config_path(cfg: ConfigManager) -> str:
     return cfg.config_path
 
 
-def _tmp_sibling(path: str) -> str:
-    return path + ".tmp"
+def _left_over(path: str) -> list[str]:
+    """Files beside ``path`` other than ``path`` itself and its lock,
+    which stays for the next save (see app/file_lock.py)."""
+    folder = os.path.dirname(path)
+    name = os.path.basename(path)
+    return sorted(set(os.listdir(folder)) - {name, name + SHARED_FILE_LOCK_SUFFIX})
 
 
 def _read_parsed(path: str) -> configparser.ConfigParser:
@@ -76,13 +68,13 @@ class TestSuccessfulSave:
         parsed = _read_parsed(path)
         assert parsed.get("General", "theme") == "solarized"
 
-    def test_save_leaves_no_tmp_sibling(self, cfg):
+    def test_save_leaves_no_temporary_file(self, cfg):
         cfg.set("Display", "font_size", "18")
         assert cfg.save() is True
 
         path = _config_path(cfg)
-        assert not os.path.exists(_tmp_sibling(path)), \
-            "atomic rename should consume the .tmp file on success"
+        assert _left_over(path) == [], \
+            "the rename should consume the temporary file on success"
 
     def test_repeated_saves_overwrite_cleanly(self, cfg):
         cfg.set("General", "theme", "first")
@@ -92,11 +84,11 @@ class TestSuccessfulSave:
 
         parsed = _read_parsed(_config_path(cfg))
         assert parsed.get("General", "theme") == "second"
-        assert not os.path.exists(_tmp_sibling(_config_path(cfg)))
+        assert _left_over(_config_path(cfg)) == []
 
 
 class TestInterruptedSavePreservesDestination:
-    """The core B4 guarantee: an interrupted save never corrupts the
+    """The core guarantee: an interrupted save never corrupts the
     destination. Each test first writes a known-good file, then injects
     a failure and asserts the old complete content survives."""
 
@@ -139,7 +131,7 @@ class TestInterruptedSavePreservesDestination:
         parsed = _read_parsed(path)
         assert parsed.get("General", "theme") == "known-good"
 
-    def test_failed_save_cleans_up_tmp_sibling(self, cfg, monkeypatch):
+    def test_failed_save_removes_its_temporary_file(self, cfg, monkeypatch):
         path = self._seed_good_file(cfg)
 
         def boom(*_args, **_kwargs):
@@ -151,7 +143,7 @@ class TestInterruptedSavePreservesDestination:
         assert cfg.save() is False
 
         # Best-effort cleanup removed the partial temp file.
-        assert not os.path.exists(_tmp_sibling(path))
+        assert _left_over(path) == []
 
 
 class TestAtomicWriteHelper:
@@ -162,7 +154,7 @@ class TestAtomicWriteHelper:
         atomic.atomic_write_text(target, "hello\nworld\n")
         with open(target, encoding="utf-8") as f:
             assert f.read() == "hello\nworld\n"
-        assert not os.path.exists(target + ".tmp")
+        assert _left_over(target) == []
 
     def test_overwrites_existing_atomically(self, tmp_path):
         target = str(tmp_path / "out.txt")
@@ -184,12 +176,12 @@ class TestAtomicWriteHelper:
 
         with open(target, encoding="utf-8") as f:
             assert f.read() == "original"
-        assert not os.path.exists(target + ".tmp")
+        assert _left_over(target) == []
 
 
 class TestPlotProfilePersistenceIsAtomic:
-    """Plot profiles persist through ConfigManager.save, so the B4 fix
-    must protect them too (VERIFY S-4 additional verification)."""
+    """Plot profiles are saved through ConfigManager.save, so atomic
+    saving protects them too."""
 
     def test_profile_save_produces_complete_file(self, cfg):
         store = PlotProfileStore(cfg)
@@ -197,7 +189,7 @@ class TestPlotProfilePersistenceIsAtomic:
 
         path = _config_path(cfg)
         assert os.path.isfile(path)
-        assert not os.path.exists(_tmp_sibling(path))
+        assert _left_over(path) == []
 
         # A fresh manager resolves the same temp dir (the cfg fixture's
         # get_config_dir patch is still active) and loads from disk.
@@ -224,3 +216,53 @@ class TestPlotProfilePersistenceIsAtomic:
         profiles_json = parsed.get("Plot", "profiles_json")
         assert "Motor v3" in profiles_json
         assert os.path.getsize(path) > 0
+
+    def test_a_file_already_beside_the_destination_is_never_written_over(self, tmp_path):
+        target = str(tmp_path / "out.txt")
+        bystander = tmp_path / "out.txt.tmp"
+        bystander.write_text("not ours", encoding="utf-8")
+
+        atomic.atomic_write_text(target, "new")
+
+        assert bystander.read_text(encoding="utf-8") == "not ours"
+        assert _left_over(target) == ["out.txt.tmp"]
+
+    def test_the_temporary_file_has_a_name_of_its_own_each_time(self, tmp_path, monkeypatch):
+        target = str(tmp_path / "out.txt")
+        used: list[str] = []
+        replace = os.replace
+
+        def recording_replace(source, destination):
+            used.append(os.path.basename(source))
+            replace(source, destination)
+
+        monkeypatch.setattr(atomic.os, "replace", recording_replace)
+
+        atomic.atomic_write_text(target, "one")
+        atomic.atomic_write_text(target, "two")
+
+        assert len(set(used)) == 2
+        assert all(name.startswith(".wiretrace-") and name.endswith(".tmp") for name in used)
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows has no owner-only file mode")
+    def test_the_file_is_for_its_owner_only(self, tmp_path):
+        target = str(tmp_path / "out.txt")
+
+        atomic.atomic_write_text(target, "private")
+
+        assert os.stat(target).st_mode & 0o777 == 0o600
+
+    def test_an_interrupted_write_leaves_no_temporary_file(self, tmp_path, monkeypatch):
+        target = str(tmp_path / "out.txt")
+        atomic.atomic_write_text(target, "original")
+
+        def interrupted(*_arguments, **_named):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(atomic.os, "fsync", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            atomic.atomic_write_text(target, "should-not-land")
+
+        with open(target, encoding="utf-8") as f:
+            assert f.read() == "original"
+        assert _left_over(target) == []

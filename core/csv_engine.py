@@ -1,54 +1,63 @@
-# SPDX-License-Identifier: MIT
-"""WireTrace CSV export engine — two-mode structured export.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""WireTrace CSV export engine: turns session lines into CSV rows.
 
-Produces formatted CSV from serial data in two modes:
+Two output modes:
 
-Mode 1 — Auto-detect (for structured data):
-  Detects from first N lines (CSV_AUTODETECT_SAMPLE_SIZE = 50).
-  Supports two common patterns:
-    - key:value / key=value → keys become column headers
-    - JSON {...} → JSON keys become column headers
-  Output: Timestamp,Temperature,Humidity,Pressure
+  AUTO  Structured data. Column names are detected from the lines
+        themselves, in two supported shapes:
+          - ``key: value`` / ``key=value`` pairs
+          - JSON objects ``{...}``
+        Output: ``Timestamp,Temperature,Humidity,Pressure``
 
-Mode 2 — Raw (for everything else):
-  Output: Timestamp,Data
+  RAW   Everything else. Output: ``Timestamp,Data``
 
-Tag-aware sampling and writing:
-  Every row is accompanied by the severity tag the TagDetector already
-  produced upstream (CRITICAL/ERROR/WARNING/INFO/DEBUG/COMMAND/DATA).
+Detection:
+  Lines are held back until the mode is known, so the header and every
+  row always share one set of columns. Detection looks at the most
+  recent ``CSV_AUTODETECT_SAMPLE_SIZE`` lines each time that many more
+  have arrived. A device that prints a boot log before its readings
+  is therefore still detected once the readings dominate the sample.
+  After ``CSV_DETECTION_GIVE_UP_LINES`` lines without a structure, the
+  engine settles on RAW.
 
-  - Detection sample: only DATA-tagged lines feed column detection.
-    Severity messages (boot logs, INFO/WARNING/ERROR output) cannot
-    pollute the column intersection and collapse it to RAW.
-  - AUTO-mode writes: severity- and command-tagged rows are excluded
-    from the .csv to keep the structured export rectangular for
-    downstream consumers (Excel, pandas, plotting tools). The full
-    .txt log preserves every line verbatim regardless.
-  - RAW-mode writes: every row is written verbatim — there is no
-    structured schema to protect, so the .csv mirrors the .txt.
+Which lines become rows (AUTO):
+  A line is a row if it supplies at least ``CSV_ROW_MIN_COLUMN_FRACTION``
+  of the detected columns. This is decided by what the line contains,
+  never by its severity tag, so a line of readings that happens to
+  include a word like "errors" is exported like any other. Lines that
+  do not fit the columns are left out of the .csv to keep it
+  rectangular; the .txt log holds every line.
 
-Architecture note for v2.1 plotter:
-  The structure detection output (column names + parsed values) is exposed
-  via the structure_detected signal. The future plotter subscribes to this
-  signal without duplicating parsing logic.
+The engine only formats text. Its caller owns the file, which is what
+lets the same engine feed a live log that is split into parts and a
+one-off export.
 
-This module does NOT touch: GUI or serial I/O.
+This module does not touch the GUI, the disk, the serial port or any other I/O.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import re
-from dataclasses import dataclass
-from typing import IO
 
-from PySide6.QtCore import QObject, Signal
-
-from app.constants import CSV_AUTODETECT_SAMPLE_SIZE, TAG_DATA, CSVMode
+from app.constants import (
+    CSV_AUTODETECT_SAMPLE_SIZE,
+    CSV_DETECTION_GIVE_UP_LINES,
+    CSV_ROW_MIN_COLUMN_FRACTION,
+    STRUCTURE_KEY_MAX_LENGTH,
+    STRUCTURE_MAX_LINE_CHARACTERS,
+    CSVMode,
+)
+from core.structure import select_common_keys
 
 logger = logging.getLogger(__name__)
 
+#: Name of the first column of every CSV, and of the single data column
+#: in RAW mode.
+TIMESTAMP_COLUMN = "Timestamp"
+RAW_DATA_COLUMN = "Data"
 
 # Leading characters that spreadsheet applications (Excel, LibreOffice
 # Calc) interpret as the start of a formula. A field beginning with any
@@ -58,66 +67,32 @@ logger = logging.getLogger(__name__)
 # introduce a formula/command context in some spreadsheet parsers.
 _CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
 
+# A plain signed number. Such a value cannot carry a formula, so it is
+# exported unchanged and stays a number in the spreadsheet.
+_PLAIN_NUMBER_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
 
-# ── Parsed Row ───────────────────────────────────────────────────────────────
+# ``key: value`` or ``key=value``. A key starts with a letter or an
+# underscore, which keeps clock times such as ``12:30:45`` from being
+# read as a key and a value. It starts at the beginning of a word and
+# has a bounded length, so the time spent on a line grows with the
+# line's length and not with its square, whatever the line contains.
+_KV_PATTERN = re.compile(
+    rf"(?<!\w)([A-Za-z_][\w ]{{0,{STRUCTURE_KEY_MAX_LENGTH - 1}}}?)\s*[:=]\s*([^\s,;]+)",
+)
 
-@dataclass(frozen=True, slots=True)
-class ParsedRow:
-    """A single parsed data row with named columns.
 
-    Used by CSVEngine and exposed to future plotter via signal.
-    """
-    columns: dict[str, str]  # column_name → value
+class CSVEngine:
+    """Detects the structure of a session and formats its CSV rows."""
 
-
-# ── CSV Engine ───────────────────────────────────────────────────────────────
-
-class CSVEngine(QObject):
-    """Produces formatted CSV from serial data.
-
-    Auto-detects data structure from the first sample lines, then
-    applies consistent parsing to all subsequent lines.
-
-    Signals:
-        structure_detected(list):   Emitted when column names are determined.
-                                    Carries list[str] of column names.
-                                    (v2.1 plotter hook)
-        row_parsed(dict):           Emitted for each parsed row.
-                                    Carries dict[str, str] of column→value.
-                                    (v2.1 plotter hook)
-    """
-
-    # ── Signals (v2.1 plotter hooks) ─────────────────────────────────────
-
-    structure_detected = Signal(list)   # list[str] column names
-    row_parsed = Signal(dict)           # dict[str, str] column→value
-
-    # ── Regex Patterns ───────────────────────────────────────────────────
-
-    # Matches: key:value or key=value (with optional whitespace)
-    # key must be word characters, value is everything after separator
-    _KV_PATTERN = re.compile(
-        r"(\w[\w\s]*?)\s*[:=]\s*([^\s,;]+)"
-    )
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-
+    def __init__(self) -> None:
         self._mode: CSVMode = CSVMode.RAW
         self._columns: list[str] = []
-        # Buffer of (timestamp, line, tag) triples collected during
-        # detection. The tag is carried so detection can filter the
-        # sample to DATA-tagged lines only (severity/command lines
-        # would pollute the column intersection), and so the replay
-        # can apply Option C — exclude severity from AUTO-mode CSV.
-        # Tuples preserve each row's original timestamp for re-write
-        # after detection completes; using a single "current"
-        # timestamp for all buffered rows would corrupt the log
-        # (regression guard for audit finding C2).
-        self._sample_buffer: list[tuple[str, str, str]] = []
-        self._sample_size = CSV_AUTODETECT_SAMPLE_SIZE
+        self._min_columns_per_row = 0
         self._detection_complete = False
-        self._header_written = False
+        # (timestamp, line) pairs held back until the mode is known.
+        # Each keeps its own timestamp so the rows written after
+        # detection carry the time their line actually arrived.
+        self._held: list[tuple[str, str]] = []
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -128,382 +103,164 @@ class CSVEngine(QObject):
 
     @property
     def columns(self) -> list[str]:
-        """Detected column names (empty if RAW mode)."""
+        """Detected column names (empty in RAW mode)."""
         return list(self._columns)
 
     @property
     def detection_complete(self) -> bool:
-        """True if auto-detection has finished."""
+        """True once the mode is known and rows are being produced."""
         return self._detection_complete
 
-    def reset(self) -> None:
-        """Reset engine state for a new session."""
-        self._mode = CSVMode.RAW
-        self._columns.clear()
-        self._sample_buffer.clear()
-        self._detection_complete = False
-        self._header_written = False
+    @property
+    def header(self) -> str:
+        """The column header line. Meaningful once detection is complete."""
+        if self._mode == CSVMode.AUTO:
+            names = [self._csv_escape(column) for column in self._columns]
+            return ",".join([TIMESTAMP_COLUMN, *names])
+        return f"{TIMESTAMP_COLUMN},{RAW_DATA_COLUMN}"
 
     def detect_mode(self, lines: list[str]) -> CSVMode:
-        """Analyze a batch of lines to determine the CSV mode.
-
-        This is the explicit detection API. Can be called manually
-        with a pre-collected sample, or detection happens automatically
-        as lines are fed via write_row().
-
-        Args:
-            lines: Sample lines to analyze.
-
-        Returns:
-            CSVMode.AUTO if structure was detected, CSVMode.RAW otherwise.
-        """
-        if not lines:
-            return CSVMode.RAW
-
-        # Try JSON detection first (more specific)
-        json_columns = self._try_detect_json(lines)
-        if json_columns:
-            self._mode = CSVMode.AUTO
-            self._columns = json_columns
-            self._detection_complete = True
-            self.structure_detected.emit(self._columns)
-            logger.info("CSV auto-detect: JSON mode, columns=%s", self._columns)
-            return CSVMode.AUTO
-
-        # Try key:value / key=value detection
-        kv_columns = self._try_detect_kv(lines)
-        if kv_columns:
-            self._mode = CSVMode.AUTO
-            self._columns = kv_columns
-            self._detection_complete = True
-            self.structure_detected.emit(self._columns)
-            logger.info("CSV auto-detect: KV mode, columns=%s", self._columns)
-            return CSVMode.AUTO
-
-        # No structure detected — fall back to RAW
-        self._mode = CSVMode.RAW
-        self._detection_complete = True
-        logger.info("CSV auto-detect: RAW mode (no structure found)")
-        return CSVMode.RAW
-
-    def write_header(self, file_handle: IO[str]) -> None:
-        """Prepare to write the CSV column header.
-
-        The header is NOT written immediately. Until auto-detection has
-        a chance to inspect real data, we cannot know whether to write
-        ``Timestamp,Data`` (RAW) or ``Timestamp,col1,col2,...`` (AUTO).
-
-        The actual header line is written by :meth:`_write_header_once`
-        when the first row is flushed — either after detection completes
-        or after :meth:`finalize` runs with fewer samples than expected.
-
-        The argument is accepted (and validated) to keep the call-site
-        protocol uniform with :meth:`write_row` and :meth:`finalize`.
-
-        Args:
-            file_handle: Open file handle for the .csv file.
-        """
-        # No-op: header write is deferred until the mode is known.
-        # file_handle is retained in the signature so callers pass it
-        # consistently, but nothing is written here.
-        del file_handle  # explicit "unused on purpose"
-
-    def write_row(
-        self,
-        file_handle: IO[str],
-        timestamp: str,
-        line: str,
-        tag: str,
-    ) -> None:
-        """Write a single data row to the CSV file.
-
-        During the first :attr:`_sample_size` rows, the
-        ``(timestamp, line, tag)`` triple is buffered — nothing is
-        written to disk. Once the buffer is full, auto-detection runs
-        on the DATA-tagged subset of the buffer, the column header is
-        written, and every buffered row is replayed under the active
-        mode's write rules.
-
-        After detection completes, rows are written directly:
-          - AUTO mode: only ``tag == "DATA"`` rows are written. Severity
-            and command rows are excluded so the structured CSV stays
-            rectangular for downstream consumers (Option C). The .txt
-            log preserves them.
-          - RAW mode: every row is written verbatim regardless of tag.
-            There is no structured schema to protect.
-
-        Args:
-            file_handle: Open file handle for the .csv file.
-            timestamp: Formatted timestamp string for this row.
-            line: The decoded serial line.
-            tag: Severity tag from TagDetector — one of "CRITICAL",
-                "ERROR", "WARNING", "INFO", "DEBUG", "COMMAND", or
-                "DATA". Drives both detection-sample filtering and
-                AUTO-mode write filtering (see above).
-        """
-        # Auto-detection phase: buffer (timestamp, line, tag) triples.
-        # Nothing is written to disk yet — we must know the column
-        # structure before committing the header, and writing raw rows
-        # first would corrupt the CSV's structural consistency.
-        if not self._detection_complete:
-            self._sample_buffer.append((timestamp, line, tag))
-            if len(self._sample_buffer) >= self._sample_size:
-                self._flush_sample_buffer(file_handle)
-            return
-
-        # Option C: in AUTO mode, exclude severity- and command-tagged
-        # rows from the structured CSV. The .txt log is the canonical
-        # complete record; the .csv is for tabular consumers.
-        if self._mode == CSVMode.AUTO and tag != TAG_DATA:
-            return
-
-        # RAW mode, or AUTO mode with a DATA-tagged row.
-        self._write_header_once(file_handle)
-        self._write_single_row(file_handle, timestamp, line)
-
-    def finalize(self, file_handle: IO[str]) -> None:
-        """Finalize CSV output.
-
-        Called when logging stops. If auto-detection never completed
-        (fewer rows than :attr:`_sample_size`), run detection on what
-        we have, write the header, and flush every buffered row with
-        its original timestamp.
-
-        Args:
-            file_handle: Open file handle for the .csv file.
-        """
-        if not self._detection_complete:
-            self._flush_sample_buffer(file_handle)
-
-    # ── Internal: Buffer Flush ───────────────────────────────────────────
-
-    def _flush_sample_buffer(self, file_handle: IO[str]) -> None:
-        """Run detection on the buffered samples and flush them to disk.
-
-        Detection only considers DATA-tagged lines from the buffer —
-        severity messages (boot logs, INFO/WARNING/ERROR output) and
-        user commands cannot pollute the column intersection. The tag
-        detector has already classified every line upstream; this just
-        consumes that classification.
-
-        After detection runs, the column header is written (if not
-        already), then every buffered row is replayed with its original
-        timestamp under the active mode's write rules:
-          - AUTO mode: severity- and command-tagged rows are skipped
-            (Option C); the .txt log preserves them.
-          - RAW mode: every row is written verbatim.
-
-        Safe to call with an empty buffer — detection runs on an empty
-        sample (producing RAW mode) and writes just the header.
-        """
-        # Detection input: DATA-tagged lines only. If the buffer holds
-        # only severity (e.g. a device that boots and emits nothing
-        # but log messages), the filtered sample is empty and
-        # detect_mode correctly returns RAW.
-        data_lines = [
-            line for _, line, tag in self._sample_buffer
-            if tag == TAG_DATA
-        ]
-        self.detect_mode(data_lines)
-
-        # Write the header now that we know the mode.
-        self._write_header_once(file_handle)
-
-        # Replay every buffered row with its original timestamp,
-        # applying the active mode's tag-filtering rule.
-        for original_timestamp, original_line, original_tag in self._sample_buffer:
-            if self._mode == CSVMode.AUTO and original_tag != TAG_DATA:
-                # Option C: severity stays out of the structured CSV.
-                continue
-            self._write_single_row(
-                file_handle, original_timestamp, original_line,
-            )
-        self._sample_buffer.clear()
-
-    def _write_header_once(self, file_handle: IO[str]) -> None:
-        """Write the column header line, but only the first time."""
-        if self._header_written:
-            return
-
-        if self._mode == CSVMode.AUTO and self._columns:
-            header = ",".join(["Timestamp", *self._columns])
+        """Decide the mode from a sample of lines and settle on it."""
+        columns = self._detect_columns(lines)
+        if columns:
+            self._settle(CSVMode.AUTO, columns)
         else:
-            header = "Timestamp,Data"
+            self._settle(CSVMode.RAW, [])
+        return self._mode
 
-        file_handle.write(header + "\n")
-        self._header_written = True
+    def feed(self, timestamp: str, line: str) -> list[str]:
+        """Add one line and return the rows that are now ready to write.
 
-    def parse_line(self, line: str) -> ParsedRow | None:
-        """Parse a single line according to the detected structure.
-
-        Returns:
-            ParsedRow with column values, or None if parsing fails.
-            Emits row_parsed signal on success (v2.1 plotter hook).
+        Returns an empty list while lines are being held for detection,
+        the rows of every held line at the moment detection settles,
+        and zero or one row per line after that.
         """
-        if self._mode == CSVMode.RAW or not self._columns:
-            return None
+        if self._detection_complete:
+            row = self._format_row(timestamp, line)
+            return [] if row is None else [row]
 
-        values = self._extract_values(line)
-        if values:
-            self.row_parsed.emit(values)
-            return ParsedRow(columns=values)
+        self._held.append((timestamp, line))
+        held = len(self._held)
+        if held % CSV_AUTODETECT_SAMPLE_SIZE != 0:
+            return []
 
-        return None
+        columns = self._detect_columns(self._recent_sample())
+        if columns:
+            self._settle(CSVMode.AUTO, columns)
+        elif held >= CSV_DETECTION_GIVE_UP_LINES:
+            self._settle(CSVMode.RAW, [])
+        else:
+            return []
+        return self._release_held()
+
+    def finalize(self) -> list[str]:
+        """Settle the mode with whatever was received and return its rows.
+
+        Called when the session ends before detection settled. Tries the
+        most recent sample first, then every held line.
+        """
+        if self._detection_complete:
+            return []
+        columns = self._detect_columns(self._recent_sample())
+        if not columns:
+            columns = self._detect_columns([line for _, line in self._held])
+        if columns:
+            self._settle(CSVMode.AUTO, columns)
+        else:
+            self._settle(CSVMode.RAW, [])
+        return self._release_held()
 
     # ── Internal: Detection ──────────────────────────────────────────────
 
-    def _try_detect_json(self, lines: list[str]) -> list[str] | None:
-        """Try to detect JSON structure from sample lines.
+    def _recent_sample(self) -> list[str]:
+        return [line for _, line in self._held[-CSV_AUTODETECT_SAMPLE_SIZE:]]
 
-        Returns column names if >= 50% of lines parse as JSON with
-        consistent keys, None otherwise.
-        """
-        all_keys: list[set[str]] = []
+    def _settle(self, mode: CSVMode, columns: list[str]) -> None:
+        self._mode = mode
+        self._columns = list(columns)
+        self._min_columns_per_row = max(
+            1, math.ceil(len(columns) * CSV_ROW_MIN_COLUMN_FRACTION),
+        )
+        self._detection_complete = True
+        logger.info("CSV structure settled: %s, columns=%s", mode.name, columns)
 
-        for line in lines:
-            stripped = line.strip()
-            if not stripped.startswith("{"):
-                continue
-            try:
-                obj = json.loads(stripped)
-                if isinstance(obj, dict) and obj:
-                    all_keys.append(set(obj.keys()))
-            except (json.JSONDecodeError, ValueError):
-                continue
+    def _release_held(self) -> list[str]:
+        rows = [
+            row
+            for timestamp, line in self._held
+            if (row := self._format_row(timestamp, line)) is not None
+        ]
+        self._held.clear()
+        return rows
 
-        if not all_keys or len(all_keys) < len(lines) * 0.5:
+    @staticmethod
+    def _detect_columns(lines: list[str]) -> list[str] | None:
+        """Return the column names found in ``lines``, or None."""
+        if not lines:
             return None
 
-        # Use intersection of all key sets for consistency
-        common_keys = all_keys[0]
-        for keys in all_keys[1:]:
-            common_keys &= keys
+        json_keys = [
+            list(obj)
+            for line in lines
+            if (obj := CSVEngine._parse_json_object(line)) is not None and obj
+        ]
+        columns = select_common_keys(json_keys, len(lines))
+        if columns:
+            return columns
 
-        if not common_keys:
-            return None
+        kv_keys = [
+            [key.strip() for key, _ in matches]
+            for line in lines
+            if (matches := _KV_PATTERN.findall(line, 0, STRUCTURE_MAX_LINE_CHARACTERS))
+        ]
+        return select_common_keys(kv_keys, len(lines))
 
-        # Return keys in the order they appeared in the first valid object
-        first_line = None
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("{"):
-                try:
-                    first_line = json.loads(stripped)
-                    break
-                except (json.JSONDecodeError, ValueError):
-                    continue
-
-        if first_line and isinstance(first_line, dict):
-            return [k for k in first_line if k in common_keys]
-
-        return sorted(common_keys)
-
-    def _try_detect_kv(self, lines: list[str]) -> list[str] | None:
-        """Try to detect key:value or key=value structure.
-
-        Returns column names if >= 50% of lines contain consistent
-        key-value pairs, None otherwise.
-        """
-        all_keys: list[list[str]] = []
-
-        for line in lines:
-            matches = self._KV_PATTERN.findall(line)
-            if matches:
-                keys = [m[0].strip() for m in matches]
-                all_keys.append(keys)
-
-        if not all_keys or len(all_keys) < len(lines) * 0.5:
-            return None
-
-        # Find consistent key set across samples
-        key_sets = [set(keys) for keys in all_keys]
-        common_keys = key_sets[0]
-        for ks in key_sets[1:]:
-            common_keys &= ks
-
-        if not common_keys:
-            return None
-
-        # Return keys in order of first appearance
-        return [k for k in all_keys[0] if k in common_keys]
-
-    # ── Internal: Row Writing ────────────────────────────────────────────
-
-    def _write_single_row(
-        self,
-        file_handle: IO[str],
-        timestamp: str,
-        line: str,
-    ) -> None:
-        """Write a single row in the detected mode.
-
-        AUTO mode invariant: every row written has exactly the column
-        count of the header. A DATA-tagged line that does not parse to
-        the detected schema (e.g. a boot banner that slipped past the
-        tag detector, or a one-off message with a different shape) is
-        skipped from the .csv — the .txt log preserves it. This keeps
-        the structured CSV rectangular for downstream consumers.
-
-        RAW mode: every row is written verbatim as ``Timestamp,Data``.
-        """
-        if self._mode == CSVMode.AUTO and self._columns:
-            values = self._extract_values(line)
-            if values:
-                row_values = [values.get(col, "") for col in self._columns]
-                row = ",".join(
-                    [timestamp] + [self._csv_escape(v) for v in row_values],
-                )
-                file_handle.write(row + "\n")
-
-                # Emit for plotter hook (v2.1)
-                self.row_parsed.emit(values)
-            # AUTO + unparseable: skip the row to preserve the
-            # rectangular-CSV invariant. The .txt log retains the line.
-            return
-
-        # RAW mode: write verbatim.
-        self._write_raw_row(file_handle, timestamp, line)
-
-    def _write_raw_row(
-        self,
-        file_handle: IO[str],
-        timestamp: str,
-        line: str,
-    ) -> None:
-        """Write a raw CSV row: Timestamp,Data."""
-        escaped = self._csv_escape(line)
-        file_handle.write(f"{timestamp},{escaped}\n")
-
-    def _extract_values(self, line: str) -> dict[str, str] | None:
-        """Extract column values from a line based on detected structure.
-
-        Returns:
-            Dict mapping column name → value string, or None if extraction fails.
-        """
+    @staticmethod
+    def _parse_json_object(line: str) -> dict | None:
         stripped = line.strip()
+        if not stripped.startswith("{"):
+            return None
+        try:
+            obj = json.loads(stripped)
+        except (ValueError, RecursionError):
+            # Not JSON, or nested too deeply to be a data line.
+            return None
+        return obj if isinstance(obj, dict) else None
 
-        # Try JSON
-        if stripped.startswith("{"):
-            try:
-                obj = json.loads(stripped)
-                if isinstance(obj, dict):
-                    return {k: str(v) for k, v in obj.items()
-                            if k in self._columns}
-            except (json.JSONDecodeError, ValueError):
-                pass
+    # ── Internal: Row Formatting ─────────────────────────────────────────
 
-        # Try key:value / key=value
-        matches = self._KV_PATTERN.findall(line)
-        if matches:
-            result = {}
-            for key, value in matches:
-                key = key.strip()
-                if key in self._columns:
-                    result[key] = value.strip()
-            if result:
-                return result
+    def _format_row(self, timestamp: str, line: str) -> str | None:
+        """Format one line as a row, or None if it is not a row."""
+        if self._mode == CSVMode.RAW:
+            return f"{timestamp},{self._csv_escape(line)}"
 
-        return None
+        values = self._extract_values(line)
+        if len(values) < self._min_columns_per_row:
+            return None
+        cells = [self._csv_escape(values.get(column, "")) for column in self._columns]
+        return ",".join([timestamp, *cells])
+
+    def _extract_values(self, line: str) -> dict[str, str]:
+        """Return the detected columns present on ``line`` with their values."""
+        obj = self._parse_json_object(line)
+        if obj is not None:
+            return {
+                key: self._json_cell(value)
+                for key, value in obj.items()
+                if key in self._columns
+            }
+        return {
+            key.strip(): value.strip()
+            for key, value in _KV_PATTERN.findall(line, 0, STRUCTURE_MAX_LINE_CHARACTERS)
+            if key.strip() in self._columns
+        }
+
+    @staticmethod
+    def _json_cell(value: object) -> str:
+        """Render a JSON value as cell text."""
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False)
 
     @staticmethod
     def _csv_escape(value: str) -> str:
@@ -511,22 +268,21 @@ class CSVEngine(QObject):
 
         Two layers, in order:
 
-          1. Formula-injection neutralisation (B2): a value whose first
+          1. Formula-injection neutralisation: a value whose first
              character is one a spreadsheet treats as a formula start
              (``=`` ``+`` ``-`` ``@`` tab CR) is prefixed with a single
              quote, so Excel and LibreOffice render it as literal text
-             and never execute it. The quote is invisible in the cell.
+             and never execute it. A plain signed number is exempt: it
+             cannot carry a formula, and prefixing it would turn every
+             negative reading into text.
 
           2. RFC 4180 structural escaping: the (possibly prefixed) value
              is wrapped in quotes if it contains a comma, quote, or
              newline, with internal quotes doubled.
-
-        Both AUTO-mode and RAW-mode writes route through here, so device
-        payloads are neutralised in every export mode.
         """
         if not value:
             return ""
-        if value[0] in _CSV_FORMULA_TRIGGERS:
+        if value[0] in _CSV_FORMULA_TRIGGERS and not _PLAIN_NUMBER_RE.fullmatch(value):
             value = "'" + value
         if "," in value or '"' in value or "\n" in value or "\r" in value:
             return '"' + value.replace('"', '""') + '"'

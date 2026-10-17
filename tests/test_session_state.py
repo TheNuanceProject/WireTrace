@@ -1,8 +1,9 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for the per-device session state container.
 
 DeviceSession is a small dataclass but its reset methods are exercised
-on every disconnect — a bug there could leak state between sessions.
+on every disconnect: a fault there could carry state from one session
+into the next.
 """
 
 from __future__ import annotations
@@ -38,8 +39,6 @@ class TestDefaults:
     def test_display_defaults(self):
         s = DeviceSession()
         assert s.display_mode == DisplayMode.TEXT
-        assert s.auto_scroll is True
-        assert s.color_mode is True
         assert s.timestamp_mode == TimestampMode.ABSOLUTE
         assert s.filter_text == ""
 
@@ -47,7 +46,6 @@ class TestDefaults:
         s = DeviceSession()
         assert s.data_rate == 0
         assert s.total_lines == 0
-        assert s.total_bytes == 0
         assert s.session_start is None
 
 
@@ -58,28 +56,24 @@ class TestResetMetrics:
         s = DeviceSession()
         s.data_rate = 1200
         s.total_lines = 45_000
-        s.total_bytes = 2_300_000
         s.session_start = datetime(2026, 1, 1, 10, 0, 0)
 
         s.reset_metrics()
 
         assert s.data_rate == 0
         assert s.total_lines == 0
-        assert s.total_bytes == 0
         assert s.session_start is None
 
     def test_preserves_display_preferences(self):
         s = DeviceSession()
-        s.color_mode = False
         s.timestamp_mode = TimestampMode.RELATIVE
-        s.auto_scroll = False
+        s.display_mode = DisplayMode.HEX
 
         s.data_rate = 500
         s.reset_metrics()
 
-        assert s.color_mode is False
         assert s.timestamp_mode == TimestampMode.RELATIVE
-        assert s.auto_scroll is False
+        assert s.display_mode == DisplayMode.HEX
 
 
 class TestResetLoggingState:
@@ -117,7 +111,7 @@ class TestResetLoggingState:
 
 
 class TestResetConnectionState:
-    """Full teardown for disconnect — clears connection, logging, and metrics."""
+    """Full teardown for disconnect: clears connection, logging, and metrics."""
 
     def test_clears_connection(self):
         s = DeviceSession()
@@ -152,11 +146,11 @@ class TestResetConnectionState:
     def test_preserves_display_preferences(self):
         s = DeviceSession()
         s.is_connected = True
-        s.color_mode = False
+        s.display_mode = DisplayMode.HEX
         s.timestamp_mode = TimestampMode.RELATIVE
 
         s.reset_connection_state()
 
-        # Disconnect should NOT reset user's display preferences.
-        assert s.color_mode is False
+        # A disconnect does not reset how the tab displays its lines.
+        assert s.display_mode == DisplayMode.HEX
         assert s.timestamp_mode == TimestampMode.RELATIVE

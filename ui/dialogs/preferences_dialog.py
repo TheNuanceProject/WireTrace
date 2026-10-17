@@ -1,27 +1,29 @@
-# SPDX-License-Identifier: MIT
-"""WireTrace Preferences — enterprise-grade settings dialog.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""The Preferences dialog.
 
-Single-page scrollable layout with grouped sections instead of cluttered tabs.
-Each setting has a clear label and description. Professional save feedback.
-Maps to preferences.ini via ConfigManager per spec section 8.3.
+One page per subject, chosen from the list on the left. Every setting
+shown here has an effect; the rarely needed ones are on the Advanced
+page. Values are read from and written to ``ConfigManager``.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QFont, QFontDatabase
+from collections.abc import Callable
+
+from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QFontDatabase
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
-    QPushButton,
-    QScrollArea,
+    QListWidget,
+    QListWidgetItem,
     QSpinBox,
+    QStackedWidget,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -31,515 +33,537 @@ from app.constants import (
     BAUD_RATES,
     FONT_SIZE_MAX,
     FONT_SIZE_MIN,
-    GUI_UPDATE_INTERVAL_MS,
-    LOG_BUFFER_MAX_ENTRIES,
-    LOG_FLUSH_INTERVAL_MS,
-    MAX_CONSOLE_LINES,
-    ThemeID,
+    GUI_UPDATE_INTERVAL_MS_MAX,
+    GUI_UPDATE_INTERVAL_MS_MIN,
+    LOG_BUFFER_MAX_ENTRIES_MAX,
+    LOG_BUFFER_MAX_ENTRIES_MIN,
+    LOG_FLUSH_INTERVAL_MS_MAX,
+    LOG_FLUSH_INTERVAL_MS_MIN,
+    LOG_LINE_ENDINGS,
+    LOG_SPLIT_MAX_MB,
+    MAX_CONSOLE_LINES_MAX,
+    MAX_CONSOLE_LINES_MIN,
+    UPDATE_CHECK_INTERVAL_HOURS,
+    ExportFormat,
+    TimestampMode,
 )
-from ui.themes.theme_manager import ThemeManager
+from app.plot_config import PlotProfileStore
+from ui.dialogs.common import (
+    ChoiceRow,
+    action_button,
+    button_row,
+    heading,
+    note,
+    rule,
+    tighten,
+)
+from ui.dialogs.messages import confirm
+from ui.themes import tokens
+from ui.themes.theme_manager import ThemeManager, normalise_preference
+from ui.widgets.command_bar import LINE_ENDING_NAMES
+from ui.widgets.dot_grid import DotGridDialog
+from ui.widgets.least_size import keep_least_size
+from ui.widgets.styling import set_primary
+from ui.widgets.toast import Toast
+from ui.widgets.vertical_scroll import VerticalScrollArea
+from updater.install import UPDATE_CHECK_OPTION
+from version import APP_NAME, APP_PRIVACY_URL
 
-_LABEL_W = 160
-_CTRL_W = 220
+_UPDATES_AND_PRIVACY = "Updates and privacy"
+
+#: The pages, in the order of the list. Advanced comes after a divider.
+PAGES: tuple[str, ...] = (
+    "Appearance", "Console", "Connection", "Logging", "Plot", _UPDATES_AND_PRIVACY, "Advanced",
+)
+_PAGE_AFTER_DIVIDER = "Advanced"
+
+#: The stored word for each timestamp mode, and its name in the list.
+_TIMESTAMP_CHOICES: tuple[tuple[str, TimestampMode], ...] = (
+    ("Time of day", TimestampMode.ABSOLUTE),
+    ("Since previous line", TimestampMode.RELATIVE),
+)
+_TIMESTAMP_STORED: dict[TimestampMode, str] = {
+    TimestampMode.ABSOLUTE: "absolute",
+    TimestampMode.RELATIVE: "relative",
+}
 
 
-class PreferencesDialog(QDialog):
-    """Production-grade preferences dialog with grouped sections."""
+class PreferencesDialog(DotGridDialog):
+    """Edits the saved preferences. Save writes them; Cancel changes nothing."""
 
     def __init__(
         self,
         config: ConfigManager,
         theme_manager: ThemeManager,
-        parent=None,
+        parent: QWidget | None = None,
+        open_plot_config: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.setMinimumSize(520, 540)
-        self.setMaximumWidth(600)
         self.setModal(True)
-
         self._config = config
         self._theme_manager = theme_manager
-        self._dirty = False
+        self._open_plot_config = open_plot_config
+        self._plot_store = PlotProfileStore(config)
+        self._hints: dict[str, str] = {}
 
-        self._setup_ui()
+        self._build()
         self._load_values()
+        metrics = tokens.METRICS
+        keep_least_size(self, metrics.dialog_wide_width, metrics.dialog_wide_height)
 
-    # ══════════════════════════════════════════════════════════════════════
-    # UI SETUP
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Building ─────────────────────────────────────────────────────────
 
-    def _setup_ui(self) -> None:
+    def _build(self) -> None:
+        metrics = tokens.METRICS
+
+        self._sidebar = QListWidget()
+        self._sidebar.setObjectName("sidebar")
+        self._sidebar.setFixedWidth(metrics.sidebar_width)
+        self._sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._sidebar.setAccessibleName("Pages")
+        self._pages = QStackedWidget()
+        self._page_rows: dict[str, int] = {}
+
+        builders: dict[str, Callable[[QVBoxLayout], None]] = {
+            "Appearance": self._build_appearance,
+            "Console": self._build_console,
+            "Connection": self._build_connection,
+            "Logging": self._build_logging,
+            "Plot": self._build_plot,
+            _UPDATES_AND_PRIVACY: self._build_updates_and_privacy,
+            "Advanced": self._build_advanced,
+        }
+        for name in PAGES:
+            if name == _PAGE_AFTER_DIVIDER:
+                divider = QListWidgetItem()
+                divider.setFlags(Qt.ItemFlag.NoItemFlags)
+                divider.setData(Qt.ItemDataRole.AccessibleTextRole, "")
+                divider.setSizeHint(QSize(0, metrics.space_4))
+                self._sidebar.addItem(divider)
+                self._sidebar.setItemWidget(divider, rule())
+            self._page_rows[name] = self._sidebar.count()
+            entry = QListWidgetItem(name)
+            entry.setSizeHint(QSize(0, metrics.control_height))
+            self._sidebar.addItem(entry)
+
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(
+                metrics.space_6, metrics.space_6, metrics.space_6, metrics.space_4
+            )
+            page_layout.setSpacing(metrics.space_4)
+            page_layout.addWidget(heading(name, "pageTitle"))
+            builders[name](page_layout)
+            page_layout.addStretch(1)
+            self._pages.addWidget(VerticalScrollArea(page))
+        self._fit_sidebar_to_names()
+        self._sidebar.currentRowChanged.connect(self._on_row_changed)
+        self.show_page(PAGES[0])
+
+        restore = action_button("Restore defaults")
+        restore.clicked.connect(self._on_restore)
+        cancel = action_button("Cancel")
+        cancel.clicked.connect(self.reject)
+        save = action_button("Save")
+        set_primary(save)
+        save.setDefault(True)
+        save.clicked.connect(self._on_save)
+        footer = QFrame()
+        footer.setObjectName("dialogFooter")
+        footer_layout = button_row(cancel, save, leading=restore)
+        footer_layout.setContentsMargins(
+            metrics.space_4, metrics.space_3, metrics.space_4, metrics.space_3
+        )
+        footer.setLayout(footer_layout)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self._sidebar)
+        body.addWidget(self._pages, 1)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        # Scrollable content area
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-
-        content = QWidget()
-        self._layout = QVBoxLayout(content)
-        self._layout.setContentsMargins(24, 20, 24, 12)
-        self._layout.setSpacing(4)
-
-        self._build_appearance_section()
-        self._add_separator()
-        self._build_display_section()
-        self._add_separator()
-        self._build_serial_section()
-        self._add_separator()
-        self._build_storage_section()
-        self._add_separator()
-        self._build_plot_section()
-        self._add_separator()
-        self._build_performance_section()
-        self._add_separator()
-        self._build_updates_section()
-
-        self._layout.addStretch()
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
-
-        # Footer bar
-        footer = QWidget()
-        footer.setObjectName("preferencesFooter")
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(16, 8, 16, 8)
-
-        self._status_label = QLabel("")
-        self._status_label.setProperty("secondary", True)
-
-        reset_btn = QPushButton("Reset to Defaults")
-        reset_btn.setObjectName("clearBtn")
-        reset_btn.setFixedHeight(26)
-        reset_btn.clicked.connect(self._on_reset)
-
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setObjectName("clearBtn")
-        cancel_btn.setFixedHeight(26)
-        cancel_btn.clicked.connect(self.reject)
-
-        save_btn = QPushButton("Save")
-        save_btn.setFixedHeight(26)
-        save_btn.setMinimumWidth(80)
-        save_btn.clicked.connect(self._on_save)
-
-        footer_layout.addWidget(self._status_label, 1)
-        footer_layout.addWidget(reset_btn)
-        footer_layout.addSpacing(8)
-        footer_layout.addWidget(cancel_btn)
-        footer_layout.addSpacing(4)
-        footer_layout.addWidget(save_btn)
-
+        root.addLayout(body, 1)
         root.addWidget(footer)
 
-    # ── Section Builders ───────────────────────────────────────────────
+    def _fit_sidebar_to_names(self) -> None:
+        """Make the list of pages wide enough for its longest name, in its
+        own font, so that no name is cut at any size of text."""
+        metrics = tokens.METRICS
+        # The style sheet sets the font, so it is applied before measuring.
+        self._sidebar.ensurePolished()
+        widest = max(self._sidebar.fontMetrics().horizontalAdvance(name) for name in PAGES)
+        # On both sides: the list's padding, the item's padding and the
+        # margin Qt keeps around the text of an item; then the frame and
+        # the line between the list and the page.
+        text_margin = self._sidebar.style().pixelMetric(QStyle.PixelMetric.PM_FocusFrameHMargin) + 1
+        needed = (
+            widest
+            + 2 * (metrics.space_2 + metrics.space_3 + text_margin + self._sidebar.frameWidth())
+            + metrics.border
+        )
+        self._sidebar.setFixedWidth(max(metrics.sidebar_width, needed))
 
-    def _build_appearance_section(self) -> None:
-        self._add_section_header("Appearance")
+    def _add_row(self, page: QVBoxLayout, label: str, hint: str, field: QWidget) -> None:
+        """Add a setting: its name and hint on the left, its field on the right."""
+        metrics = tokens.METRICS
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(metrics.space_half)
+        text.addWidget(heading(label))
+        text.addWidget(note(hint, small=True))
+        text_column = QWidget()
+        text_column.setLayout(text)
+        text_column.setFixedWidth(metrics.form_label_width)
 
-        self._theme_combo = QComboBox()
-        self._theme_combo.setFixedWidth(_CTRL_W)
-        for tid, name in self._theme_manager.available_themes():
-            self._theme_combo.addItem(name, tid)
-        self._add_row("Theme", "Visual theme for the application", self._theme_combo)
+        row = QHBoxLayout()
+        row.setSpacing(metrics.space_6)
+        row.addWidget(text_column, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(field, 0, Qt.AlignmentFlag.AlignTop)
+        row.addStretch(1)
+        page.addLayout(row)
+        field.setAccessibleName(label)
+        self._hints[label] = hint
 
-    def _build_display_section(self) -> None:
-        self._add_section_header("Console Display")
+    @staticmethod
+    def _combo() -> QComboBox:
+        combo = QComboBox()
+        combo.setFixedWidth(tokens.METRICS.form_field_width)
+        return combo
 
-        self._font_combo = QComboBox()
-        self._font_combo.setFixedWidth(_CTRL_W)
-        # Populate with system monospace fonts
-        mono_families = []
-        for family in QFontDatabase.families():
-            if QFontDatabase.isFixedPitch(family):
-                mono_families.append(family)
-        mono_families.sort()
-        for family in mono_families:
-            self._font_combo.addItem(family)
-        # If no monospace fonts found, add common fallbacks
-        if not mono_families:
-            for f in ("Consolas", "Courier New", "Monospace"):
-                self._font_combo.addItem(f)
-        self._add_row("Font family", "Monospace font for the console", self._font_combo)
+    @staticmethod
+    def _number(low: int, high: int, suffix: str, step: int = 1) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(low, high)
+        spin.setSingleStep(step)
+        spin.setSuffix(f" {suffix}")
+        spin.setGroupSeparatorShown(True)
+        spin.setFixedWidth(tokens.METRICS.number_field_width)
+        return spin
 
-        self._font_spin = QSpinBox()
-        self._font_spin.setRange(FONT_SIZE_MIN, FONT_SIZE_MAX)
-        self._font_spin.setFixedWidth(80)
-        self._font_spin.setSuffix(" pt")
-        self._add_row("Font size", "Console text size", self._font_spin)
+    # ── Pages ────────────────────────────────────────────────────────────
 
-        self._ts_combo = QComboBox()
-        self._ts_combo.setFixedWidth(_CTRL_W)
-        self._ts_combo.addItem("Timestamp (date and time)", "absolute")
-        self._ts_combo.addItem("Elapsed (time between lines)", "relative")
-        self._add_row("Default timestamps", "Can be toggled per session", self._ts_combo)
+    def _build_appearance(self, page: QVBoxLayout) -> None:
+        self._theme = self._combo()
+        for preference, name in self._theme_manager.available_preferences():
+            self._theme.addItem(name, preference)
+        self._add_row(
+            page, "Theme", "System follows the light or dark setting of your computer.",
+            self._theme,
+        )
 
-        self._color_cb = QCheckBox("Enable severity color coding")
-        self._add_row("Colors", "Highlight messages by severity level", self._color_cb)
+    def _build_console(self, page: QVBoxLayout) -> None:
+        self._font_family = self._combo()
+        self._font_family.addItems(sorted(
+            family for family in QFontDatabase.families()
+            if QFontDatabase.isFixedPitch(family)
+        ))
+        self._add_row(
+            page, "Font", "Fixed-width fonts only, so columns line up.", self._font_family,
+        )
 
-        self._scroll_cb = QCheckBox("Auto-scroll to latest data")
-        self._add_row("Auto-scroll", "Follow new data as it arrives", self._scroll_cb)
+        self._font_size = self._number(FONT_SIZE_MIN, FONT_SIZE_MAX, "px")
+        self._add_row(page, "Text size", "Also in the View menu.", self._font_size)
 
-    def _build_serial_section(self) -> None:
-        self._add_section_header("Serial Connection")
+        self._timestamps = self._combo()
+        for name, mode in _TIMESTAMP_CHOICES:
+            self._timestamps.addItem(name, mode)
+        self._add_row(
+            page, "Timestamps", "For new tabs. Each tab can switch at any time.",
+            self._timestamps,
+        )
 
-        self._baud_combo = QComboBox()
-        self._baud_combo.setFixedWidth(_CTRL_W)
+        self._severity_colours = QCheckBox("Colour lines by severity")
+        self._add_row(
+            page, "Colours", "Errors and warnings stand out. Off shows every line alike.",
+            self._severity_colours,
+        )
+
+        self._follow = QCheckBox("Follow new lines")
+        self._add_row(
+            page, "Following", "For new tabs. The view stays on the newest line.",
+            self._follow,
+        )
+
+        self._hide_blank = QCheckBox("Hide blank lines")
+        self._add_row(
+            page, "Blank lines", "On screen only. Logs and exports keep every line.",
+            self._hide_blank,
+        )
+
+    def _build_connection(self, page: QVBoxLayout) -> None:
+        self._baud = self._combo()
         for baud in BAUD_RATES:
-            self._baud_combo.addItem(f"{baud:,} baud", baud)
-        self._add_row("Default baud rate", "Used when opening new connections", self._baud_combo)
-
-    def _build_storage_section(self) -> None:
-        self._add_section_header("Storage")
-
-        dir_w = QWidget()
-        dir_lay = QHBoxLayout(dir_w)
-        dir_lay.setContentsMargins(0, 0, 0, 0)
-        dir_lay.setSpacing(6)
-        self._dir_input = QLineEdit()
-        self._dir_input.setFixedHeight(26)
-        self._dir_input.setMinimumWidth(200)
-        self._dir_input.setReadOnly(True)
-        self._dir_input.setPlaceholderText("Select a directory...")
-        browse = QPushButton("Browse")
-        browse.setObjectName("clearBtn")
-        browse.setFixedSize(72, 26)
-        browse.clicked.connect(self._browse_dir)
-        dir_lay.addWidget(self._dir_input, 1)
-        dir_lay.addWidget(browse)
-        self._add_row("Log directory", "Default location for new log files", dir_w)
-
-        self._format_combo = QComboBox()
-        self._format_combo.setFixedWidth(_CTRL_W)
-        self._format_combo.addItem("Text (.txt)", "txt")
-        self._format_combo.addItem("CSV (.csv)", "csv")
-        self._format_combo.addItem("Both (.txt + .csv)", "both")
-        self._add_row("Default export", "Format for new log sessions", self._format_combo)
-
-    def _build_plot_section(self) -> None:
-        """Plot configuration: default profile + manage profiles button.
-
-        Profile editing happens in the dedicated Configure Plot dialog
-        (which is per-tab and has access to live recent lines for
-        pattern testing). This section sets the default that new tabs
-        boot with, and provides a quick path to the editor.
-        """
-        from app.plot_config import PlotProfileStore
-
-        self._add_section_header("Plot")
-
-        # Lazily build a store backed by our config so we can list
-        # existing profiles in the default-profile dropdown.
-        self._plot_store = PlotProfileStore(self._config)
-
-        self._plot_default_combo = QComboBox()
-        self._plot_default_combo.setFixedWidth(_CTRL_W)
-        self._refresh_plot_default_combo()
+            self._baud.addItem(str(baud), baud)
         self._add_row(
-            "Default profile",
-            "Profile applied to new tabs and reconnections",
-            self._plot_default_combo,
+            page, "Baud rate",
+            "Offered for a port that has not been used before. "
+            "A port used before is offered what it last used.",
+            self._baud,
         )
 
-        manage_w = QWidget()
-        manage_lay = QHBoxLayout(manage_w)
-        manage_lay.setContentsMargins(0, 0, 0, 0)
-        manage_lay.setSpacing(6)
-        manage_btn = QPushButton("Open Configure Plot\u2026")
-        manage_btn.setObjectName("clearBtn")
-        manage_btn.setFixedHeight(26)
-        manage_btn.setMinimumWidth(180)
-        manage_btn.setToolTip(
-            "Edit the active tab's plot configuration and manage profiles "
-            "(save / rename / delete).",
-        )
-        manage_btn.clicked.connect(self._open_configure_plot)
-        manage_lay.addWidget(manage_btn)
-        manage_lay.addStretch()
+    def _build_logging(self, page: QVBoxLayout) -> None:
+        metrics = tokens.METRICS
+        self._log_folder = QLineEdit()
+        self._log_folder.setMinimumWidth(metrics.form_field_width)
+        browse = action_button("Browse")
+        browse.clicked.connect(self._browse_log_folder)
+        folder_row = QHBoxLayout()
+        tighten(folder_row)
+        folder_row.addWidget(self._log_folder, 1)
+        folder_row.addWidget(browse)
+        folder = QWidget()
+        folder.setLayout(folder_row)
         self._add_row(
-            "Manage profiles",
-            "Add, rename, delete, or test plot profiles",
-            manage_w,
+            page, "Log folder",
+            "Where new logs are written. Choosing another folder when starting a log changes it.",
+            folder,
         )
 
-    def _refresh_plot_default_combo(self) -> None:
-        """Populate the default-profile dropdown from the store."""
-        self._plot_default_combo.blockSignals(True)
-        try:
-            self._plot_default_combo.clear()
-            for name in self._plot_store.names():
-                self._plot_default_combo.addItem(name, name)
-        finally:
-            self._plot_default_combo.blockSignals(False)
-
-    def _open_configure_plot(self) -> None:
-        """Pass through to the active tab's Configure Plot dialog.
-
-        Profile editing is per-tab because the dialog needs access to
-        the engine's recent lines for pattern testing. From here we
-        find the parent MainWindow and delegate.
-        """
-        # Walk up to MainWindow via the parent chain. We don't import
-        # MainWindow directly to avoid a circular dependency.
-        win = self.parent()
-        while win is not None and not hasattr(win, "_on_menu_configure_plot"):
-            win = win.parent()
-        if win is None or not hasattr(win, "_on_menu_configure_plot"):
-            return
-        win._on_menu_configure_plot()
-        # Re-read profiles in case the user added/removed any
-        self._refresh_plot_default_combo()
-
-    def _build_performance_section(self) -> None:
-        self._add_section_header("Performance")
-        self._add_description(
-            "These settings affect resource usage. Defaults are suitable for most hardware."
+        self._log_format = ChoiceRow(
+            (("Text", ExportFormat.TXT), ("Text and CSV", ExportFormat.BOTH)), ExportFormat.TXT,
         )
-
-        self._gui_spin = QSpinBox()
-        self._gui_spin.setRange(16, 500)
-        self._gui_spin.setFixedWidth(100)
-        self._gui_spin.setSuffix(" ms")
         self._add_row(
-            "GUI refresh rate",
-            f"How often the display updates (default: {GUI_UPDATE_INTERVAL_MS} ms)",
-            self._gui_spin,
+            page, "Log format",
+            "The text log is always written. CSV adds a spreadsheet file beside it.",
+            self._log_format,
         )
 
-        self._buffer_spin = QSpinBox()
-        self._buffer_spin.setRange(1000, 100000)
-        self._buffer_spin.setSingleStep(5000)
-        self._buffer_spin.setFixedWidth(100)
+        self._split = self._number(0, LOG_SPLIT_MAX_MB, "MB")
+        self._split.setSpecialValueText("Off")
         self._add_row(
-            "Write buffer size",
-            f"Lines buffered before disk write (default: {LOG_BUFFER_MAX_ENTRIES:,})",
-            self._buffer_spin,
+            page, "Maximum log file size",
+            "A log that reaches this size continues in a new file. Off keeps each log in one file.",
+            self._split,
         )
 
-        self._flush_spin = QSpinBox()
-        self._flush_spin.setRange(200, 5000)
-        self._flush_spin.setFixedWidth(100)
-        self._flush_spin.setSuffix(" ms")
+        self._line_ending = ChoiceRow(
+            tuple((LINE_ENDING_NAMES[ending], ending) for ending in LOG_LINE_ENDINGS),
+            LOG_LINE_ENDINGS[0],
+        )
         self._add_row(
-            "Flush interval",
-            f"Time between disk writes (default: {LOG_FLUSH_INTERVAL_MS} ms)",
-            self._flush_spin,
+            page, "Line endings in files",
+            "For logs and exports. LF is the same on every system. "
+            "CR LF suits older Windows tools.",
+            self._line_ending,
         )
 
-        self._lines_spin = QSpinBox()
-        self._lines_spin.setRange(10000, 500000)
-        self._lines_spin.setSingleStep(10000)
-        self._lines_spin.setFixedWidth(100)
+    def _build_plot(self, page: QVBoxLayout) -> None:
+        self._plot_profile = self._combo()
         self._add_row(
-            "Console line limit",
-            f"Maximum lines kept in display (default: {MAX_CONSOLE_LINES:,})",
-            self._lines_spin,
+            page, "Default profile", "Used by a port that has no profile of its own yet.",
+            self._plot_profile,
         )
 
-    def _build_updates_section(self) -> None:
-        self._add_section_header("Updates")
+        self._configure_plot = action_button("Configure plot...")
+        self._configure_plot.setEnabled(self._open_plot_config is not None)
+        self._configure_plot.clicked.connect(self._on_configure_plot)
+        self._add_row(
+            page, "Profiles", "Add, rename, delete or test plot profiles.",
+            self._configure_plot,
+        )
 
-        self._updates_cb = QCheckBox("Check for updates on startup")
-        self._add_row("Auto-update", "Notify when a new version is available", self._updates_cb)
+    def _build_updates_and_privacy(self, page: QVBoxLayout) -> None:
+        self._check_updates = QCheckBox(UPDATE_CHECK_OPTION)
+        self._add_row(
+            page, "Updates",
+            f"Looks up whether a newer version exists: when {APP_NAME} starts, and every "
+            f"{UPDATE_CHECK_INTERVAL_HOURS} hours while it stays open. You decide whether "
+            "to install.",
+            self._check_updates,
+        )
 
-    # ── Layout Helpers ─────────────────────────────────────────────────
+        self._usage_statistics = QCheckBox("Share usage statistics")
+        what_is_sent = action_button("What is sent")
+        what_is_sent.clicked.connect(self._show_privacy_policy)
+        usage_row = QVBoxLayout()
+        tighten(usage_row)
+        usage_row.addWidget(self._usage_statistics)
+        usage_row.addWidget(what_is_sent, 0, Qt.AlignmentFlag.AlignLeft)
+        usage = QWidget()
+        usage.setLayout(usage_row)
+        self._add_row(
+            page, "Usage statistics",
+            "Off unless you switch it on. At most once a day: which features were used "
+            "and whether anything went wrong, with no identifier and nothing your "
+            "devices send.",
+            usage,
+        )
 
-    def _add_section_header(self, title: str) -> None:
-        lbl = QLabel(title)
-        font = lbl.font()
-        font.setPointSize(12)
-        font.setWeight(QFont.Weight.DemiBold)
-        lbl.setFont(font)
-        lbl.setContentsMargins(0, 12, 0, 4)
-        self._layout.addWidget(lbl)
+    def _build_advanced(self, page: QVBoxLayout) -> None:
+        page.addWidget(note(
+            "The defaults suit almost every machine. Change these only if you have a reason to."
+        ))
+        self._console_lines = self._number(
+            MAX_CONSOLE_LINES_MIN, MAX_CONSOLE_LINES_MAX, "lines", step=10_000,
+        )
+        self._add_row(
+            page, "Console line limit",
+            "Lines kept on screen. Older lines stay in the session and the log.",
+            self._console_lines,
+        )
+        self._refresh = self._number(
+            GUI_UPDATE_INTERVAL_MS_MIN, GUI_UPDATE_INTERVAL_MS_MAX, "ms",
+        )
+        self._add_row(
+            page, "Screen refresh",
+            "How often new lines are drawn. A larger value eases a slow machine.",
+            self._refresh,
+        )
+        self._flush = self._number(LOG_FLUSH_INTERVAL_MS_MIN, LOG_FLUSH_INTERVAL_MS_MAX, "ms")
+        self._add_row(
+            page, "Write to disk every",
+            "How long a received line may wait in memory before it is written.",
+            self._flush,
+        )
+        self._buffer = self._number(
+            LOG_BUFFER_MAX_ENTRIES_MIN, LOG_BUFFER_MAX_ENTRIES_MAX, "lines", step=5_000,
+        )
+        self._add_row(
+            page, "Lines that may wait for a slow disk",
+            "Beyond this, lines are counted as lost and marked in the log.",
+            self._buffer,
+        )
 
-    def _add_description(self, text: str) -> None:
-        lbl = QLabel(text)
-        lbl.setProperty("secondary", True)
-        lbl.setWordWrap(True)
-        f = lbl.font()
-        f.setPointSize(10)
-        lbl.setFont(f)
-        lbl.setContentsMargins(0, 0, 0, 4)
-        self._layout.addWidget(lbl)
+    # ── Public API ───────────────────────────────────────────────────────────
 
-    def _add_row(self, label: str, hint: str, widget: QWidget) -> None:
-        row = QWidget()
-        row_lay = QHBoxLayout(row)
-        row_lay.setContentsMargins(0, 4, 0, 4)
-        row_lay.setSpacing(12)
+    def show_page(self, name: str) -> None:
+        self._sidebar.setCurrentRow(self._page_rows[name])
 
-        label_col = QWidget()
-        label_col.setFixedWidth(_LABEL_W)
-        lc_lay = QVBoxLayout(label_col)
-        lc_lay.setContentsMargins(0, 0, 0, 0)
-        lc_lay.setSpacing(1)
+    @property
+    def current_page(self) -> str:
+        return PAGES[self._pages.currentIndex()]
 
-        name_lbl = QLabel(label)
-        name_font = name_lbl.font()
-        name_font.setPointSize(11)
-        name_lbl.setFont(name_font)
-        lc_lay.addWidget(name_lbl)
+    def setting_names(self) -> list[str]:
+        """The name of every setting shown, across all pages."""
+        return list(self._hints)
 
-        hint_lbl = QLabel(hint)
-        hint_lbl.setProperty("secondary", True)
-        hint_font = hint_lbl.font()
-        hint_font.setPointSize(9)
-        hint_lbl.setFont(hint_font)
-        hint_lbl.setWordWrap(True)
-        lc_lay.addWidget(hint_lbl)
+    # ── Load / save ──────────────────────────────────────────────────────────
 
-        row_lay.addWidget(label_col)
-        row_lay.addWidget(widget)
-        row_lay.addStretch()
-
-        self._layout.addWidget(row)
-
-    def _add_separator(self) -> None:
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Plain)
-        line.setFixedHeight(1)
-        line.setContentsMargins(0, 8, 0, 8)
-        self._layout.addWidget(line)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # LOAD / SAVE
-    # ══════════════════════════════════════════════════════════════════════
+    @staticmethod
+    def _select(combo: QComboBox, data: object) -> None:
+        index = combo.findData(data)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     def _load_values(self) -> None:
-        c = self._config
+        config = self._config
+        self._select(self._theme, normalise_preference(config.theme))
 
-        # Appearance
-        idx = self._theme_combo.findData(
-            ThemeID(c.theme) if c.theme else ThemeID.STUDIO_LIGHT
+        # A font that is saved but not installed is still shown, so that
+        # saving the dialog does not silently change it.
+        if self._font_family.findText(config.font_family) < 0:
+            self._font_family.addItem(config.font_family)
+        self._font_family.setCurrentText(config.font_family)
+        self._font_size.setValue(config.font_size)
+        stored_mode = next(
+            (mode for mode, word in _TIMESTAMP_STORED.items() if word == config.timestamp_mode),
+            TimestampMode.ABSOLUTE,
         )
-        if idx >= 0:
-            self._theme_combo.setCurrentIndex(idx)
+        self._select(self._timestamps, stored_mode)
+        self._severity_colours.setChecked(config.color_mode)
+        self._follow.setChecked(config.auto_scroll)
+        self._hide_blank.setChecked(config.hide_blank_lines)
 
-        # Display
-        fi = self._font_combo.findText(c.font_family)
-        if fi >= 0:
-            self._font_combo.setCurrentIndex(fi)
-        else:
-            self._font_combo.setEditText(c.font_family)
-        self._font_spin.setValue(c.font_size)
-        ti = self._ts_combo.findData(c.timestamp_mode)
-        if ti >= 0:
-            self._ts_combo.setCurrentIndex(ti)
-        self._color_cb.setChecked(c.color_mode)
-        self._scroll_cb.setChecked(c.auto_scroll)
+        if self._baud.findData(config.default_baud_rate) < 0:
+            self._baud.addItem(str(config.default_baud_rate), config.default_baud_rate)
+        self._select(self._baud, config.default_baud_rate)
 
-        # Serial
-        bi = self._baud_combo.findData(c.default_baud_rate)
-        if bi >= 0:
-            self._baud_combo.setCurrentIndex(bi)
+        self._log_folder.setText(config.default_log_directory)
+        self._log_format.set_value(config.default_log_format)
+        self._split.setValue(config.log_split_size_mb)
+        self._line_ending.set_value(config.log_line_ending)
 
-        # Storage
-        self._dir_input.setText(c.default_log_directory)
-        ei = self._format_combo.findData(c.default_export_format)
-        if ei >= 0:
-            self._format_combo.setCurrentIndex(ei)
+        self._load_plot_profiles()
+        self._check_updates.setChecked(config.check_updates_on_startup)
+        self._usage_statistics.setChecked(config.usage_statistics)
 
-        # Plot — read the saved default profile name and select it in
-        # the combo. The combo is populated by _build_plot_section
-        # before _load_values runs, so this is a straightforward
-        # findText. If the saved default doesn't exist (corruption,
-        # or the profile was deleted), PlotProfileStore.default_name
-        # falls back to "Auto-detect" and we select that.
-        default_name = self._plot_store.default_name
-        pi = self._plot_default_combo.findText(default_name)
-        if pi >= 0:
-            self._plot_default_combo.setCurrentIndex(pi)
+        self._console_lines.setValue(config.max_console_lines)
+        self._refresh.setValue(config.gui_update_interval_ms)
+        self._flush.setValue(config.log_flush_interval_ms)
+        self._buffer.setValue(config.log_buffer_max_entries)
 
-        # Performance
-        self._gui_spin.setValue(c.gui_update_interval_ms)
-        self._buffer_spin.setValue(c.log_buffer_max_entries)
-        self._flush_spin.setValue(c.log_flush_interval_ms)
-        self._lines_spin.setValue(c.max_console_lines)
-
-        # Updates
-        self._updates_cb.setChecked(c.check_updates_on_startup)
+    def _load_plot_profiles(self) -> None:
+        chosen = self._plot_profile.currentData() or self._plot_store.default_name
+        self._plot_profile.clear()
+        for name in self._plot_store.names():
+            self._plot_profile.addItem(name, name)
+        self._select(self._plot_profile, chosen)
+        if self._plot_profile.currentData() != chosen:
+            self._select(self._plot_profile, self._plot_store.default_name)
 
     def _apply(self) -> None:
-        c = self._config
+        config = self._config
+        config.theme = self._theme.currentData()
+        if config.theme != self._theme_manager.preference:
+            self._theme_manager.apply_preference(config.theme)
 
-        # Appearance
-        c.theme = self._theme_combo.currentData().value
-        theme_id = self._theme_combo.currentData()
-        if theme_id != self._theme_manager.current_theme:
-            self._theme_manager.apply_theme(theme_id)
+        config.font_family = self._font_family.currentText()
+        config.font_size = self._font_size.value()
+        config.timestamp_mode = _TIMESTAMP_STORED[self._timestamps.currentData()]
+        config.color_mode = self._severity_colours.isChecked()
+        config.auto_scroll = self._follow.isChecked()
+        config.hide_blank_lines = self._hide_blank.isChecked()
 
-        # Display
-        c.font_family = self._font_combo.currentText()
-        c.font_size = self._font_spin.value()
-        c.timestamp_mode = self._ts_combo.currentData()
-        c.color_mode = self._color_cb.isChecked()
-        c.auto_scroll = self._scroll_cb.isChecked()
+        config.default_baud_rate = self._baud.currentData()
 
-        # Serial
-        c.default_baud_rate = self._baud_combo.currentData()
+        config.default_log_directory = self._log_folder.text().strip()
+        config.default_log_format = self._log_format.value
+        config.log_split_size_mb = self._split.value()
+        config.log_line_ending = self._line_ending.value
 
-        # Storage
-        c.default_log_directory = self._dir_input.text().strip()
-        c.default_export_format = self._format_combo.currentData()
+        if self._plot_profile.currentData():
+            self._plot_store.set_default(self._plot_profile.currentData())
+        config.check_updates_on_startup = self._check_updates.isChecked()
+        config.usage_statistics = self._usage_statistics.isChecked()
 
-        # Plot — persist the user's chosen default profile so new tabs
-        # (and reconnects on existing tabs) boot with the right mode.
-        # Without this block, selecting a profile in the dropdown and
-        # clicking Save would silently discard the selection — the
-        # exact symptom seen in early reports where the combo always
-        # showed Auto-detect after reopening Preferences.
-        selected = self._plot_default_combo.currentData()
-        if selected:
-            self._plot_store.set_default(str(selected))
+        config.max_console_lines = self._console_lines.value()
+        config.gui_update_interval_ms = self._refresh.value()
+        config.log_flush_interval_ms = self._flush.value()
+        config.log_buffer_max_entries = self._buffer.value()
+        config.save()
 
-        # Performance
-        c.set("Performance", "gui_update_interval_ms", self._gui_spin.value())
-        c.set("Performance", "log_buffer_max_entries", self._buffer_spin.value())
-        c.set("Performance", "log_flush_interval_ms", self._flush_spin.value())
-        c.set("Performance", "max_console_lines", self._lines_spin.value())
+    # ── Actions ──────────────────────────────────────────────────────────
 
-        # Updates
-        c.check_updates_on_startup = self._updates_cb.isChecked()
-
-        c.save()
+    def _on_row_changed(self, row: int) -> None:
+        for index, name in enumerate(PAGES):
+            if self._page_rows[name] == row:
+                self._pages.setCurrentIndex(index)
 
     def _on_save(self) -> None:
         self._apply()
-        self._show_status("Preferences saved successfully")
-        QTimer.singleShot(800, self.accept)
+        self.accept()
 
-    def _on_reset(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Reset Preferences")
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setText("This will restore all settings to their default values.")
-        msg.setInformativeText("This action cannot be undone.")
-        cancel_btn = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        reset_btn = msg.addButton("Reset to Defaults", QMessageBox.ButtonRole.AcceptRole)
-        msg.setDefaultButton(cancel_btn)
-        msg.exec()
-        if msg.clickedButton() == reset_btn:
-            self._config.reset_to_defaults()
-            self._config.save()
-            self._load_values()
-            # Theme is NOT applied here — main_window._on_menu_preferences()
-            # handles theme sync, tag colors, and fonts after dialog closes.
-            # Applying theme mid-dialog would break the console display.
-            self._show_status("Settings restored to defaults")
+    def _on_restore(self) -> None:
+        if not confirm(
+            self, "Restore defaults", "Return every setting to its default?",
+            detail=(
+                "This happens at once and cannot be undone. Plot profiles, saved "
+                "commands, what each port was last used with and the update check "
+                "setting are kept."
+            ),
+            proceed="Restore defaults",
+        ):
+            return
+        self._config.reset_to_defaults()
+        self._config.save()
+        self._load_values()
 
-    def _browse_dir(self) -> None:
-        d = QFileDialog.getExistingDirectory(
-            self, "Select Log Directory", self._dir_input.text()
+    def _show_privacy_policy(self) -> None:
+        if not QDesktopServices.openUrl(QUrl(APP_PRIVACY_URL)):
+            Toast.warning(self, f"The page could not be opened: {APP_PRIVACY_URL}")
+
+    def _browse_log_folder(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose the log folder", self._log_folder.text(),
         )
-        if d:
-            self._dir_input.setText(d)
+        if chosen:
+            self._log_folder.setText(chosen)
 
-    def _show_status(self, msg: str) -> None:
-        self._status_label.setText(msg)
-        QTimer.singleShot(4000, lambda: self._status_label.setText(""))
+    def _on_configure_plot(self) -> None:
+        if self._open_plot_config is not None:
+            self._open_plot_config()
+            # Profiles may have been added, renamed or deleted.
+            self._load_plot_profiles()

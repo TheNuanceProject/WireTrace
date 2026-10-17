@@ -1,0 +1,13 @@
+{
+  "screens": [
+    {
+      "name": "WireTrace test display",
+      "x": 0,
+      "y": 0,
+      "width": 2560,
+      "height": 1440,
+      "logicalDpiX": 96,
+      "logicalDpiY": 96
+    }
+  ]
+}

@@ -30,7 +30,7 @@ If there's an issue for this, link it: "Closes #123" or "Addresses #456"
 ## Checklist
 
 - [ ] The code runs locally (`python main.py`)
-- [ ] The build still completes (`python build/build.py --platform {windows|macos|linux}`)
+- [ ] Tests and lints pass (`ruff check .`, `pytest`, `pytest tests_gui`)
 - [ ] No new runtime dependencies (or I've explained why they're needed)
 - [ ] Code style matches the surrounding files
 - [ ] I've updated the relevant documentation if needed

@@ -1,37 +1,40 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 """WireTrace live-plot data engine.
 
-Subscribes to the serial line stream and produces plot-ready data via:
-  1. Tag filter — only DATA-tagged lines reach the engine (severity
-     and command lines are excluded, mirroring CSV Option C).
-  2. Sample buffering — the first ``PLOT_AUTODETECT_SAMPLE_SIZE`` lines
+Receives the lines of a session and produces plot-ready data via:
+  1. Sample buffering: the first ``PLOT_AUTODETECT_SAMPLE_SIZE`` lines
      are accumulated together with their timestamps; once the buffer
      is full, the parser pipeline runs detection.
-  3. Hard cap — if no structure is detected after
-     ``PLOT_DETECTION_GIVE_UP_LINES`` DATA lines, the engine emits
+  2. Hard cap: if no structure is detected after
+     ``PLOT_DETECTION_GIVE_UP_LINES`` lines, the engine emits
      ``detection_failed`` and stays idle for the rest of the session.
-  4. Ring buffers — once columns are detected, every parsed line
+  3. Ring buffers: once columns are detected, every parsed line
      appends ``(timestamp, value)`` to per-column ring buffers
      (``PLOT_RING_BUFFER_SIZE`` points each, ``numpy.float64``).
-  5. Snapshot API — the view pulls ordered (oldest-first) (x, y)
+  4. Snapshot API: the view pulls ordered (oldest-first) (x, y)
      arrays via ``snapshot(col)`` on its redraw timer.
 
+Which lines are plotted:
+  A line is plotted if the detected parser can extract a value from
+  it. The severity tag plays no part, so readings that happen to
+  contain a word like "errors" are plotted like any other line.
+
+Activation:
+  Parsing costs time on every line, so it only runs while the engine
+  is active; the owning tab activates it while the plot panel is open.
+  An inactive engine only remembers the most recent lines. When it is
+  activated, detection starts again from those lines, so a plot opened
+  late shows data at once instead of waiting for a fresh sample.
+
 Time semantics:
-  - Each tab establishes ``session_start = time.perf_counter()`` on
-    its first DATA line. Every sample's X is ``time.perf_counter() -
-    session_start`` (always >= 0).
-  - ``perf_counter`` is used in preference to ``monotonic`` because
-    its resolution is uniformly sub-microsecond across Linux, macOS,
-    and Windows. ``monotonic`` on Windows has ~15.6 ms granularity,
-    which is fine for wall-clock measurements but collapses cluster-
-    arrival timestamps (e.g. when ParserPipeline replays its 50-line
-    buffer in a tight loop) into a single tick. Both clocks share the
-    same monotonic, no-wallclock-drift contract — only the resolution
-    differs.
-  - ``latest_x`` is the X of the most recently appended sample; it
-    DOES NOT drift past that value when data stops flowing. The view
-    uses ``latest_x`` (not the live monotonic clock) to anchor its
-    scrolling window, so the trace stays put when data stops.
+  - X is the time a line arrived, in seconds since the first line the
+    engine plotted. The arrival time is supplied by the caller (the
+    reader stamps every line), so the plot, the console, and the log
+    agree.
+  - ``latest_x`` is the X of the most recently appended sample. It does
+    not advance when data stops flowing. The view anchors its scrolling
+    window to ``latest_x``, not to a live clock, so the trace stays put
+    when data stops.
 
 Late-bind:
   PlotView is constructed lazily on first toggle. By the time it
@@ -40,54 +43,42 @@ Late-bind:
   in its ``__init__`` and rebuilds traces from existing buffers.
 
 Threading:
-  Both ``process`` (main-thread Qt slot from DeviceTab) and ``snapshot``
-  (main-thread redraw timer) run in the GUI thread. No cross-thread
-  shared state, no locks.
+  Both ``process`` and ``snapshot`` run in the GUI thread. No
+  cross-thread shared state, no locks.
 
-This module does NOT touch GUI, disk, serial, or any I/O.
+This module does not touch the GUI, the disk, the serial port or any other I/O.
 """
 
 from __future__ import annotations
 
 import enum
 import logging
-import time
+from collections import deque
+from datetime import datetime, timedelta
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal
 
-from app.constants import TAG_DATA
+from app.constants import (
+    PLOT_AUTODETECT_SAMPLE_SIZE,
+    PLOT_DETECTION_GIVE_UP_LINES,
+    PLOT_MAX_LINE_CHARACTERS,
+    PLOT_MAX_SERIES,
+    PLOT_RECENT_LINES_BUFFER_SIZE,
+    PLOT_REGEX_MAX_CONSECUTIVE_TIMEOUTS,
+    PLOT_RING_BUFFER_SIZE,
+)
 from core.plot_parsers import ParserPipeline, RegexParser
 
 logger = logging.getLogger(__name__)
 
 
-# ── Engine Configuration ─────────────────────────────────────────────────────
-
-#: Number of DATA-tagged lines collected before detection runs.
-PLOT_AUTODETECT_SAMPLE_SIZE = 50
-
-#: Hard cap on DATA-tagged lines processed without detection success.
-#: Beyond this, the engine gives up and emits ``detection_failed``.
-PLOT_DETECTION_GIVE_UP_LINES = 200
-
-#: Per-column ring buffer capacity in samples. At 8 traces x 10 000
-#: float64 x 2 (x, y) ~ 1.3 MB of plot memory per tab.
-PLOT_RING_BUFFER_SIZE = 10_000
-
-#: Number of recent DATA lines retained for the Configure Plot dialog
-#: to display as reference and to test patterns against. Independent of
-#: the auto-detect sample buffer because the dialog should work even
-#: when auto-detect already succeeded or gave up long ago.
-PLOT_RECENT_LINES_BUFFER_SIZE = 200
-
-
 class PlotMode(enum.Enum):
     """Engine operating mode.
 
-    AUTO  — ParserPipeline runs detection over a sample of lines and
+    AUTO : ParserPipeline runs detection over a sample of lines and
             picks JSON / KV / Delimited automatically.
-    MANUAL — User-declared regex with named groups; columns are known
+    MANUAL: User-declared regex with named groups; columns are known
              up-front from the pattern, no detection needed.
     """
 
@@ -98,22 +89,27 @@ class PlotMode(enum.Enum):
 class PlotEngine(QObject):
     """Owns the parser pipeline and per-column ring buffers.
 
-    One PlotEngine per DeviceTab. Constructed eagerly so it can buffer
-    detection samples from session start, even if the user opens the
-    plot panel later.
+    One PlotEngine per DeviceTab. Constructed eagerly so it can keep
+    the most recent lines from session start, even if the user opens
+    the plot panel later.
 
     Signals:
-        columns_detected(list):   Emitted once per session when the
-                                  parser pipeline detects structure.
-                                  Carries the list of column names.
+        columns_detected(list):   Emitted when the columns become known:
+                                  after detection in auto mode, and at
+                                  once in manual mode and after a reset.
+                                  Carries the column names.
         detection_failed():       Emitted if no structure is detected
                                   after the hard-cap line count.
+        pattern_stalled():        Emitted when the user's pattern ran out
+                                  of time on several lines in a row.
+                                  Plotting has stopped.
     """
 
     # ── Signals ──────────────────────────────────────────────────────────
 
     columns_detected = Signal(list)
     detection_failed = Signal()
+    pattern_stalled = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -130,25 +126,30 @@ class PlotEngine(QObject):
         self._lines_seen = 0
         self._detection_complete = False
         self._detection_failed_emitted = False
+        self._stalled = False
 
-        # Ring buffers — populated after columns_detected
+        # Ring buffers: populated after columns_detected
         self._columns: list[str] = []
         self._x: dict[str, np.ndarray] = {}
         self._y: dict[str, np.ndarray] = {}
         self._head: dict[str, int] = {}   # next-write index
         self._count: dict[str, int] = {}  # samples written so far
 
-        # Session timing — first DATA line establishes t=0.
-        self._session_start: float | None = None
+        # Session timing: the first plotted line establishes t=0.
+        self._session_start: datetime | None = None
         # Most recent sample's X. Stays put when no data flows; this
         # is what the view uses to anchor its window.
         self._latest_x: float = 0.0
 
-        # Rolling buffer of recent DATA lines, available to the
-        # Configure Plot dialog as live reference material and as the
-        # corpus for the Test button. Independent of the detection
-        # sample buffer because this stays alive across sessions.
-        self._recent_lines: list[str] = []
+        # The most recent lines with their arrival times, kept whether
+        # or not the engine is active.
+        self._recent: deque[tuple[str, datetime]] = deque(
+            maxlen=PLOT_RECENT_LINES_BUFFER_SIZE,
+        )
+
+        # A standalone engine parses everything it is given. The owning
+        # tab switches it off while the plot panel is closed.
+        self._active = True
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -177,6 +178,12 @@ class PlotEngine(QObject):
         return self._detection_failed_emitted
 
     @property
+    def stalled(self) -> bool:
+        """True if plotting stopped because the pattern kept running out
+        of time. Cleared when the configuration changes or on reset."""
+        return self._stalled
+
+    @property
     def active_parser_name(self) -> str | None:
         """Name of the parser that won detection, or None."""
         if self._mode == PlotMode.MANUAL:
@@ -188,24 +195,42 @@ class PlotEngine(QObject):
         """X coordinate of the most recently appended sample.
 
         This is what the view uses to anchor its scrolling window.
-        Critically, it does NOT advance past the last sample when data
-        stops flowing — so a paused or disconnected stream keeps its
-        view in place rather than drifting into empty space.
+        It does not advance past the last sample when data stops
+        flowing, so a paused or disconnected stream keeps its view in
+        place rather than drifting into empty space.
         """
         return self._latest_x
+
+    def time_of(self, x: float) -> datetime | None:
+        """When the line plotted at ``x`` was received; None before any was."""
+        if self._session_start is None:
+            return None
+        return self._session_start + timedelta(seconds=x)
 
     @property
     def has_any_data(self) -> bool:
         """True once at least one sample has been appended to a buffer."""
         return any(c > 0 for c in self._count.values())
 
-    def recent_lines(self) -> list[str]:
-        """Snapshot of the most recent DATA lines.
+    def set_active(self, active: bool) -> None:
+        """Switch parsing on or off.
 
-        Used by the Configure Plot dialog to display reference material
+        Switching on restarts detection from the most recent lines, so
+        the plot has data to show immediately.
+        """
+        if active == self._active:
+            return
+        self._active = active
+        if active:
+            self._restart_from_recent()
+
+    def recent_lines(self) -> list[str]:
+        """Snapshot of the most recent lines.
+
+        Used by the Configure plot dialog to display reference material
         and to evaluate user-entered patterns. Returned list is a copy.
         """
-        return list(self._recent_lines)
+        return [line for line, _ in self._recent]
 
     def set_auto_config(self) -> None:
         """Switch to AUTO mode and reset.
@@ -229,38 +254,21 @@ class PlotEngine(QObject):
             RegexParserError: pattern is empty, fails to compile,
                 or contains no named groups.
         """
-        # Construct first — raises before any state mutation if invalid.
+        # Construct first: raises before any state mutation if invalid.
         parser = RegexParser(pattern)
 
         self._mode = PlotMode.MANUAL
         self._regex_parser = parser
-
-        # Discard any auto-detect state: the pipeline isn't used in
-        # manual mode but might still hold sample data from before.
-        self._pipeline = ParserPipeline()
-        self._sample_buffer.clear()
-        self._lines_seen = 0
-        self._detection_failed_emitted = False
-        # Reset ring buffers — old data is from a different schema.
-        self._columns = []
-        self._x.clear()
-        self._y.clear()
-        self._head.clear()
-        self._count.clear()
-        self._session_start = None
-        self._latest_x = 0.0
-
-        # Initialise columns from the pattern's named groups.
-        self._init_columns(parser.columns)
-        self._detection_complete = True
-        self.columns_detected.emit(list(parser.columns))
+        # Old data is from a different schema; the recent lines stay,
+        # because they are what the pattern is tested against.
+        self._reset_runtime_state()
 
     def reset(self) -> None:
         """Reset the engine for a new session.
 
-        Discards detected structure, clears ring buffers, resets the
-        sample state. Safe to call mid-session — subsequent ``process``
-        calls run detection again from scratch.
+        Discards detected structure, clears ring buffers and the recent
+        lines, and resets the sample state. Safe to call mid-session:
+        subsequent ``process`` calls run detection again from scratch.
 
         Manual-mode behaviour:
           The user-declared regex pattern is preserved across reset.
@@ -268,36 +276,17 @@ class PlotEngine(QObject):
           pattern so the engineer doesn't have to re-enter it. To
           discard the pattern, switch to auto via ``set_auto_config()``.
         """
-        if self._mode == PlotMode.MANUAL and self._regex_parser is not None:
-            # Preserve the manual config; just clear runtime state.
-            preserved_parser = self._regex_parser
-            self._pipeline = ParserPipeline()
-            self._sample_buffer.clear()
-            self._lines_seen = 0
-            self._detection_failed_emitted = False
-            self._columns = []
-            self._x.clear()
-            self._y.clear()
-            self._head.clear()
-            self._count.clear()
-            self._session_start = None
-            self._latest_x = 0.0
-            self._recent_lines.clear()
-            # Re-initialise from the preserved pattern and re-fire the
-            # signal so the view rebuilds its traces for the new
-            # session.
-            self._regex_parser = preserved_parser
-            self._init_columns(preserved_parser.columns)
-            self._detection_complete = True
-            self.columns_detected.emit(list(preserved_parser.columns))
-            return
+        self._recent.clear()
+        self._reset_runtime_state()
 
-        # Auto mode: full reset
+    def _reset_runtime_state(self) -> None:
+        """Discard detection and buffers; keep mode, pattern, and recent lines."""
         self._pipeline = ParserPipeline()
         self._sample_buffer.clear()
         self._lines_seen = 0
         self._detection_complete = False
         self._detection_failed_emitted = False
+        self._stalled = False
         self._columns = []
         self._x.clear()
         self._y.clear()
@@ -305,7 +294,21 @@ class PlotEngine(QObject):
         self._count.clear()
         self._session_start = None
         self._latest_x = 0.0
-        self._recent_lines.clear()
+
+        if self._mode == PlotMode.MANUAL and self._regex_parser is not None:
+            # Columns come from the pattern, so they are known at once.
+            # Re-firing the signal lets the view rebuild its traces.
+            self._init_columns(self._regex_parser.columns)
+            self._detection_complete = True
+            self.columns_detected.emit(list(self._regex_parser.columns))
+
+    def _restart_from_recent(self) -> None:
+        """Run detection again, feeding the recent lines as the first input."""
+        self._reset_runtime_state()
+        for line, timestamp in list(self._recent):
+            if self._detection_failed_emitted or self._stalled:
+                break
+            self._process_guarded(line, timestamp)
 
     def clear_buffers(self) -> None:
         """Clear ring buffers but retain detected columns.
@@ -327,7 +330,7 @@ class PlotEngine(QObject):
 
         Called by the view's redraw timer. Returns empty arrays if the
         column isn't known or no samples have been written yet. The
-        returned arrays are copies — safe to retain.
+        returned arrays are copies: safe to retain.
         """
         if col not in self._x:
             return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
@@ -337,61 +340,54 @@ class PlotEngine(QObject):
             x = self._x[col][:count].copy()
             y = self._y[col][:count].copy()
         else:
-            # Buffer wrapped — reorder so oldest sample is first
+            # Buffer wrapped: reorder so oldest sample is first
             x = np.concatenate([self._x[col][head:], self._x[col][:head]])
             y = np.concatenate([self._y[col][head:], self._y[col][:head]])
         return x, y
 
-    # ── Slot ─────────────────────────────────────────────────────────────
+    # ── Input ────────────────────────────────────────────────────────────
 
-    @Slot(str, str)
-    def process(self, line: str, tag: str) -> None:
-        """Process one serial line. Main-thread Qt slot.
+    def process(self, line: str, timestamp: datetime) -> None:
+        """Process one line that arrived at ``timestamp``.
 
-        Filters non-DATA tags, accumulates samples for detection, then
-        extracts numeric values and appends to ring buffers. Exceptions
-        are logged and swallowed — a malformed line never propagates to
-        crash the tab.
+        Accumulates samples for detection, then extracts numeric values
+        and appends to ring buffers. Exceptions are logged and
+        swallowed: a malformed line never propagates to crash the tab.
         """
-        if tag != TAG_DATA:
+        line = line[:PLOT_MAX_LINE_CHARACTERS]
+        self._recent.append((line, timestamp))
+        if not self._active or self._detection_failed_emitted or self._stalled:
             return
-
-        # Track recent DATA lines for the Configure Plot dialog. This
-        # runs BEFORE any other early-return so the dialog has
-        # reference material even after auto-detect gave up — that's
-        # exactly when the user wants to switch to manual mode.
-        self._recent_lines.append(line)
-        if len(self._recent_lines) > PLOT_RECENT_LINES_BUFFER_SIZE:
-            del self._recent_lines[: len(self._recent_lines)
-                                     - PLOT_RECENT_LINES_BUFFER_SIZE]
-
-        if self._detection_failed_emitted:
-            return
-
-        try:
-            self._process_one(line)
-        except Exception:
-            logger.exception("Plot engine swallowed exception on line: %r", line)
+        self._process_guarded(line, timestamp)
 
     # ── Internal ─────────────────────────────────────────────────────────
 
-    def _process_one(self, line: str) -> None:
-        if self._session_start is None:
-            self._session_start = time.perf_counter()
+    def _process_guarded(self, line: str, timestamp: datetime) -> None:
+        try:
+            self._process_one(line, timestamp)
+        except Exception:
+            logger.exception("Plot engine swallowed exception on line: %r", line)
 
-        ts = time.perf_counter() - self._session_start
+    def _process_one(self, line: str, timestamp: datetime) -> None:
+        if self._session_start is None:
+            self._session_start = timestamp
+
+        ts = (timestamp - self._session_start).total_seconds()
         self._lines_seen += 1
 
-        # ── Manual mode: direct extract, no buffering or detection ──
+        # Manual mode: extract directly, with no buffering or detection.
         if self._mode == PlotMode.MANUAL:
             assert self._regex_parser is not None
             values = self._regex_parser.extract(line)
             if values:
                 self._append(values, ts)
             self._latest_x = ts
+            if self._regex_parser.consecutive_timeouts >= PLOT_REGEX_MAX_CONSECUTIVE_TIMEOUTS:
+                self._stalled = True
+                self.pattern_stalled.emit()
             return
 
-        # ── Auto mode: existing detection + extract flow ──
+        # Auto mode: detect first, then extract.
         if not self._detection_complete:
             self._sample_buffer.append((line, ts))
 
@@ -411,10 +407,11 @@ class PlotEngine(QObject):
             sample_lines = [buf_line for buf_line, _ in self._sample_buffer]
             cols = self._pipeline.detect(sample_lines)
             if cols is not None:
+                cols = cols[:PLOT_MAX_SERIES]
                 self._init_columns(cols)
                 self._detection_complete = True
                 self.columns_detected.emit(list(cols))
-                # Replay each buffered line at ITS OWN timestamp, so
+                # Replay each buffered line at its own timestamp, so
                 # the ring buffer reflects the actual arrival cadence.
                 for buf_line, buf_ts in self._sample_buffer:
                     values = self._pipeline.extract(buf_line)
@@ -428,7 +425,7 @@ class PlotEngine(QObject):
                 self.detection_failed.emit()
             return
 
-        # Detection complete — extract directly
+        # Detection complete: extract directly
         values = self._pipeline.extract(line)
         if values:
             self._append(values, ts)

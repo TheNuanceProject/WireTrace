@@ -1,68 +1,64 @@
-# SPDX-License-Identifier: MIT
-"""Atomic file-write primitive.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Writing a small file so that it is never seen half written.
 
-Writing config and other small state files with a bare ``open(path, "w")``
-truncates the destination *before* the new content is written. A crash,
-power loss, or disk-full condition between truncation and completion
-leaves the destination empty or partial — and the next load silently
-falls back to defaults, losing the user's preferences and saved plot
-profiles.
+Opening a file for writing empties it before the new content arrives. A
+crash, a power loss or a full disk in between leaves it empty or
+partial, and the next start would fall back to the defaults, losing the
+user's preferences and saved plot profiles.
 
 ``atomic_write_text`` removes that window. It writes to a temporary
-sibling, flushes and fsyncs that file to physical disk, then atomically
-renames it over the destination. ``os.replace`` is atomic at the
-filesystem level on both POSIX (``rename(2)``) and Windows
-(``MoveFileExW`` with ``MOVEFILE_REPLACE_EXISTING``), so any reader sees
-either the complete old file or the complete new file — never a partial
-one.
+file beside the destination, flushes and syncs it to the disk, then
+renames it over the destination. ``os.replace`` is atomic on POSIX
+(``rename(2)``) and on Windows (``MoveFileExW`` with
+``MOVEFILE_REPLACE_EXISTING``), so a reader sees either the complete old
+file or the complete new one, never a partial one.
 
-This module has no project dependencies and touches nothing but the
-filesystem, so it is safe to reuse from any persistence call site.
+This module depends on nothing else in the project.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import tempfile
 
-#: Suffix appended to the destination path to form the temporary sibling.
-#: The temp file lives in the *same directory* as the destination so the
-#: final ``os.replace`` stays on one filesystem — a cross-filesystem
-#: rename is not atomic and would raise.
+#: The temporary file is made in the same directory as the destination,
+#: so the final ``os.replace`` stays on one filesystem: a rename across
+#: filesystems is not atomic and would raise. Its name is unique, so no
+#: file that is already there is ever written over.
+_TMP_PREFIX = ".wiretrace-"
 _TMP_SUFFIX = ".tmp"
 
 
 def atomic_write_text(path: str, data: str, encoding: str = "utf-8") -> None:
-    """Atomically write ``data`` to ``path``.
+    """Write ``data`` to ``path``, all or nothing.
 
-    Writes to ``path + ".tmp"``, flushes and fsyncs it to physical disk,
-    then atomically replaces ``path`` with the temp file. On any failure
-    the destination is left untouched, and a best-effort attempt is made
-    to remove the temporary sibling.
+    The file is readable and writable by its owner only.
 
     Args:
         path: Destination file path.
         data: Full file contents to write.
-        encoding: Text encoding (default UTF-8).
+        encoding: Text encoding.
 
     Raises:
-        OSError: If the temp write, fsync, or replace fails. The
-            destination file is never left partially written; only the
-            temporary sibling can be affected, and it is cleaned up on
-            the failure path.
+        OSError: The temporary file could not be written, synced or
+            renamed. The destination is left exactly as it was, and the
+            temporary file is removed.
     """
-    tmp_path = path + _TMP_SUFFIX
+    descriptor, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(path) or os.curdir, prefix=_TMP_PREFIX, suffix=_TMP_SUFFIX,
+    )
     try:
-        with open(tmp_path, "w", encoding=encoding) as f:
+        with os.fdopen(descriptor, "w", encoding=encoding) as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
-    except OSError:
+    except BaseException:
         # ``os.replace`` is the only writer of ``path``, so a failure
-        # anywhere above leaves the destination exactly as it was. Remove
-        # the partial temp sibling; ignore cleanup errors so the original
-        # failure propagates unmasked.
+        # anywhere above leaves the destination exactly as it was. The
+        # temporary file is removed; an error in doing so is ignored, so
+        # that the original failure is the one reported.
         with contextlib.suppress(OSError):
             os.remove(tmp_path)
         raise

@@ -1,9 +1,9 @@
-# SPDX-License-Identifier: MIT
-"""Tests for the Configure Plot dialog's pure logic.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests for the Configure plot dialog's pure logic.
 
 The interactive Qt parts can't be exercised under the headless test
-stub, but the deterministic helpers — the numeric tokenizer and the
-capture-assistant's pattern generation — are testable. These tests
+stub, but the deterministic helpers: the numeric tokenizer and the
+capture-assistant's pattern generation: are testable. These tests
 pin the behaviour the user touches when they "Capture from sample".
 """
 
@@ -15,7 +15,7 @@ import re
 from ui.dialogs.plot_config_dialog import _CaptureAssistantDialog
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tokenizer — splits a sample line into (text, is_numeric) tokens
+# Tokenizer: splits a sample line into (text, is_numeric) tokens
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestTokenizer:
@@ -64,7 +64,7 @@ class TestTokenizer:
         assert nums == ["12", "34"]
 
     def test_preserves_offsets_for_round_trip(self):
-        """Concatenating tokens reproduces the original line —
+        """Concatenating tokens reproduces the original line:
         critical for pattern generation."""
         line = "[2026-05-10 23:23:25.997] RPM: 1461, V: 12.20"
         toks = _CaptureAssistantDialog._tokenize(line)
@@ -144,7 +144,7 @@ class TestGeneratedPatternMatches:
         assert "V" not in m.groupdict()
 
     def test_pattern_matches_other_lines_with_same_shape(self):
-        """The whole point — pattern generated from one sample matches
+        """The whole point: pattern generated from one sample matches
         future lines of the same shape."""
         sample = "RPM: 1461, V: 12.20"
         toks = _CaptureAssistantDialog._tokenize(sample)

@@ -1,0 +1,44 @@
+{
+  "supplements": {
+    "pyside6": ["LGPL-3.0-only.txt"],
+    "pyside6-essentials": ["LGPL-3.0-only.txt"],
+    "pyside6-addons": ["LGPL-3.0-only.txt"],
+    "shiboken6": ["LGPL-3.0-only.txt"],
+    "pyserial": ["pyserial.txt"]
+  },
+  "notes": {
+    "pyside6": "Qt for Python, and the Qt libraries it contains, are used under the GNU Lesser General Public License version 3. They are installed as separate shared libraries beside the application and can be replaced by other builds of the same libraries. Their source is at the address above. The third-party code within Qt is listed at https://doc.qt.io/qt-6/licenses-used-in-qt.html",
+    "cryptography": "The builds of this package contain OpenSSL, which is under the Apache License 2.0. The text of that licence is the Apache licence below."
+  },
+  "files": [
+    {
+      "name": "JetBrains Mono",
+      "license": "OFL-1.1",
+      "url": "https://www.jetbrains.com/lp/mono/",
+      "path": "resources/fonts/JetBrainsMono-OFL.txt"
+    },
+    {
+      "name": "Poppins",
+      "license": "OFL-1.1",
+      "url": "https://github.com/itfoundry/Poppins",
+      "path": "resources/fonts/Poppins-OFL.txt"
+    },
+    {
+      "name": "Lucide",
+      "license": "ISC AND MIT",
+      "url": "https://lucide.dev/",
+      "path": "resources/icons/Lucide-LICENSE.txt"
+    }
+  ],
+  "interpreter": {
+    "name": "Python",
+    "license": "PSF-2.0",
+    "url": "https://www.python.org/"
+  },
+  "build_runtime": {
+    "package": "nuitka",
+    "name": "Nuitka runtime",
+    "license": "AGPL-3.0-only with the Nuitka Runtime Library Exception 1.0",
+    "license_files": ["LICENSE-RUNTIME.txt"]
+  }
+}

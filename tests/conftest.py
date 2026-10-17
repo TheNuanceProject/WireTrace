@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Pytest shared setup.
 
 Installs lightweight stubs for PySide6 so that the pure-Python logic
@@ -6,8 +6,8 @@ in ``app``, ``core``, and ``updater`` can be tested without requiring
 the Qt binary stack in CI.
 
 The stubs cover only what the modules under test actually import. If
-a test exercises a Qt-specific widget or signal semantics, write it
-as a pytest-qt test instead — don't extend these stubs further.
+a test exercises a Qt widget or the behaviour of signals, write it in
+``tests_gui/``, which uses the real Qt: do not extend these stubs.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def _install_pyside6_stubs() -> None:
         return  # already installed (e.g., real PySide6 on a dev machine)
 
     class _Base:
-        """Base stub — accepts any init args, exposes any attribute."""
+        """Base stub: accepts any init args, exposes any attribute."""
 
         def __init__(self, *args, **kwargs):
             pass
@@ -74,13 +74,13 @@ def _install_pyside6_stubs() -> None:
         return _Signal()
 
     def _slot_decorator(*args, **kwargs):
-        # Qt's @Slot decorator — accept any args, return identity decorator
+        # Qt's @Slot decorator: accept any args, return identity decorator
         def _wrap(fn):
             return fn
 
         return _wrap
 
-    # QtCore — the bulk of what update_manager and log_engine need
+    # QtCore: the bulk of what the stubbed modules need
     qtcore = types.ModuleType("PySide6.QtCore")
     qtcore.QObject = _Base
     qtcore.QThread = _Base
@@ -92,7 +92,7 @@ def _install_pyside6_stubs() -> None:
     qtcore.Signal = _signal_factory
     qtcore.Slot = _slot_decorator
 
-    # QtWidgets — update_manager's UpdateDialog and PlotConfigDialog use these
+    # QtWidgets: update_manager's UpdateDialog and PlotConfigDialog use these
     qtwidgets = types.ModuleType("PySide6.QtWidgets")
     for name in (
         "QApplication", "QDialog", "QHBoxLayout", "QLabel",
@@ -108,7 +108,7 @@ def _install_pyside6_stubs() -> None:
     ):
         setattr(qtwidgets, name, _Base)
 
-    # QtGui — some modules transitively reference this
+    # QtGui: some modules transitively reference this
     qtgui = types.ModuleType("PySide6.QtGui")
     qtgui.QFont = _Base
     qtgui.QFontDatabase = _Base
@@ -125,10 +125,15 @@ def _install_pyside6_stubs() -> None:
     qtgui.QGuiApplication = _Base
     qtgui.QDesktopServices = _Base
 
-    # QtSerialPort — serial_manager uses this
+    # QtSerialPort: core.transport uses this
     qtserial = types.ModuleType("PySide6.QtSerialPort")
     qtserial.QSerialPort = _Base
     qtserial.QSerialPortInfo = _Base
+
+    # Any Qt name not listed above resolves to the base stub, so a module
+    # under test can import a Qt class this file has never heard of.
+    for module in (qtcore, qtwidgets, qtgui, qtserial):
+        module.__getattr__ = lambda name: _Base
 
     # Top-level PySide6 package
     ps = types.ModuleType("PySide6")

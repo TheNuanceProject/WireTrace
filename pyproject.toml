@@ -1,64 +1,52 @@
-# pyproject.toml — Central Tool Configuration
+# Configuration of the development tools: linting, type checking and
+# testing.
 #
-# Per PEP 518, PEP 621. This is the modern standard for Python project
-# configuration. Replaces scattered setup.cfg, .flake8, tox.ini, and
-# per-tool config files.
-#
-# WireTrace does not distribute as a Python package (it's a desktop
-# app, shipped as a compiled binary via Nuitka + Inno Setup). So this
-# file exists only to centralize developer tool configuration:
-# linting, formatting, type checking, and testing.
+# WireTrace is not distributed as a Python package. It is a desktop
+# application, compiled with Nuitka and shipped as a Windows installer,
+# an AppImage and a .deb, so this file holds no package metadata.
 
 # ═══════════════════════════════════════════════════════════════════
-# Ruff — Linter & Formatter
+# Ruff: Linter & Formatter
 # ═══════════════════════════════════════════════════════════════════
 # https://docs.astral.sh/ruff/
 #
-# Ruff replaces: black, flake8, isort, pyupgrade, pydocstyle, and more.
-# A single tool that's 10-100x faster than the alternatives combined.
+# Ruff does the work of flake8, isort, pyupgrade and more.
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 extend-exclude = [
     "build/dist",
-    "build/WireTrace.build",
-    "build/WireTrace.dist",
     "deployment",
     ".venv",
 ]
 
 [tool.ruff.lint]
 # Selected rule families:
-#   E, W  — pycodestyle (PEP 8 style errors & warnings)
-#   F     — pyflakes (unused imports, undefined names)
-#   I     — isort (import ordering)
-#   B     — flake8-bugbear (likely bugs)
-#   UP    — pyupgrade (modern syntax)
-#   SIM   — flake8-simplify (simplification hints)
-#   RUF   — ruff-specific rules
+#   E, W : pycodestyle (PEP 8 style errors & warnings)
+#   F    : pyflakes (unused imports, undefined names)
+#   I    : isort (import ordering)
+#   B    : flake8-bugbear (likely bugs)
+#   UP   : pyupgrade (modern syntax)
+#   SIM  : flake8-simplify (simplification hints)
+#   RUF  : ruff-specific rules
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
 
 ignore = [
-    # Line too long — handled by formatter; leftover long lines are usually
+    # Line too long: handled by formatter; leftover long lines are usually
     # string literals, URLs, or comments where wrapping hurts readability.
     "E501",
-    # Unused function arguments — many Qt slot signatures take arguments
-    # we don't use; renaming all to _ hurts readability.
-    "B007",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Build scripts use print() as the CLI interface — not a bug.
+# The build script adds the project folder to the import path first.
 "build/build.py" = ["E402"]
+# The release tools add the project folder to the import path first.
+"tools/release_*.py" = ["E402"]
+"tools/collect_licenses.py" = ["E402"]
+"tools/sign_manifest.py" = ["E402"]
 # __init__.py files intentionally re-export.
 "**/__init__.py" = ["F401"]
-# Splash screen docstring uses "×" to denote pixel dimensions
-# (480 × 320px) — a conventional typographic choice.
-"ui/splash_screen.py" = ["RUF002"]
-# Toast icon glyphs (ℹ, ✓, ⚠, ✕) are intentional single-character
-# unicode symbols rendered in the UI.
-"ui/widgets/toast.py" = ["RUF001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app", "core", "ui", "updater"]
@@ -90,25 +78,26 @@ addopts = [
     "-ra",              # Show summary of all non-passing tests
     "--strict-markers", # Error on unknown markers
     "--strict-config",  # Error on unknown config keys
-    # Disable pytest-qt if it's installed in the environment. Our
-    # tests use lightweight stubs in conftest.py instead of real
-    # PySide6 — pytest-qt would try to import QtTest on startup and
-    # fail against the stubs. When real Qt tests are added later,
-    # remove this flag and use pytest-qt normally.
+    # Disable pytest-qt if it's installed in the environment. The
+    # suite in tests/ uses lightweight stubs in conftest.py instead of
+    # real PySide6, and pytest-qt would try to import QtTest on startup
+    # and fail against the stubs. The real-Qt suite in tests_gui/
+    # (run explicitly: `python -m pytest tests_gui`) builds its own
+    # QApplication fixture and does not need the plugin either.
     "-p", "no:pytest_qt",
 ]
 filterwarnings = [
     "error",                               # Treat warnings as errors
-    "ignore::DeprecationWarning:PySide6",  # Qt internal deprecations — not ours
+    "ignore::DeprecationWarning:PySide6",  # Qt internal deprecations: not ours
 ]
 
 # ═══════════════════════════════════════════════════════════════════
-# Mypy — Optional Type Checking (opt-in)
+# Mypy: Optional Type Checking (opt-in)
 # ═══════════════════════════════════════════════════════════════════
 # https://mypy.readthedocs.io/
 #
-# Run manually: `mypy app core updater`
-# Not enforced in CI yet — Qt typing stubs are incomplete.
+# Run manually, after `pip install mypy`: `mypy app core updater`
+# Not enforced in CI yet: Qt typing stubs are incomplete.
 
 [tool.mypy]
 python_version = "3.10"

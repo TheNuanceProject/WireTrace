@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: MIT
-"""Tests for ``app.plot_config`` — PlotConfig + PlotProfileStore.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests for ``app.plot_config``: PlotConfig + PlotProfileStore.
 
 Covers:
   - PlotConfig dataclass validation
@@ -23,7 +23,7 @@ from app.plot_config import (
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fake ConfigManager — INI-shaped key-value store, no disk I/O
+# Fake ConfigManager: INI-shaped key-value store, no disk I/O
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FakeConfig:
@@ -113,7 +113,7 @@ class TestPlotConfigValidation:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotProfileStore — initial state
+# PlotProfileStore: initial state
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestProfileStoreInitial:
@@ -154,8 +154,8 @@ class TestProfileStoreInitial:
         assert "Motor" in names
 
     def test_auto_forced_to_auto_mode(self):
-        """If an attacker (or bug) wrote Auto-detect as manual, the
-        store quietly restores its auto contract."""
+        """If the settings file holds Auto-detect as manual, edited by
+        hand or written wrongly, the store restores it as automatic."""
         cfg = FakeConfig({
             "Plot": {
                 "profiles_json": '[{"name":"Auto-detect","mode":"manual",'
@@ -210,7 +210,7 @@ class TestProfileStoreInitial:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PlotProfileStore — write API
+# PlotProfileStore: write API
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestProfileStoreWrite:
@@ -319,7 +319,7 @@ class TestProfileStoreWrite:
         assert store.default_name == AUTO_PROFILE_NAME
 
     def test_round_trip_via_disk(self):
-        """Save state, construct a NEW store from the same config —
+        """Save state, construct a NEW store from the same config:
         all profiles and the default survive."""
         cfg = FakeConfig()
         store1 = PlotProfileStore(cfg)
@@ -334,11 +334,11 @@ class TestProfileStoreWrite:
         assert store2.get("BMS").pattern == r"(?P<v>[\d.]+)"
 
     def test_special_chars_in_profile_name_round_trip(self):
-        """Names with dots, spaces, parens, unicode — JSON encoding
+        """Names with dots, spaces, parens, unicode: JSON encoding
         handles all without escaping issues."""
         cfg = FakeConfig()
         store1 = PlotProfileStore(cfg)
-        weird = "Motor v3.2 (debug build) — éôü"
+        weird = "Motor v3.2 (debug build): éôü"
         store1.upsert(PlotConfig.manual(weird, r"(?P<x>\d+)"))
 
         store2 = PlotProfileStore(cfg)
@@ -348,6 +348,48 @@ class TestProfileStoreWrite:
 # ─────────────────────────────────────────────────────────────────────────────
 # Validation helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+class TestStoresSharingOneConfig:
+    """Every tab and the Preferences dialog has its own store."""
+
+    def test_a_profile_saved_by_one_store_is_seen_by_another(self):
+        config = FakeConfig()
+        first, second = PlotProfileStore(config), PlotProfileStore(config)
+
+        first.upsert(PlotConfig(name="Motor", mode="auto"))
+
+        assert "Motor" in second.names()
+        assert second.get("Motor") is not None
+
+    def test_saving_through_one_store_keeps_what_another_saved(self):
+        config = FakeConfig()
+        first, second = PlotProfileStore(config), PlotProfileStore(config)
+
+        first.upsert(PlotConfig(name="Motor", mode="auto"))
+        second.upsert(PlotConfig(name="Pump", mode="auto"))
+
+        assert PlotProfileStore(config).names()[1:] == ["Motor", "Pump"]
+
+    def test_default_and_deletion_reach_every_store(self):
+        config = FakeConfig()
+        first, second = PlotProfileStore(config), PlotProfileStore(config)
+        first.upsert(PlotConfig(name="Motor", mode="auto"))
+
+        assert second.set_default("Motor") is True
+        assert first.default_name == "Motor"
+
+        assert first.delete("Motor") is True
+        assert second.names() == [AUTO_PROFILE_NAME]
+        assert second.default_name == AUTO_PROFILE_NAME
+
+    def test_rename_through_a_store_that_was_idle_works(self):
+        config = FakeConfig()
+        first, second = PlotProfileStore(config), PlotProfileStore(config)
+        first.upsert(PlotConfig(name="Motor", mode="auto"))
+
+        assert second.rename("Motor", "Drive") is True
+        assert first.names()[1:] == ["Drive"]
+
 
 class TestNameValidation:
     def test_valid_simple(self):

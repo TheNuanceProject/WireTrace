@@ -21,9 +21,8 @@ body:
       label: What problem are you trying to solve?
       description: What's the underlying need? What are you trying to accomplish that WireTrace makes difficult or impossible today?
       placeholder: |
-        I'm capturing logs from three sensors that each emit 5,000 lines/sec.
-        I need to separate them into three CSV files for downstream analysis.
-        Right now I run three WireTrace windows, which is clumsy.
+        I capture overnight and want a log to start by itself when the device
+        sends a certain line. Right now I have to be there to choose Start log.
     validations:
       required: true
 
@@ -37,7 +36,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution (if you have one)
-      description: If you've thought about how to solve it, describe it here. Don't worry about being prescriptive — suggestions are welcome but not required.
+      description: If you've thought about how to solve it, describe it here. Suggestions are welcome but not required.
 
   - type: textarea
     id: alternatives

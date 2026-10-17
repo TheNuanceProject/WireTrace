@@ -1,6 +1,14 @@
-# WireTrace v2.0 Runtime Dependencies
+# WireTrace runtime dependencies
+#
+# These are the least versions the source runs with. A release is built
+# from requirements-release.txt, which pins every package to an exact
+# version and hash. Regenerate it after a change here:
+#
+#   uv pip compile requirements.txt requirements-build.txt --universal \
+#       --python-version 3.12 --generate-hashes -o requirements-release.txt
 PySide6>=6.6.0          # Qt6 framework (includes QSerialPort)
 pyserial>=3.5           # Fallback serial library
-pyqtgraph>=0.13         # Live-plot rendering (Qt-native, GPU-accelerated)
+pyqtgraph>=0.13         # Live-plot rendering
 numpy>=1.24             # Plot ring buffers (required by pyqtgraph)
 regex>=2024.0.0         # Timeout-capable regex for user-supplied plot patterns (ReDoS guard)
+cryptography>=42.0      # Verifies the signature of the update manifest (Ed25519)

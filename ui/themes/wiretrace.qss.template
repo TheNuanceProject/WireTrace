@@ -1,0 +1,900 @@
+/* SPDX-License-Identifier: MIT
+
+   WireTrace stylesheet template. One file serves both themes.
+
+   It follows the Nuance Design Language. Nothing here is a literal
+   colour, size, corner radius, text size or weight. Every such value is a
+   placeholder filled in from ui/themes/tokens.py:
+
+     {{name}}             a colour of the active palette
+     {{m.name}}           a size from Metrics, in logical pixels
+     {{f.name}}           the text size of a type style, in logical pixels
+     {{w.name}}           a font weight
+     {{icon:name:role}}   path to an icon drawn in a palette colour
+
+   A test fails the build if a literal colour, size or weight appears in
+   this file.
+
+   Lines are one pixel. Two pixels mark "this one": the focus ring, the
+   active tab and the selected row. A stylesheet cannot draw a ring
+   outside a shape, so a focused control's outline becomes two pixels
+   wide, and its padding gives back the extra pixel, so nothing moves. */
+
+/* ── Base ──────────────────────────────────────────────────────────────── */
+
+QWidget {
+    color: {{text}};
+}
+
+QWidget[secondary="true"] {
+    color: {{text_secondary}};
+}
+
+QMainWindow, QDialog, QMessageBox {
+    background-color: {{paper}};
+}
+
+QWidget:disabled {
+    color: {{muted}};
+}
+
+/* ── Menu bar and menus ────────────────────────────────────────────────── */
+
+QMenuBar {
+    background-color: {{paper}};
+    color: {{text}};
+    border-bottom: {{m.border}}px solid {{divider}};
+    padding: {{m.space_half}}px {{m.space_1}}px;
+    spacing: {{m.space_half}}px;
+}
+
+QMenuBar::item {
+    background-color: transparent;
+    padding: {{m.space_1}}px {{m.space_3}}px;
+    border-radius: {{m.radius_sm}}px;
+}
+
+QMenuBar::item:selected {
+    background-color: {{divider}};
+}
+
+/* A menu floats: a medium radius, a divider edge, and rows inset so their
+   smaller radius is concentric with it. */
+
+QMenu {
+    background-color: {{paper}};
+    color: {{text}};
+    border: {{m.border}}px solid {{divider}};
+    border-radius: {{m.radius_md}}px;
+    padding: {{m.menu_inset}}px 0px;
+}
+
+QMenu::item {
+    padding: {{m.row_padding}}px {{m.space_6}}px;
+    margin: 0px {{m.menu_inset}}px;
+    border-radius: {{m.radius_sm}}px;
+}
+
+QMenu::item:selected {
+    background-color: {{divider}};
+}
+
+QMenu::item:disabled {
+    color: {{muted}};
+}
+
+QMenu::separator {
+    height: {{m.border}}px;
+    background-color: {{divider}};
+    margin: {{m.space_1}}px {{m.space_3}}px;
+}
+
+QMenu::indicator {
+    width: {{m.indicator}}px;
+    height: {{m.indicator}}px;
+    margin-left: {{m.space_2}}px;
+    border-radius: {{m.radius_sm}}px;
+}
+
+QMenu::indicator:unchecked {
+    image: none;
+    background-color: {{paper}};
+    border: {{m.border}}px solid {{edge}};
+}
+
+QMenu::indicator:checked {
+    image: url("{{icon:checkmark:paper}}");
+    background-color: {{text}};
+    border: {{m.border}}px solid {{text}};
+}
+
+/* ── Tabs ──────────────────────────────────────────────────────────────── */
+
+QTabWidget, QTabBar {
+    background-color: {{surface}};
+}
+
+QTabWidget::pane {
+    border: none;
+    border-top: {{m.border}}px solid {{divider}};
+    background-color: {{paper}};
+    top: 0px;
+}
+
+/* A tab is the tab bar's height: its marker line, then its content. */
+
+QTabBar::tab {
+    background-color: transparent;
+    color: {{text_secondary}};
+    border: none;
+    border-top: {{m.mark}}px solid transparent;
+    height: {{m.tab_content_height}}px;
+    padding: 0px {{m.space_3}}px;
+    margin-right: {{m.border}}px;
+    min-width: {{m.tab_min_width}}px;
+}
+
+QTabBar::tab:selected {
+    background-color: {{paper}};
+    color: {{text}};
+    border-top: {{m.mark}}px solid {{accent_strong}};
+}
+
+QTabBar::tab:hover:!selected {
+    color: {{text}};
+}
+
+QTabBar::close-button {
+    image: url("{{icon:tab_close:text_secondary}}");
+    subcontrol-position: right;
+    padding: {{m.space_half}}px;
+    border-radius: {{m.radius_sm}}px;
+}
+
+QTabBar::close-button:hover {
+    image: url("{{icon:tab_close:paper}}");
+    background-color: {{error}};
+}
+
+QLineEdit#tabNameEditor {
+    padding: 0px {{m.space_1}}px;
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────────────
+   One rule for size. A button is regular (control-md) or compact
+   (control-sm, property compact="true", for the rows inside the working
+   area). Each size has one height, one side padding and one least width.
+   A button that carries only an icon is a square of its size's height.
+   Joined buttons share one width. The least width is part of the size a
+   button asks for (ui/widgets/button.py), so a layout cannot squeeze a
+   button below its text.
+
+   Secondary (the default): paper fill, edge outline.
+   Primary (property primary="true"): filled with the text colour. One per
+   screen or dialog.
+   Checked (a switched-on tool): accent-strong outline. */
+
+QPushButton {
+    background-color: {{paper}};
+    color: {{text}};
+    border: {{m.border}}px solid {{edge}};
+    border-radius: {{m.radius_sm}}px;
+    padding: 0px {{m.control_padding}}px;
+    min-height: {{m.control_content_height}}px;
+    max-height: {{m.control_content_height}}px;
+    font-weight: {{w.medium}};
+    icon-size: {{m.icon}}px;
+}
+
+QPushButton[compact="true"] {
+    padding: 0px {{m.control_padding_compact}}px;
+    min-height: {{m.control_content_height_compact}}px;
+    max-height: {{m.control_content_height_compact}}px;
+}
+
+QPushButton:hover {
+    background-color: {{divider}};
+}
+
+QPushButton:pressed {
+    background-color: {{divider}};
+    border-color: {{text}};
+}
+
+QPushButton:checked {
+    border-color: {{accent_strong}};
+}
+
+QPushButton:focus {
+    border: {{m.mark}}px solid {{accent_strong}};
+    padding: 0px {{m.control_padding_focus}}px;
+    min-height: {{m.control_focus_height}}px;
+    max-height: {{m.control_focus_height}}px;
+}
+
+QPushButton[compact="true"]:focus {
+    padding: 0px {{m.control_padding_compact_focus}}px;
+    min-height: {{m.control_focus_height_compact}}px;
+    max-height: {{m.control_focus_height_compact}}px;
+}
+
+QPushButton:disabled {
+    background-color: {{surface}};
+    color: {{muted}};
+    border-color: {{divider}};
+}
+
+QPushButton[primary="true"] {
+    background-color: {{text}};
+    color: {{paper}};
+    border-color: {{text}};
+}
+
+QPushButton[primary="true"]:hover {
+    background-color: {{primary_hover}};
+    border-color: {{primary_hover}};
+}
+
+QPushButton[primary="true"]:pressed {
+    background-color: {{primary_pressed}};
+    border-color: {{primary_pressed}};
+}
+
+QPushButton[primary="true"]:focus {
+    border-color: {{accent_strong}};
+}
+
+QPushButton[primary="true"]:disabled {
+    background-color: {{surface}};
+    color: {{muted}};
+    border-color: {{divider}};
+}
+
+/* Two buttons joined into one control: Text | HEX. */
+
+QPushButton[segment="left"] {
+    border-top-right-radius: 0px;
+    border-bottom-right-radius: 0px;
+}
+
+QPushButton[segment="right"] {
+    border-top-left-radius: 0px;
+    border-bottom-left-radius: 0px;
+    border-left: none;
+}
+
+QPushButton[segment="left"], QPushButton[segment="right"] {
+    color: {{text_secondary}};
+    font-weight: {{w.regular}};
+}
+
+QPushButton[segment="left"]:checked, QPushButton[segment="right"]:checked {
+    background-color: {{divider}};
+    border-color: {{edge}};
+    color: {{text}};
+    font-weight: {{w.medium}};
+}
+
+/* Buttons that only carry an icon. */
+
+QPushButton#iconButton {
+    padding: 0px;
+    min-width: {{m.control_content_height}}px;
+    max-width: {{m.control_content_height}}px;
+}
+
+QPushButton#iconButton:focus {
+    padding: 0px;
+    min-width: {{m.control_focus_height}}px;
+    max-width: {{m.control_focus_height}}px;
+}
+
+QPushButton#iconButton[compact="true"] {
+    min-width: {{m.control_content_height_compact}}px;
+    max-width: {{m.control_content_height_compact}}px;
+}
+
+QPushButton#iconButton[compact="true"]:focus {
+    min-width: {{m.control_focus_height_compact}}px;
+    max-width: {{m.control_focus_height_compact}}px;
+}
+
+QPushButton#flatIconButton {
+    background-color: transparent;
+    border: none;
+    padding: 0px;
+    min-width: {{m.control_height}}px;
+    max-width: {{m.control_height}}px;
+    min-height: {{m.control_height}}px;
+    max-height: {{m.control_height}}px;
+}
+
+QPushButton#flatIconButton[compact="true"] {
+    min-width: {{m.control_height_compact}}px;
+    max-width: {{m.control_height_compact}}px;
+    min-height: {{m.control_height_compact}}px;
+    max-height: {{m.control_height_compact}}px;
+}
+
+QPushButton#flatIconButton:hover {
+    background-color: {{divider}};
+}
+
+QPushButton#flatIconButton:focus {
+    border: {{m.mark}}px solid {{accent_strong}};
+    min-width: {{m.control_focus_height}}px;
+    max-width: {{m.control_focus_height}}px;
+    min-height: {{m.control_focus_height}}px;
+    max-height: {{m.control_focus_height}}px;
+}
+
+QPushButton#flatIconButton[compact="true"]:focus {
+    min-width: {{m.control_focus_height_compact}}px;
+    max-width: {{m.control_focus_height_compact}}px;
+    min-height: {{m.control_focus_height_compact}}px;
+    max-height: {{m.control_focus_height_compact}}px;
+}
+
+QPushButton::menu-indicator {
+    image: none;
+    width: 0px;
+}
+
+/* ── Text fields ───────────────────────────────────────────────────────── */
+
+QLineEdit, QSpinBox, QComboBox {
+    background-color: {{paper}};
+    color: {{text}};
+    border: {{m.border}}px solid {{edge}};
+    border-radius: {{m.radius_sm}}px;
+    padding: 0px {{m.field_padding}}px;
+    min-height: {{m.control_content_height}}px;
+    max-height: {{m.control_content_height}}px;
+    selection-background-color: {{selection}};
+    selection-color: {{text}};
+}
+
+QLineEdit[compact="true"], QSpinBox[compact="true"], QComboBox[compact="true"],
+QComboBox[compact="true"] QLineEdit {
+    min-height: {{m.control_content_height_compact}}px;
+    max-height: {{m.control_content_height_compact}}px;
+}
+
+/* The text field inside an editable drop-down or a number field has no
+   outline of its own. */
+
+QComboBox QLineEdit, QSpinBox QLineEdit {
+    border: none;
+    background-color: transparent;
+    padding: 0px;
+}
+
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QComboBox:on {
+    border: {{m.mark}}px solid {{accent_strong}};
+    padding: 0px {{m.field_padding_focus}}px;
+    min-height: {{m.control_focus_height}}px;
+    max-height: {{m.control_focus_height}}px;
+}
+
+QLineEdit[compact="true"]:focus, QSpinBox[compact="true"]:focus,
+QComboBox[compact="true"]:focus, QComboBox[compact="true"]:on {
+    min-height: {{m.control_focus_height_compact}}px;
+    max-height: {{m.control_focus_height_compact}}px;
+}
+
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {
+    background-color: {{surface}};
+    color: {{muted}};
+    border-color: {{divider}};
+}
+
+QLineEdit[readOnly="true"] {
+    background-color: {{surface}};
+}
+
+QLineEdit[invalid="true"], QLineEdit[invalid="true"]:focus {
+    border-color: {{error}};
+}
+
+QTextEdit, QPlainTextEdit, QTextBrowser, QAbstractItemView {
+    background-color: {{paper}};
+    color: {{text}};
+    border: {{m.border}}px solid {{edge}};
+    border-radius: {{m.radius_sm}}px;
+    selection-background-color: {{selection}};
+    selection-color: {{text}};
+}
+
+/* ── Drop-down ─────────────────────────────────────────────────────────── */
+
+QComboBox, QComboBox:focus, QComboBox:on {
+    padding-right: {{m.space_6}}px;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: {{m.space_6}}px;
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+}
+
+QComboBox::down-arrow {
+    image: url("{{icon:chevron_down:text_secondary}}");
+    width: {{m.icon}}px;
+    height: {{m.icon}}px;
+    margin-right: {{m.space_2}}px;
+}
+
+QComboBox::down-arrow:disabled {
+    image: url("{{icon:chevron_down:muted}}");
+}
+
+/* The open list floats, like a menu. */
+
+QComboBox QAbstractItemView {
+    border: {{m.border}}px solid {{divider}};
+    border-radius: {{m.radius_md}}px;
+    selection-background-color: {{divider}};
+    selection-color: {{text}};
+    padding: {{m.menu_inset}}px;
+    outline: none;
+}
+
+QComboBox QAbstractItemView::item {
+    padding: {{m.row_padding}}px {{m.space_2}}px;
+    border-radius: {{m.radius_sm}}px;
+}
+
+/* ── Number field ──────────────────────────────────────────────────────── */
+
+QSpinBox::up-button, QSpinBox::down-button {
+    width: {{m.indicator}}px;
+    border: none;
+    background: transparent;
+}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background-color: {{divider}};
+}
+
+QSpinBox::up-arrow {
+    image: url("{{icon:chevron_up:text_secondary}}");
+    width: {{m.icon}}px;
+    height: {{m.icon}}px;
+}
+
+QSpinBox::down-arrow {
+    image: url("{{icon:chevron_down:text_secondary}}");
+    width: {{m.icon}}px;
+    height: {{m.icon}}px;
+}
+
+/* ── Console ───────────────────────────────────────────────────────────── */
+
+QAbstractScrollArea#consoleView {
+    background-color: {{paper}};
+    border: none;
+}
+
+/* ── Scroll bars ───────────────────────────────────────────────────────── */
+
+QScrollBar:vertical {
+    background-color: transparent;
+    width: {{m.scrollbar}}px;
+    border: none;
+}
+
+QScrollBar:horizontal {
+    background-color: transparent;
+    height: {{m.scrollbar}}px;
+    border: none;
+}
+
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background-color: {{edge}};
+    border-radius: {{m.scrollbar_round}}px;
+}
+
+QScrollBar::handle:vertical { min-height: {{m.scrollbar_handle_min}}px; }
+QScrollBar::handle:horizontal { min-width: {{m.scrollbar_handle_min}}px; }
+
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background-color: {{text_secondary}};
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* ── Tooltips ──────────────────────────────────────────────────────────── */
+
+QToolTip {
+    background-color: {{text}};
+    color: {{paper}};
+    border: none;
+    border-radius: {{m.radius_sm}}px;
+    padding: {{m.space_1}}px {{m.space_2}}px;
+    font-size: {{f.caption}}px;
+}
+
+/* ── Check boxes and radio buttons ─────────────────────────────────────── */
+
+QCheckBox, QRadioButton {
+    spacing: {{m.space_2}}px;
+    background-color: transparent;
+    min-height: {{m.target_min}}px;
+}
+
+QCheckBox::indicator, QRadioButton::indicator {
+    width: {{m.indicator}}px;
+    height: {{m.indicator}}px;
+    border: {{m.border}}px solid {{edge}};
+    background-color: {{paper}};
+}
+
+QCheckBox::indicator { border-radius: {{m.radius_sm}}px; }
+QRadioButton::indicator { border-radius: {{m.indicator_round}}px; }
+
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: {{text}};
+}
+
+QCheckBox::indicator:checked {
+    image: url("{{icon:checkmark:paper}}");
+    background-color: {{text}};
+    border-color: {{text}};
+}
+
+QRadioButton::indicator:checked {
+    image: url("{{icon:radio_dot:text}}");
+    border-color: {{text}};
+}
+
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    background-color: {{surface}};
+    border-color: {{divider}};
+}
+
+/* The focus ring is the two-pixel mark; the indicator keeps its size.
+   After the checked rules, so a chosen box shows its focus too. */
+QCheckBox::indicator:focus, QRadioButton::indicator:focus {
+    border: {{m.mark}}px solid {{accent_strong}};
+    width: {{m.indicator_focus}}px;
+    height: {{m.indicator_focus}}px;
+}
+
+/* ── Frames, groups, progress ──────────────────────────────────────────── */
+
+QFrame[frameShape="4"], QFrame[frameShape="5"] {
+    color: {{divider}};
+}
+
+QFrame#dialogFooter {
+    background-color: {{surface}};
+    border: none;
+    border-top: {{m.border}}px solid {{divider}};
+}
+
+/* The list of pages in Preferences: the chosen one filled, with its
+   two-pixel bar. */
+
+QListWidget#sidebar {
+    background-color: {{surface}};
+    border: none;
+    border-right: {{m.border}}px solid {{divider}};
+    border-radius: 0px;
+    padding: {{m.space_2}}px;
+    outline: none;
+}
+
+QListWidget#sidebar::item {
+    padding: 0px {{m.space_3}}px;
+    border-left: {{m.mark}}px solid transparent;
+    border-radius: {{m.radius_sm}}px;
+    color: {{text_secondary}};
+}
+
+QListWidget#sidebar::item:hover {
+    color: {{text}};
+}
+
+QListWidget#sidebar::item:selected {
+    background-color: {{divider}};
+    border-left: {{m.mark}}px solid {{accent_strong}};
+    color: {{text}};
+}
+
+QLabel#filePreview {
+    background-color: {{surface}};
+    border: {{m.border}}px solid {{divider}};
+    border-radius: {{m.radius_sm}}px;
+    padding: {{m.space_2}}px {{m.space_3}}px;
+}
+
+QGroupBox {
+    font-weight: {{w.medium}};
+    border: {{m.border}}px solid {{divider}};
+    border-radius: {{m.radius_sm}}px;
+    margin-top: {{m.space_3}}px;
+    padding-top: {{m.space_4}}px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: {{m.space_2}}px;
+    padding: 0px {{m.space_1}}px;
+}
+
+QProgressBar {
+    background-color: {{divider}};
+    border: none;
+    border-radius: {{m.radius_xs}}px;
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background-color: {{accent}};
+    border-radius: {{m.radius_xs}}px;
+}
+
+QScrollArea {
+    background-color: transparent;
+    border: none;
+}
+
+/* A scrolled page shows the background of the window it is in. */
+QScrollArea > QWidget#qt_scrollarea_viewport,
+QScrollArea > QWidget#qt_scrollarea_viewport > QWidget {
+    background-color: transparent;
+}
+
+QLabel {
+    background-color: transparent;
+}
+
+/* ── Plot panel ────────────────────────────────────────────────────────── */
+
+QWidget#plotView, QWidget#plotContent {
+    background-color: {{paper}};
+}
+
+QFrame#plotToolbar {
+    background-color: {{surface}};
+    border: none;
+    border-bottom: {{m.border}}px solid {{divider}};
+}
+
+QScrollArea#plotValues {
+    background-color: {{paper}};
+    border: none;
+    border-right: {{m.border}}px solid {{divider}};
+}
+
+QFrame#plotValueRow {
+    border: none;
+    border-bottom: {{m.border}}px solid {{divider}};
+}
+
+QLabel#plotValueLast {
+    font-weight: {{w.medium}};
+}
+
+QFrame#plotMeasure {
+    background-color: {{surface}};
+    border: none;
+    border-top: {{m.border}}px solid {{divider}};
+}
+
+QScrollArea#plotMeasureScroll,
+QWidget#plotMeasureGrid {
+    background: transparent;
+    border: none;
+}
+
+QLabel#plotMeasureHeading {
+    font-weight: {{w.medium}};
+}
+
+/* The card under the pointer floats over the chart, like a menu. */
+QFrame#plotReadout {
+    background-color: {{surface}};
+    border: {{m.border}}px solid {{divider}};
+    border-radius: {{m.radius_md}}px;
+}
+
+QFrame#plotFooter {
+    background-color: {{surface}};
+    border: none;
+    border-top: {{m.border}}px solid {{divider}};
+}
+
+QFrame#plotFooter QLabel {
+    font-size: {{f.caption}}px;
+}
+
+QLabel#plotPlaceholderLabel {
+    color: {{text_secondary}};
+}
+
+QSplitter#consolePlotSplitter::handle {
+    background-color: {{surface}};
+    border-top: {{m.border}}px solid {{divider}};
+    border-bottom: {{m.border}}px solid {{divider}};
+}
+
+QSplitter#consolePlotSplitter::handle:hover {
+    background-color: {{accent}};
+}
+
+QLabel#captureSourceBox {
+    background-color: {{surface}};
+    color: {{text}};
+    border: {{m.border}}px solid {{divider}};
+    border-radius: {{m.radius_sm}}px;
+    padding: {{m.space_3}}px;
+}
+
+/* ── Rows of a tab ─────────────────────────────────────────────────────── */
+
+QFrame#tabToolbar {
+    background-color: {{surface}};
+    border-bottom: {{m.border}}px solid {{divider}};
+}
+
+QFrame#consoleHeader, QWidget#searchBar {
+    background-color: {{paper}};
+    border-bottom: {{m.border}}px solid {{divider}};
+}
+
+QFrame#commandBar {
+    background-color: {{surface}};
+    border-top: {{m.border}}px solid {{divider}};
+}
+
+QLabel#commandPrompt {
+    color: {{command}};
+}
+
+QFrame#deviceStatusBar {
+    background-color: {{surface}};
+    border-top: {{m.border}}px solid {{divider}};
+}
+
+QFrame#deviceStatusBar QLabel {
+    font-size: {{f.caption}}px;
+}
+
+/* Level buttons above the console. The chosen one is filled. */
+
+QPushButton[level] {
+    background-color: transparent;
+    color: {{text_secondary}};
+    border: {{m.border}}px solid transparent;
+    font-weight: {{w.regular}};
+}
+
+QPushButton[level]:hover {
+    border-color: {{edge}};
+}
+
+QPushButton[level]:checked {
+    background-color: {{divider}};
+    color: {{text}};
+    font-weight: {{w.medium}};
+}
+
+/* After the rules above, which set the outline of these buttons, so the
+   focus ring is never hidden by them. */
+
+QPushButton[level]:focus, QPushButton[segment="left"]:focus {
+    border: {{m.mark}}px solid {{accent_strong}};
+}
+
+QPushButton[segment="right"]:focus {
+    border: {{m.mark}}px solid {{accent_strong}};
+    border-left: none;
+}
+
+QPushButton[level="error"], QPushButton[level="error"]:checked { color: {{error}}; }
+QPushButton[level="warning"], QPushButton[level="warning"]:checked { color: {{warning}}; }
+QPushButton[level="info"], QPushButton[level="info"]:checked { color: {{info}}; }
+
+/* ── Titles and labels ─────────────────────────────────────────────────── */
+
+/* Headings are never heavy: the regular weight, at the title sizes. */
+
+QLabel#pageTitle {
+    font-size: {{f.title-sm}}px;
+    font-weight: {{w.regular}};
+}
+
+QLabel#displayTitle {
+    font-size: {{f.title}}px;
+    font-weight: {{w.regular}};
+}
+
+/* Labels that must stand out in a dense row. */
+
+QLabel#sectionTitle, QLabel#shortcutKeys, QLabel#portName, QLabel#bannerTitle {
+    font-weight: {{w.medium}};
+}
+
+QLabel[small="true"] {
+    font-size: {{f.caption}}px;
+}
+
+/* ── First screen ──────────────────────────────────────────────────────── */
+
+QScrollArea#portScroll, QFrame#portList {
+    background-color: {{paper}};
+    border: {{m.border}}px solid {{edge}};
+    border-radius: {{m.radius_sm}}px;
+}
+
+QFrame#portRow {
+    background-color: {{paper}};
+    border: none;
+    border-left: {{m.mark}}px solid transparent;
+    border-bottom: {{m.border}}px solid {{divider}};
+}
+
+QFrame#portRow:hover {
+    background-color: {{surface}};
+}
+
+QFrame#portRow[selected="true"] {
+    background-color: {{divider}};
+    border-left: {{m.mark}}px solid {{accent_strong}};
+}
+
+QFrame#portRow:disabled {
+    background-color: {{surface}};
+}
+
+QLabel#portBadge {
+    color: {{success}};
+    border: {{m.border}}px solid {{success}};
+    border-radius: {{m.radius_sm}}px;
+    padding: 0px {{m.space_2}}px;
+    font-size: {{f.caption}}px;
+}
+
+/* ── Banner ────────────────────────────────────────────────────────────── */
+
+/* A problem that stays: it spans the tab, tinted by its meaning, with
+   its colour as a two-pixel leading bar. */
+
+QFrame#banner {
+    border: none;
+    border-bottom: {{m.border}}px solid {{divider}};
+}
+
+QFrame#banner[level="info"] {
+    background-color: {{surface}};
+    border-left: {{m.mark}}px solid {{info}};
+}
+
+QFrame#banner[level="warning"] {
+    background-color: {{warning_row}};
+    border-left: {{m.mark}}px solid {{warning}};
+}
+
+QFrame#banner[level="error"] {
+    background-color: {{error_row}};
+    border-left: {{m.mark}}px solid {{error}};
+}
+
+/* ── Toast ─────────────────────────────────────────────────────────────── */
+
+/* A toast floats: a medium radius, its meaning as its edge. */
+
+QFrame#toast {
+    background-color: {{surface}};
+    border: {{m.border}}px solid {{divider}};
+    border-radius: {{m.radius_md}}px;
+}
+
+QFrame#toast[level="info"] { border-color: {{info}}; }
+QFrame#toast[level="success"] { border-color: {{success}}; }
+QFrame#toast[level="warning"] { border-color: {{warning}}; }
+QFrame#toast[level="error"] { border-color: {{error}}; }

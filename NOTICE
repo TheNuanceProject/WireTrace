@@ -1,37 +1,109 @@
 WireTrace
 Copyright 2026 Mohamad Shahin Ambalatha Kandy / The Nuance Project
 
-This product was designed, architected, and developed by
+WireTrace was designed, architected and developed by
 Mohamad Shahin Ambalatha Kandy as the first project of The Nuance Project.
 
 Website: https://thenuanceproject.com
+Source:  https://github.com/TheNuanceProject/WireTrace
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+Public License, in the LICENSE file, for more details.
+
+Versions 1.0.0 to 1.2.0 were released under the MIT License.
 
 -------------------------------------------------------------------------------
 Third-Party Software
 -------------------------------------------------------------------------------
 
-WireTrace uses the following third-party libraries at runtime:
+A WireTrace build contains the following work of others. The full text
+of each licence is in resources/licenses/THIRD_PARTY_LICENSES.txt, which
+every build carries and the About window shows.
 
-  PySide6 — licensed under LGPLv3 (with GPL exception) / Commercial
+  PySide6 and shiboken6 (Qt for Python), with the Qt libraries they
+  contain: GNU Lesser General Public License version 3
     https://www.qt.io/licensing/
-    Distributed as separate dynamically-linked libraries in the
-    WireTrace installation. Users are free to replace these libraries
-    with their own builds of Qt/PySide6 as permitted by the LGPL.
+    Installed as separate shared libraries beside the application.
+    They can be replaced by other builds of the same libraries, as the
+    licence provides. Source: https://code.qt.io/
 
-  pyserial — licensed under BSD-3-Clause
+  pyqtgraph: MIT License
+    https://github.com/pyqtgraph/pyqtgraph
+
+  NumPy: BSD 3-Clause License, with bundled components under their own
+  permissive licences
+    https://github.com/numpy/numpy
+
+  regex: Apache License 2.0 and CNRI Python License
+    https://github.com/mrabarnett/mrab-regex
+
+  cryptography: Apache License 2.0 or BSD 3-Clause License. Its builds
+  contain OpenSSL, under the Apache License 2.0.
+    https://github.com/pyca/cryptography
+
+  cffi (MIT No Attribution) and pycparser (BSD 3-Clause License),
+  required by cryptography
+    https://github.com/python-cffi/cffi
+    https://github.com/eliben/pycparser
+
+  colorama: BSD 3-Clause License, required by pyqtgraph
+    https://github.com/tartley/colorama
+
+  pyserial: BSD 3-Clause License
     https://github.com/pyserial/pyserial
 
-The following build-time-only tools are used to produce distributable
-binaries. They are not redistributed with WireTrace:
+  JetBrains Mono, the console font: SIL Open Font License 1.1
+    https://github.com/JetBrains/JetBrainsMono
+    Copyright 2020 The JetBrains Mono Project Authors.
+    The font files and the licence text are in resources/fonts/.
 
-  Nuitka — licensed under Apache License 2.0
+  Poppins, the interface font: SIL Open Font License 1.1
+    https://github.com/itfoundry/Poppins
+    Copyright 2020 The Poppins Project Authors.
+    The font files and the licence text are in resources/fonts/.
+
+  Lucide, the interface icons: ISC License; the icons Lucide derives
+  from Feather are also under the MIT License
+    https://lucide.dev/
+    Copyright Lucide Icons and Contributors; Feather copyright Cole Bemis.
+    The icons and the licence text are in resources/icons/.
+
+  The runtime of the Nuitka compiler: GNU Affero General Public License
+  version 3 with the Nuitka Runtime Library Exception, which permits
+  compiled programs to be distributed under their own licence.
     https://nuitka.net/
 
-  ordered-set — licensed under MIT License
+A build also carries parts of the system it was made on: the Python
+interpreter with the libraries it uses, and on Linux the system
+libraries that the X11 window system plugin needs. The licence text of
+each is written into the build, in resources/licenses/system/, and the
+About window shows them with the others.
 
-  Inno Setup (Windows) — licensed under a permissive license
+An AppImage starts with the AppImage runtime (MIT License), which
+contains musl libc, libfuse, squashfuse, zstd and zlib. Its licence
+notice is in the AppImage with the others.
+    https://github.com/AppImage/type2-runtime
+
+The following tools build the installers and are not part of them:
+
+  Nuitka: GNU Affero General Public License version 3
+    https://nuitka.net/
+
+  Inno Setup (Windows): the Inno Setup License
     https://jrsoftware.org/isinfo.php
 
-Each third-party component's license applies to that component
-only. WireTrace itself is licensed under the MIT License (see the
-LICENSE file in this repository).
+  appimagetool (Linux): MIT License
+    https://github.com/AppImage/appimagetool
+
+build/linux/excludelist is the list of libraries a portable Linux build
+leaves to the system, kept by the AppImage project (MIT License).
+    https://github.com/AppImageCommunity/pkg2appimage
+
+Each licence applies to its own component only.

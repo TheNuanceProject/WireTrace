@@ -1,0 +1,12 @@
+# WireTrace real-Qt GUI smoke-test dependencies.
+#
+# The suite in tests_gui/ constructs the actual windows, dialogs, and
+# the pyqtgraph plot against the real Qt stack, headless
+# (QT_QPA_PLATFORM=offscreen). It needs everything the application
+# needs at runtime, plus the test runner.
+#
+# CI installs EXACTLY this file for the GUI job. The headless logic
+# suite in tests/ keeps using requirements-test.txt and its Qt stubs.
+
+-r requirements.txt       # PySide6, pyserial, pyqtgraph, numpy, regex, cryptography
+-r requirements-dev.txt   # pytest, ruff

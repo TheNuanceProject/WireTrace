@@ -16,9 +16,6 @@ ENV/
 
 # ─── Nuitka build artefacts ────────────────────────────────────────────
 build/dist/
-build/WireTrace.build/
-build/WireTrace.dist/
-build/WireTrace.onefile-build/
 *.nuitka-stamp
 *.build/
 *.dist/
@@ -26,26 +23,31 @@ build/WireTrace.onefile-build/
 # ─── Deployment artefacts ──────────────────────────────────────────────
 deployment/
 *.exe
-*.dmg
 *.AppImage
 *.deb
-*.msi
 
 # ─── Generated files ───────────────────────────────────────────────────
-# These are produced by the build script; source copies live elsewhere
-version_info.txt
-build_info.txt
+# Produced when a release is described and its manifest signed
+# (BUILD_GUIDE.md, section 2.3)
+release-check/
+signed/
+manifest.unsigned.json
 wiretrace-update.json
+SHA256SUMS
 
-# ─── Qt / PySide6 ──────────────────────────────────────────────────────
-*.pyproject.user
-resources/resources_rc.py
+# ─── Keys and secrets ──────────────────────────────────────────────────
+# The signing keys live offline and tools/release_keys.py refuses to
+# write one inside the repository; these keep any key file out even so.
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
 
 # ─── Logs and runtime data ─────────────────────────────────────────────
 *.log
 logs/
-WireTrace-Logs/
-crashes/
 
 # ─── Testing ───────────────────────────────────────────────────────────
 .pytest_cache/

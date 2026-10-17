@@ -1,8 +1,8 @@
-# Auto-detect text files and normalize line endings to LF on commit,
-# native line endings on checkout. Prevents cross-platform diff noise.
+# Detect text files and keep LF line endings on commit and on checkout,
+# so that the same file is the same bytes on every system.
 * text=auto eol=lf
 
-# Explicit text files — always LF regardless of platform
+# Explicit text files: always LF regardless of platform
 *.py        text eol=lf
 *.pyi       text eol=lf
 *.md        text eol=lf
@@ -11,26 +11,27 @@
 *.yml       text eol=lf
 *.yaml      text eol=lf
 *.json      text eol=lf
-*.qrc       text eol=lf
 *.qss       text eol=lf
+*.template  text eol=lf
 *.svg       text eol=lf
 *.sh        text eol=lf
 .gitignore  text eol=lf
 .gitattributes text eol=lf
 
-# Windows-specific text files — always CRLF
+# Windows-specific text files: always CRLF
 *.bat       text eol=crlf
 *.cmd       text eol=crlf
 *.ps1       text eol=crlf
 *.iss       text eol=crlf
 
-# Binary files — never attempt diff or line-ending normalization
+# Binary files: never attempt diff or line-ending normalization
 *.png       binary
 *.jpg       binary
 *.jpeg      binary
 *.gif       binary
 *.ico       binary
 *.icns      binary
+*.ttf       binary
 *.exe       binary
 *.dll       binary
 *.so        binary
@@ -41,7 +42,7 @@
 *.gz        binary
 *.pdf       binary
 
-# GitHub linguist — exclude generated/vendored files from language stats
+# GitHub linguist: exclude generated/vendored files from language stats
 resources/icons/** linguist-vendored=true
 build/dist/** linguist-generated=true
 deployment/** linguist-generated=true

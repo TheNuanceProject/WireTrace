@@ -1,150 +1,227 @@
-# SPDX-License-Identifier: MIT
-"""Tests for the CSV export engine.
-
-Includes the regression guard for audit finding C2 (timestamps must be
-preserved across the detection sample boundary, not replaced with a
-single "current" timestamp).
-"""
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests for the CSV engine: structure detection and row formatting."""
 
 from __future__ import annotations
 
+import csv
 import io
+import time
 
-from app.constants import CSVMode
+import pytest
+
+from app.constants import (
+    CSV_AUTODETECT_SAMPLE_SIZE,
+    CSV_DETECTION_GIVE_UP_LINES,
+    STRUCTURE_MAX_LINE_CHARACTERS,
+    CSVMode,
+)
 from core.csv_engine import CSVEngine
+
+_TS = "2026-01-01 10:00:00.000"
+
+# Generous for a slow shared runner, and far below what a pattern whose
+# cost grows with the square of the line length would take.
+_PROMPT_SECONDS = 2.0
+
+
+def _stamp(index: int) -> str:
+    return f"2026-01-01 10:{index // 60:02d}:{index % 60:02d}.000"
+
+
+def _run(lines: list[str]) -> tuple[CSVEngine, list[str]]:
+    """Feed lines through a fresh engine and return it with every row."""
+    engine = CSVEngine()
+    rows: list[str] = []
+    for index, line in enumerate(lines):
+        rows.extend(engine.feed(_stamp(index), line))
+    rows.extend(engine.finalize())
+    return engine, rows
+
+
+def _parse(header: str, rows: list[str]) -> list[list[str]]:
+    return list(csv.reader(io.StringIO("\n".join([header, *rows]))))
 
 
 class TestDetection:
-    """detect_mode identifies structure in common data patterns."""
-
     def test_detects_key_value_colon(self):
         engine = CSVEngine()
-        lines = [
-            "Temperature: 25.3, Humidity: 60",
-            "Temperature: 25.5, Humidity: 61",
-            "Temperature: 25.6, Humidity: 62",
-        ]
-        mode = engine.detect_mode(lines)
-        assert mode == CSVMode.AUTO
-        assert "Temperature" in engine.columns
-        assert "Humidity" in engine.columns
+        lines = [f"Temperature: {20 + i}, Humidity: {50 + i}" for i in range(10)]
+        assert engine.detect_mode(lines) == CSVMode.AUTO
+        assert engine.columns == ["Temperature", "Humidity"]
+        assert engine.header == "Timestamp,Temperature,Humidity"
 
     def test_detects_key_value_equals(self):
         engine = CSVEngine()
-        lines = [
-            "voltage=3.3, current=0.05",
-            "voltage=3.4, current=0.06",
-        ]
-        assert engine.detect_mode(lines) == CSVMode.AUTO
+        assert engine.detect_mode([f"v={i} i={i}" for i in range(10)]) == CSVMode.AUTO
+        assert engine.columns == ["v", "i"]
 
     def test_detects_json(self):
         engine = CSVEngine()
-        lines = [
-            '{"temp": 25, "hum": 60}',
-            '{"temp": 26, "hum": 61}',
-            '{"temp": 27, "hum": 62}',
-        ]
+        lines = [f'{{"temp": {i}, "state": "run"}}' for i in range(10)]
         assert engine.detect_mode(lines) == CSVMode.AUTO
-        assert "temp" in engine.columns
-        assert "hum" in engine.columns
+        assert engine.columns == ["temp", "state"]
 
     def test_falls_back_to_raw_on_unstructured_data(self):
         engine = CSVEngine()
-        lines = [
-            "System starting up...",
-            "ERROR: something broke",
-            "Retrying connection",
-            "OK",
-        ]
-        assert engine.detect_mode(lines) == CSVMode.RAW
+        assert engine.detect_mode([f"hello world {i}" for i in range(10)]) == CSVMode.RAW
+        assert engine.columns == []
+        assert engine.header == "Timestamp,Data"
 
-    def test_empty_sample_returns_raw(self):
-        assert CSVEngine().detect_mode([]) == CSVMode.RAW
-
-
-class TestTimestampPreservation:
-    """Regression guard for audit finding C2.
-
-    Before the fix, every row written during the auto-detection sample
-    window had its original timestamp replaced by whichever "current"
-    timestamp was passed when the 50th row arrived. These tests lock in
-    the correct behavior: every row carries its own original timestamp
-    after detection completes.
-    """
-
-    def _build_auto_detect_log(self, row_count: int) -> str:
+    def test_empty_sample_is_raw(self):
         engine = CSVEngine()
-        buf = io.StringIO()
-        engine.write_header(buf)  # no-op per the deferred-header design
+        assert engine.detect_mode([]) == CSVMode.RAW
+        assert engine.detection_complete
 
-        timestamps = [
-            f"2026-01-01 10:00:{i:02d}.000" for i in range(row_count)
-        ]
-        for i, ts in enumerate(timestamps):
-            engine.write_row(
-                buf, ts,
-                f"Temperature: {20 + i}, Humidity: {50 + i}",
-                "DATA",
-            )
-        engine.finalize(buf)
-
-        return buf.getvalue()
-
-    def test_auto_mode_preserves_every_distinct_timestamp(self):
-        out = self._build_auto_detect_log(row_count=60)
-        for i in range(60):
-            expected = f"2026-01-01 10:00:{i:02d}.000"
-            assert expected in out, f"missing timestamp: {expected}"
-
-    def test_auto_mode_row_count_matches_input(self):
-        out = self._build_auto_detect_log(row_count=60)
-        rows = out.strip().split("\n")
-        # 1 header + 60 data rows
-        assert len(rows) == 61
-
-    def test_auto_mode_header_has_detected_columns(self):
-        out = self._build_auto_detect_log(row_count=60)
-        header = out.split("\n")[0]
-        assert "Timestamp" in header
-        assert "Temperature" in header
-        assert "Humidity" in header
-        # The broken code produced "Timestamp,Data" as header even in AUTO mode.
-        assert header != "Timestamp,Data"
-
-    def test_short_log_detected_on_finalize(self):
-        """Fewer than sample_size rows: detection runs on stop, not never."""
+    def test_clock_time_is_not_read_as_a_key(self):
         engine = CSVEngine()
-        buf = io.StringIO()
-        engine.write_header(buf)
-        engine.write_row(buf, "2026-01-01 10:00:00", "a=1, b=2", "DATA")
-        engine.write_row(buf, "2026-01-01 10:00:01", "a=3, b=4", "DATA")
-        engine.finalize(buf)
+        lines = [f"12:30:{i:02d} temp={20 + i} rpm={1000 + i}" for i in range(10)]
+        assert engine.detect_mode(lines) == CSVMode.AUTO
+        assert engine.columns == ["temp", "rpm"]
 
-        rows = buf.getvalue().strip().split("\n")
-        assert len(rows) == 3  # header + 2 data rows
-        assert "2026-01-01 10:00:00" in rows[1]
-        assert "2026-01-01 10:00:01" in rows[2]
-
-    def test_empty_log_produces_header_only(self):
+    def test_occasional_odd_line_does_not_collapse_columns(self):
+        lines = [f"Temp: {i}, Hum: {i}" for i in range(45)]
+        lines[10] = "Temp: 5"
+        lines[20] = "status: ok"
         engine = CSVEngine()
-        buf = io.StringIO()
-        engine.write_header(buf)
-        engine.finalize(buf)
-        # Header should be the RAW default since no samples were seen.
-        assert buf.getvalue() == "Timestamp,Data\n"
+        assert engine.detect_mode(lines) == CSVMode.AUTO
+        assert engine.columns == ["Temp", "Hum"]
+
+
+class TestVeryLongLines:
+    def test_pairs_are_looked_for_only_at_the_start_of_a_line(self):
+        engine = CSVEngine()
+        padding = "x " * (STRUCTURE_MAX_LINE_CHARACTERS // 2)
+        lines = [f"T: {i}, H: {i}, {padding} late: {i}" for i in range(10)]
+
+        assert engine.detect_mode(lines) == CSVMode.AUTO
+        assert engine.columns == ["T", "H"]
+
+    def test_a_long_line_of_near_keys_is_read_promptly(self):
+        engine = CSVEngine()
+        engine.detect_mode([f"T: {i}, H: {i}" for i in range(10)])
+        line = "a " * 32_768
+        started = time.perf_counter()
+        # Unbounded, each such line takes about 0.1 s; bounded, under 0.01 s.
+        for _ in range(50):
+            engine.feed(_TS, line)
+        assert time.perf_counter() - started < _PROMPT_SECONDS
+
+
+class TestHoldUntilDetected:
+    def test_nothing_is_returned_before_the_first_sample_completes(self):
+        engine = CSVEngine()
+        for index in range(CSV_AUTODETECT_SAMPLE_SIZE - 1):
+            assert engine.feed(_stamp(index), f"a={index}, b={index}") == []
+        assert not engine.detection_complete
+
+    def test_held_rows_are_released_with_their_own_timestamps(self):
+        engine = CSVEngine()
+        rows: list[str] = []
+        for index in range(CSV_AUTODETECT_SAMPLE_SIZE):
+            rows.extend(engine.feed(_stamp(index), f"a={index}, b={index}"))
+        assert engine.mode == CSVMode.AUTO
+        assert len(rows) == CSV_AUTODETECT_SAMPLE_SIZE
+        for index, row in enumerate(rows):
+            assert row == f"{_stamp(index)},{index},{index}"
+
+    def test_rows_after_detection_are_returned_immediately(self):
+        engine = CSVEngine()
+        for index in range(CSV_AUTODETECT_SAMPLE_SIZE):
+            engine.feed(_stamp(index), f"a={index}, b={index}")
+        assert engine.feed("T", "a=7, b=8") == ["T,7,8"]
+
+    def test_short_session_is_detected_on_finalize(self):
+        engine, rows = _run(["a=1, b=2", "a=3, b=4"])
+        assert engine.mode == CSVMode.AUTO
+        assert rows == [f"{_stamp(0)},1,2", f"{_stamp(1)},3,4"]
+
+    def test_empty_session_finalizes_to_raw_with_no_rows(self):
+        engine, rows = _run([])
+        assert engine.mode == CSVMode.RAW
+        assert rows == []
+        assert engine.header == "Timestamp,Data"
+
+    def test_finalize_after_detection_returns_nothing(self):
+        engine = CSVEngine()
+        engine.detect_mode(["a=1"])
+        assert engine.finalize() == []
+
+    def test_boot_log_before_readings_is_still_detected(self):
+        boot = [f"booting stage {i}" for i in range(60)]
+        readings = [f"Temp: {i}, Hum: {i}" for i in range(140)]
+        engine, rows = _run(boot + readings)
+        assert engine.mode == CSVMode.AUTO
+        assert engine.columns == ["Temp", "Hum"]
+        assert len(rows) == len(readings)
+
+    def test_gives_up_to_raw_and_keeps_every_line(self):
+        lines = [f"free text {i}" for i in range(CSV_DETECTION_GIVE_UP_LINES + 5)]
+        engine, rows = _run(lines)
+        assert engine.mode == CSVMode.RAW
+        assert rows == [f"{_stamp(i)},{line}" for i, line in enumerate(lines)]
+
+
+class TestRowsAreChosenByContent:
+    """A line is exported if it fits the columns, whatever words it contains."""
+
+    def test_readings_containing_a_severity_word_are_exported(self):
+        lines = [f"errors={i} temp=22.{i % 10} rpm=1200" for i in range(60)]
+        engine, rows = _run(lines)
+        assert engine.mode == CSVMode.AUTO
+        assert engine.columns == ["errors", "temp", "rpm"]
+        assert len(rows) == 60
+
+    def test_json_with_a_status_word_is_exported(self):
+        lines = [f'{{"temp": {i}, "status": "ok"}}' for i in range(60)]
+        engine, rows = _run(lines)
+        assert engine.columns == ["temp", "status"]
+        assert rows[0] == f"{_stamp(0)},0,ok"
+
+    def test_lines_that_do_not_fit_the_columns_are_left_out(self):
+        lines = [f"Temp: {i}, Hum: {i}, Pres: {i}" for i in range(60)]
+        lines[30] = "ERROR: sensor timeout"
+        lines[40] = "WARNING: Temp: 99 exceeds limit"
+        engine, rows = _run(lines)
+        assert engine.columns == ["Temp", "Hum", "Pres"]
+        assert len(rows) == 58
+        assert all("ERROR" not in row and "WARNING" not in row for row in rows)
+
+    def test_row_missing_a_minority_of_columns_is_kept_with_blanks(self):
+        lines = [f"Temp: {i}, Hum: {i}, Pres: {i}" for i in range(60)]
+        lines[55] = "Temp: 7, Hum: 8"
+        engine, rows = _run(lines)
+        parsed = _parse(engine.header, rows)
+        assert parsed[56] == [_stamp(55), "7", "8", ""]
+
+    def test_auto_output_is_rectangular(self):
+        lines = [f"Temp: {i}, Hum: {i}" for i in range(60)]
+        lines[5] = "Temp: 1"
+        engine, rows = _run(lines)
+        parsed = _parse(engine.header, rows)
+        assert {len(row) for row in parsed} == {3}
+
+
+class TestRawMode:
+    def test_every_line_becomes_a_row(self):
+        engine = CSVEngine()
+        engine.detect_mode([])
+        assert engine.feed("T", "anything at all") == ["T,anything at all"]
+
+    def test_blank_line_is_an_empty_cell(self):
+        engine = CSVEngine()
+        engine.detect_mode([])
+        assert engine.feed("T", "") == ["T,"]
 
 
 class TestCsvEscaping:
-    """Values containing commas, quotes, or newlines are RFC 4180 escaped."""
-
     def test_comma_triggers_quotes(self):
         assert CSVEngine._csv_escape("a,b") == '"a,b"'
 
     def test_quote_is_doubled(self):
-        assert CSVEngine._csv_escape('a"b') == '"a""b"'
+        assert CSVEngine._csv_escape('say "hi"') == '"say ""hi"""'
 
     def test_plain_value_unchanged(self):
-        assert CSVEngine._csv_escape("plain") == "plain"
+        assert CSVEngine._csv_escape("22.4") == "22.4"
 
     def test_newline_triggers_quotes(self):
         assert CSVEngine._csv_escape("a\nb") == '"a\nb"'
@@ -153,246 +230,45 @@ class TestCsvEscaping:
         assert CSVEngine._csv_escape("") == ""
 
 
-class TestTagAwareDetection:
-    """Tag-aware sampling and writing: severity messages neither
-    pollute structure detection nor leak into the structured CSV.
-
-    This is the core fix for the v26.05.10 audit finding where mixed
-    streams (boot logs + telemetry, status messages + sensor data)
-    collapsed detection to RAW because severity lines polluted the
-    column intersection.
-    """
-
-    @staticmethod
-    def _drive(engine: CSVEngine, buf: io.StringIO,
-               rows: list[tuple[str, str, str]]) -> None:
-        """Push a list of (timestamp, line, tag) rows through write_row
-        and finalize. Mirrors how log_engine feeds the engine."""
-        for ts, line, tag in rows:
-            engine.write_row(buf, ts, line, tag)
-        engine.finalize(buf)
-
-    def test_detects_structure_in_mixed_severity_and_data(self):
-        """Boot/severity interleaved with telemetry — detection still
-        succeeds because only DATA lines feed the column intersection."""
+class TestHeader:
+    def test_column_names_are_escaped_like_values(self):
         engine = CSVEngine()
-        buf = io.StringIO()
+        lines = ['{"a,b": 1, "=cmd": 2}'] * 10
+        assert engine.detect_mode(lines) == CSVMode.AUTO
+        assert engine.header == 'Timestamp,"a,b",\'=cmd'
 
-        rows: list[tuple[str, str, str]] = []
-        # 50 lines: every 5th is INFO, every 7th is WARNING, rest DATA.
-        # Roughly 36 DATA + 14 severity in a 50-line sample.
-        for i in range(50):
-            ts = f"2026-01-01 10:00:{i:02d}.000"
-            if i % 5 == 0:
-                rows.append((ts, f"INFO: heartbeat {i}", "INFO"))
-            elif i % 7 == 0:
-                rows.append((ts, f"WARNING: condition {i}", "WARNING"))
-            else:
-                rows.append(
-                    (ts, f"Temperature: {20 + i}, Humidity: {50 + i}", "DATA"),
-                )
-
-        self._drive(engine, buf, rows)
-
-        # Detection succeeded despite the noise.
-        assert engine.mode == CSVMode.AUTO
-        assert "Temperature" in engine.columns
-        assert "Humidity" in engine.columns
-
-    def test_severity_excluded_from_auto_csv(self):
-        """Option C: in AUTO mode, severity rows are not written to CSV
-        — neither during the buffered replay nor after detection."""
+    def test_key_repeated_on_a_line_is_one_column(self):
         engine = CSVEngine()
-        buf = io.StringIO()
+        assert engine.detect_mode(["t=1 t=2 u=3"] * 10) == CSVMode.AUTO
+        assert engine.columns == ["t", "u"]
+        assert engine.header == "Timestamp,t,u"
 
-        rows: list[tuple[str, str, str]] = [
-            (f"2026-01-01 10:00:{i:02d}.000",
-             f"Temperature: {20 + i}, Humidity: {50 + i}",
-             "DATA")
-            for i in range(50)
-        ]
-        # Add severity AFTER detection completes; also add DATA after.
-        rows.append(("2026-01-01 10:01:00.000",
-                     "ERROR: WiFi disconnected", "ERROR"))
-        rows.append(("2026-01-01 10:01:01.000",
-                     "Temperature: 99, Humidity: 99", "DATA"))
-        rows.append(("2026-01-01 10:01:02.000",
-                     "WARNING: low battery", "WARNING"))
 
-        self._drive(engine, buf, rows)
-        out = buf.getvalue()
+class TestHostileLines:
+    """A device can send anything. The time spent on a line must grow
+    with its length, not with its square, and no line may raise."""
 
-        assert engine.mode == CSVMode.AUTO
-        # Severity lines and their timestamps are absent from CSV.
-        assert "ERROR: WiFi disconnected" not in out
-        assert "WARNING: low battery" not in out
-        assert "2026-01-01 10:01:00" not in out
-        assert "2026-01-01 10:01:02" not in out
-        # The post-detection DATA row IS present.
-        assert "2026-01-01 10:01:01" in out
-
-    def test_severity_preserved_in_raw_mode(self):
-        """In RAW mode (no structure detected), the CSV is a verbatim
-        mirror of the data stream — every row, including severity."""
+    @pytest.mark.parametrize(
+        "line",
+        [
+            # Named, because the test's name otherwise contains the
+            # whole line, which is longer than Windows allows in the
+            # environment variable pytest keeps the name in.
+            pytest.param("A" * 65_536, id="one-long-word"),
+            pytest.param("ab " * 21_000, id="many-short-words"),
+            pytest.param("a_" * 32_000, id="underscores"),
+            pytest.param(" " * 65_536, id="only-spaces"),
+            pytest.param("k" + " " * 60_000 + ": 5", id="key-then-long-gap"),
+        ],
+    )
+    def test_long_line_without_pairs_is_handled_promptly(self, line):
         engine = CSVEngine()
-        buf = io.StringIO()
+        engine.detect_mode(["temp: 1, rpm: 2"] * 10)
+        started = time.perf_counter()
+        engine.feed(_TS, line)
+        assert time.perf_counter() - started < _PROMPT_SECONDS
 
-        # Free-form lines that don't KV/JSON parse → RAW.
-        rows: list[tuple[str, str, str]] = [
-            (f"2026-01-01 10:00:{i:02d}.000",
-             f"free form line {i} with no key value pairs",
-             "DATA")
-            for i in range(50)
-        ]
-        rows.append(("2026-01-01 10:01:00.000",
-                     "ERROR: something broke", "ERROR"))
-
-        self._drive(engine, buf, rows)
-        out = buf.getvalue()
-
-        assert engine.mode == CSVMode.RAW
-        # In RAW mode, severity IS written.
-        assert "ERROR: something broke" in out
-        assert "2026-01-01 10:01:00" in out
-
-    def test_falls_back_to_raw_when_only_severity_in_sample(self):
-        """If the entire sample window contains zero DATA lines,
-        detection legitimately falls back to RAW. All buffered rows
-        (which are all severity) are then written verbatim."""
+    def test_deeply_nested_json_is_not_a_row_and_does_not_raise(self):
         engine = CSVEngine()
-        buf = io.StringIO()
-
-        rows: list[tuple[str, str, str]] = [
-            (f"2026-01-01 10:00:{i:02d}.000",
-             f"INFO: status update {i}", "INFO")
-            for i in range(50)
-        ]
-
-        self._drive(engine, buf, rows)
-        out = buf.getvalue()
-
-        assert engine.mode == CSVMode.RAW
-        # Severity preserved under RAW.
-        assert "INFO: status update 0" in out
-        assert "INFO: status update 49" in out
-
-    def test_command_tag_excluded_from_auto_csv(self):
-        """User-typed commands (tagged COMMAND, prefixed ">>>") are
-        also excluded from the structured CSV under Option C."""
-        engine = CSVEngine()
-        buf = io.StringIO()
-
-        rows: list[tuple[str, str, str]] = [
-            (f"2026-01-01 10:00:{i:02d}.000",
-             f"Temperature: {20 + i}, Humidity: {50 + i}",
-             "DATA")
-            for i in range(50)
-        ]
-        rows.append(("2026-01-01 10:01:00.000",
-                     ">>> reset", "COMMAND"))
-
-        self._drive(engine, buf, rows)
-        out = buf.getvalue()
-
-        assert engine.mode == CSVMode.AUTO
-        assert ">>> reset" not in out
-        assert "2026-01-01 10:01:00" not in out
-
-    def test_auto_csv_is_rectangular(self):
-        """Every data row in AUTO mode has exactly the same column count
-        as the header. No partial rows, no extra columns, no leakage."""
-        engine = CSVEngine()
-        buf = io.StringIO()
-
-        rows: list[tuple[str, str, str]] = []
-        for i in range(50):
-            ts = f"2026-01-01 10:00:{i:02d}.000"
-            if i % 4 == 0:
-                rows.append((ts, f"WARNING: condition {i}", "WARNING"))
-            else:
-                rows.append(
-                    (ts, f"Temperature: {20 + i}, Humidity: {50 + i}", "DATA"),
-                )
-
-        self._drive(engine, buf, rows)
-
-        lines = buf.getvalue().strip().split("\n")
-        assert engine.mode == CSVMode.AUTO
-        header_cols = lines[0].count(",") + 1
-        # Header should be Timestamp,Temperature,Humidity → 3 columns
-        assert header_cols == 3
-        # Every subsequent row must have the same column count.
-        for row in lines[1:]:
-            assert row.count(",") + 1 == header_cols, (
-                f"non-rectangular row in AUTO CSV: {row!r}"
-            )
-
-    def test_unparseable_data_line_skipped_in_auto_mode(self):
-        """A DATA-tagged line that doesn't match the detected schema
-        (e.g. a boot banner that contains no severity keyword) is
-        skipped from the .csv to preserve the rectangular-CSV
-        invariant. The .txt log preserves it; only the structured
-        export drops it."""
-        engine = CSVEngine()
-        buf = io.StringIO()
-
-        rows: list[tuple[str, str, str]] = [
-            (f"2026-01-01 10:00:{i:02d}.000",
-             f"Temperature: {20 + i}, Humidity: {50 + i}",
-             "DATA")
-            for i in range(50)
-        ]
-        # Post-detection DATA line that does NOT match the schema
-        # (no Temperature/Humidity keys). Must not break rectangularity.
-        rows.append(("2026-01-01 10:01:00.000",
-                     "Booting firmware v2.3.1", "DATA"))
-        # And a normal DATA row after.
-        rows.append(("2026-01-01 10:01:01.000",
-                     "Temperature: 99, Humidity: 99", "DATA"))
-
-        self._drive(engine, buf, rows)
-        out = buf.getvalue()
-
-        assert engine.mode == CSVMode.AUTO
-        # The boot banner is absent from CSV.
-        assert "Booting firmware" not in out
-        assert "2026-01-01 10:01:00" not in out
-        # The structured row after it is present.
-        assert "2026-01-01 10:01:01" in out
-        # All rows in CSV have the same column count as the header.
-        lines_out = out.strip().split("\n")
-        header_cols = lines_out[0].count(",") + 1
-        for ln in lines_out[1:]:
-            assert ln.count(",") + 1 == header_cols, (
-                f"non-rectangular row: {ln!r}"
-            )
-
-    def test_data_timestamps_preserved_when_severity_filtered(self):
-        """C2 timestamp invariant: every DATA row's original timestamp
-        survives the buffered-replay-with-severity-filtering path.
-        The severity rows simply aren't there — the DATA rows are."""
-        engine = CSVEngine()
-        buf = io.StringIO()
-
-        rows: list[tuple[str, str, str]] = []
-        # Alternate DATA / WARNING for 60 rows. 30 DATA, 30 WARNING.
-        for i in range(60):
-            ts = f"2026-01-01 10:00:{i:02d}.000"
-            if i % 2 == 0:
-                rows.append(
-                    (ts, f"Temperature: {20 + i}, Humidity: {50 + i}", "DATA"),
-                )
-            else:
-                rows.append((ts, f"WARNING: spurious {i}", "WARNING"))
-
-        self._drive(engine, buf, rows)
-        out = buf.getvalue()
-
-        assert engine.mode == CSVMode.AUTO
-        # All 30 DATA timestamps present; all 30 WARNING timestamps absent.
-        for i in range(60):
-            ts = f"2026-01-01 10:00:{i:02d}.000"
-            if i % 2 == 0:
-                assert ts in out, f"missing DATA timestamp: {ts}"
-            else:
-                assert ts not in out, f"unexpected severity timestamp: {ts}"
+        engine.detect_mode(['{"temp": 1, "rpm": 2}'] * 10)
+        assert engine.feed(_TS, '{"a":' + "[" * 60_000) == []

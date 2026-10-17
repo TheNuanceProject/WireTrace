@@ -2,46 +2,43 @@
 
 A serial data monitor for hardware and embedded engineers.
 
-WireTrace captures data from multiple serial devices simultaneously,
-sustains throughput above ten thousand lines per second, and writes
-every line to disk without interfering with the live view. Built for
-hardware bring-up, long capture sessions, and the kind of debugging
-where what you *don't* log is what you needed.
+WireTrace reads several serial devices at once, shows what they send as
+it arrives, and writes every line to disk. It is built for hardware
+bring-up and for long captures, where the line you did not keep is the
+one you needed.
 
-**[Download the latest release →](https://github.com/TheNuanceProject/WireTrace/releases/latest)**
+**[Download the latest release](https://github.com/TheNuanceProject/WireTrace/releases/latest)**
 
 Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/projects/wiretrace)
 
 ---
 
-![WireTrace — live data plotter with auto-detected traces, dark theme](docs/screenshots/wiretrace-plot-dark.png)
+![WireTrace: a session with coloured log levels, dark theme](resources/help/images/session-dark.png)
 
-![WireTrace — multiple device tabs, live telemetry with severity tags, dark theme](docs/screenshots/wiretrace-demo-board-multi-tab-dark.png)
-
-![WireTrace — single device tab with live telemetry, dark theme](docs/screenshots/wiretrace-demo-board-dark.png)
+![WireTrace: the live plot under the console, dark theme](resources/help/images/plot-dark.png)
 
 <details>
 <summary>More screenshots</summary>
 
-**Welcome screen — before connecting a device:**
+**Before a device is connected:**
 
-![Welcome screen](docs/screenshots/home.png)
+![The first screen, with the list of serial ports](resources/help/images/first-screen-light.png)
 
-**Connected to a device, light theme:**
+**A session, light theme:**
 
-![Connected state in light theme](docs/screenshots/dev-connect.png)
+![A session in the light theme](resources/help/images/session-light.png)
 
-**New log session — choose format, directory, and description:**
+**Starting a log:**
 
-![New log session dialog](docs/screenshots/log-session.png)
+![The window that starts a log](resources/help/images/start-a-log-light.png)
 
-**Preferences — performance tuning and update settings:**
+**Preferences:**
 
-![Preferences dialog](docs/screenshots/pref-dark.png)
+![Preferences](resources/help/images/preferences-light.png)
 
-**Splash screen:**
+**When a device is unplugged:**
 
-![Splash screen](docs/screenshots/splash.png)
+![A session whose connection was lost](resources/help/images/connection-lost-light.png)
 
 </details>
 
@@ -49,99 +46,86 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
 
 ## What it does
 
-- **Multi-device tabs.** Each connected device runs in its own tab,
-  isolated from the others. Switching between tabs does not interrupt
-  data capture on any of them.
-- **Buffered logging.** A separate thread writes to disk on a schedule.
-  The read path is never blocked. The disk log captures every line
-  received, regardless of what is shown in the live view.
-- **Search and live filter.** Search captured data with forward and
-  backward navigation. Filter the live view by substring without
-  affecting what is written to disk.
-- **Live data plotter.** Auto-detects numeric structure (JSON
-  objects, `key: value` pairs, or positional delimited values) from
-  the first fifty data lines and renders them as time-series traces
-  in a docked panel below the console. When auto-detect is not
-  enough, a Configure Plot dialog lets you declare a regex with
-  named groups, save it as a profile, and set a per-tab default —
-  for firmware that emits its own timestamped or log-prefixed
-  format. Theme-aware, cross-platform colourblind-safe palette,
-  per-trace toggle from the legend.
-- **Structured CSV export.** Two modes. Auto-detect identifies common
-  patterns (`key: value` pairs and JSON-shaped lines) and pivots them
-  into named columns. Raw mode writes a two-column file with
-  timestamps and lines.
-- **Severity tagging.** Each line is automatically classified as one
-  of CRITICAL, ERROR, WARNING, INFO, DEBUG, COMMAND, or DATA.
-  Tags are color-coded in the console.
-- **Command console.** Send commands back to the connected device,
-  with a recallable command history.
-- **Two themes.** Studio Light and Midnight Dark.
-- **Auto-update.** Checks for new versions and updates in place.
+- **Several devices, one tab each.** A tab reads, shows and logs on its
+  own. Switching tabs interrupts nothing.
+- **Reading, writing and drawing are separate.** The port is read on
+  one thread and the log is written on another, so a busy window or a
+  slow disk does not delay reading. A test sends a burst through a
+  stand-in for the port, using the real reader and writer, and holds
+  the path to the log file to ten thousand lines a second, complete and
+  in order, on every run of the checks
+  (`tests_gui/test_throughput.py`).
+- **Nothing is lost quietly.** On disconnect, on an unplugged device
+  and on closing, what is waiting is written before the result is
+  reported. If the disk cannot keep up or fails, the number of lines
+  not written is stated and marked in the file. When a device sends
+  faster than the screen can show, the console says how many lines it
+  skipped; they are still recorded and logged.
+- **Export the session, not the screen.** Every session is recorded
+  from the moment of connection, so it can be exported in full, with
+  or without a log running.
+- **Long captures stay easy to open.** A log that reaches the size you
+  set continues in a new file.
+- **Levels and colours.** Each line is given a level from its content.
+  ESP-IDF, Zephyr and bracketed level markers are recognised.
+- **Filter and find.** Filter the console by level or text and search
+  what it holds, without changing what is written to disk.
+- **Text and HEX.** Bytes can be shown and recorded as offset, hex and
+  printable characters.
+- **Live plot.** Numbers are found in JSON, `key: value` pairs and
+  delimited values and drawn as traces under the console. For other
+  formats, a pattern with named groups can be given and saved as a
+  profile.
+- **CSV.** Lines that carry the detected columns become rows; the text
+  log is always written beside the CSV.
+- **Commands.** Send to the device, with history and saved commands on
+  shortcuts.
+- **Light and dark themes**, or the system's.
+- **Verified updates.** A new version is accepted only if it is signed
+  by the maintainer, and installed only when you choose.
+
+The user guide opens from the Help menu or with F1.
 
 ## Platforms
 
-WireTrace is designed to run on Windows, macOS, and Linux. The codebase
-is cross-platform — it uses Qt (via PySide6) for the UI, QSerialPort
-for serial I/O, and a build pipeline that produces native binaries for
-all three operating systems.
+| System | How |
+|---|---|
+| Windows 10 (version 1809) and later, 64-bit | Installer |
+| Linux, x86-64, glibc 2.35 and later (Ubuntu 22.04 and later) | AppImage or `.deb` |
+| macOS | From source |
 
-**Pre-built binaries are published for Windows and Linux.** macOS is
-supported from source. This reflects who maintains the project (a single
-person) and which platforms are tested for each release, not a design
-limitation of the software.
+WireTrace draws in software and does not need OpenGL, so it also runs
+in remote desktop sessions and virtual machines.
 
-If you want WireTrace on macOS:
-
-- **Build it from source** using the included build scripts — the
-  BUILD_GUIDE covers all three platforms
-- **Open an issue** to express interest — if there's demand, a pre-built
-  macOS binary becomes a realistic priority
-- **Submit a pull request** with test results on your platform —
-  contributions that validate cross-platform behaviour are especially
-  welcome
-
-### System requirements (binary install)
-
-- **Windows:** 64-bit Windows 10 or newer
-- **Linux:** Ubuntu 20.04 or equivalent (x86-64); AppImage or `.deb`
-- **macOS:** 11 (Big Sur) or newer, built from source
-- Roughly 100 MB of disk space plus room for your logs
-
-CPU-only software rendering — runs in remote desktop sessions,
-virtual machines, and hardware without dedicated graphics.
+There is no macOS download. WireTrace runs there from source, and the
+interface tests run on macOS on every change.
 
 ## Install
 
-### Windows (binary)
+### Windows
 
 Download the installer from the
 [Releases page](https://github.com/TheNuanceProject/WireTrace/releases/latest)
-and run it. The application launches from the Start menu.
+and run it. It installs for you alone, without administrator rights,
+or for all users.
 
-On first launch, the welcome screen prompts for a device connection.
-Everything else appears once a device is connected.
-
-### Linux (binary)
+### Linux
 
 Download the `.AppImage` from the
 [Releases page](https://github.com/TheNuanceProject/WireTrace/releases/latest),
-make it executable (`chmod +x`), and run it — no installation needed. A
-`.deb` is also provided for Debian/Ubuntu (`sudo dpkg -i`). In-app
-auto-update applies to the AppImage (it replaces itself and relaunches);
-`.deb` installs update via a fresh download.
+make it executable (`chmod +x`) and run it. It updates itself when you
+choose to update.
 
-### macOS
+For Debian and Ubuntu there is also a `.deb`
+(`sudo apt install ./wiretrace_*.deb`). It is updated by installing
+the next one.
 
-A pre-built macOS binary is not currently published; build from source
-(see below). It takes a few minutes on modern hardware.
+To open a serial port, your user must be allowed to. On many
+distributions that means being in the `dialout` group.
 
-## Build from source
+### From source
 
-The build pipeline uses Nuitka (standalone mode) to compile Python to
-a native binary, then platform-specific packaging tools to produce
-a distributable (Inno Setup on Windows, create-dmg on macOS,
-appimage-builder + dpkg-deb on Linux).
+Python 3.10 or later.
 
 ```bash
 git clone https://github.com/TheNuanceProject/WireTrace.git
@@ -149,62 +133,92 @@ cd WireTrace
 
 python -m venv .venv
 .venv\Scripts\activate                 # Windows
-# source .venv/bin/activate              # macOS / Linux
+# source .venv/bin/activate            # macOS, Linux
 
 pip install -r requirements.txt
-pip install -r requirements-build.txt
-python main.py                          # run from source
+python main.py
 ```
 
-To build a distributable installer locally:
+## Privacy
 
-The version is read from `version.py`; no version flag is needed.
+What your devices send stays on your computer, in the files you choose
+to write.
 
-```bash
-# Windows
-python build/build.py --platform windows
+WireTrace checks for a new version when it starts and every 12 hours while
+it stays open. The request states the WireTrace version, the operating
+system, the processor type, how WireTrace was installed and the date of
+the previous check. It carries no identifier and nothing about you,
+your devices or your data. Like any request, it reaches the server from
+a network address: the server derives the country and an approximate
+area (about 100 km) from it, uses the address for no more than a minute
+to limit abuse, and never stores it. The file it reads is on the
+website, which GitHub Pages hosts, so GitHub also receives the request,
+as it does every visit to the website. The check can be turned off in
+the Windows installer and at any time in Preferences, under Updates and
+privacy.
 
-# macOS
-python build/build.py --platform macos
+Usage statistics are off unless you switch them on. WireTrace asks
+once, with a bar that blocks nothing, and the setting stays in
+Preferences. If you share them, WireTrace makes a random installation
+identifier and sends one report for each day it is used: the
+identifier and the date; its version, the operating system, the
+processor type and how it was installed; which features were used;
+whether lines were lost, a log could not be written, a connection was
+lost or WireTrace closed unexpectedly; the highest line rate, the
+number of connections, the longest time one window stayed open and the
+number of starts, each as a range; the theme; and the display scale. A
+report never holds a port or device name, a file name, a command, or
+anything a device sent. The server keeps reports for 14 months under a
+one-way hash of the identifier. Switching statistics off deletes the
+identifier and everything kept on your computer, and asks the server to
+delete every report sent under it.
 
-# Linux
-python build/build.py --platform linux
-```
+These are the only connections WireTrace makes by itself. The privacy
+policy, with every value a report can hold, is at
+[thenuanceproject.com/privacy](https://thenuanceproject.com/privacy/).
 
-See [BUILD_GUIDE.md](./BUILD_GUIDE.md) for detailed prerequisites and
-platform-specific notes.
+## Verifying a download
+
+Every release carries a `SHA256SUMS` file, a bill of materials and the
+licence texts of everything it contains. See
+[SECURITY.md](./SECURITY.md).
+
+## Building
+
+See [BUILD_GUIDE.md](./BUILD_GUIDE.md) for how releases are built and
+how to make a build on your own computer.
 
 ## Contributing
 
-WireTrace is maintained by a single person in spare hours.
-Contributions are welcome — please read
-[CONTRIBUTING.md](./CONTRIBUTING.md) first. It covers scope, response
-expectations, and how to propose changes in a way that has a good
-chance of being merged.
+WireTrace is maintained by one person in spare hours. Contributions
+are welcome; please read [CONTRIBUTING.md](./CONTRIBUTING.md) first,
+and the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
-Contributions that validate or improve cross-platform behaviour
-(macOS, Linux builds) are especially appreciated.
+Security issues: see [SECURITY.md](./SECURITY.md).
 
-For security issues, please see [SECURITY.md](./SECURITY.md).
+## Supporting WireTrace
 
-## License
+WireTrace is free and stays free. If it is useful to you and you would
+like to support its development, you can do so through
+[GitHub Sponsors](https://github.com/sponsors/shahin-hashim), at any
+amount you choose.
 
-[MIT](./LICENSE). Use it, fork it, ship it in your own products if
-that helps. Attribution is appreciated but not required.
+## Licence
 
-Third-party dependencies and their licenses are documented in
+WireTrace is free and open-source software under the
+[GNU General Public License, version 3 or later](./LICENSE). You are
+welcome to use it, study it, change it and share it. If you share it,
+or a version you have changed, it stays open source under the same
+licence.
+
+The licences of the third-party work WireTrace contains are listed in
 [NOTICE](./NOTICE).
 
-## Trademarks and Other Uses of the Name
+Versions 1.0.0 to 1.2.0 were released under the MIT License and remain
+available under it.
 
-WireTrace, as used in this repository and at
-[thenuanceproject.com](https://thenuanceproject.com), refers to this
-open-source serial data monitor for hardware and embedded engineers.
-It is an independent project by The Nuance Project and is not
-affiliated with, sponsored by, or endorsed by any other product,
-company, or organisation that may use a similar name in a different
-product category. The Nuance Project does not claim a trademark on
-the name.
+WireTrace is an independent project by The Nuance Project and is not
+affiliated with any other product or company that uses a similar name.
 
 ---
 

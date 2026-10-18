@@ -111,7 +111,7 @@ jobs:
         run: xvfb-run --auto-servernum python build/build.py --appimage-runtime "$RUNNER_TEMP/appimage/runtime-x86_64"
 
       - name: Keep the result
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux
           path: deployment/linux/
@@ -188,7 +188,7 @@ jobs:
       - name: Keep the unsigned program
         if: env.SIGN == 'true'
         id: unsigned-program
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-program-unsigned
           path: build/dist/WireTrace/WireTrace.exe
@@ -222,7 +222,7 @@ jobs:
       - name: Keep the unsigned installer
         if: env.SIGN == 'true'
         id: unsigned-installer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-installer-unsigned
           path: deployment/windows/*.exe
@@ -252,7 +252,7 @@ jobs:
           if ($signature.Status -ne 'Valid') { throw "The installer's signature is $($signature.Status)" }
 
       - name: Keep the result
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows
           path: deployment/windows/*.exe
@@ -325,7 +325,7 @@ jobs:
 
       - name: Keep the rehearsal
         if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-rehearsal
           path: release/

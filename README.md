@@ -102,6 +102,9 @@ interface tests run on macOS on every change.
 
 ## Install
 
+**Code signing.** WireTrace is applying to the SignPath Foundation for
+code signing. Current releases are not signed.
+
 ### Windows
 
 Download the installer from the
@@ -138,6 +141,24 @@ python -m venv .venv
 pip install -r requirements.txt
 python main.py
 ```
+
+### Uninstall
+
+If you share usage statistics, first switch them off in Preferences,
+under Updates and privacy. WireTrace then asks the server to delete
+every report it sent.
+
+- **Windows.** In Windows Settings, under Apps, choose WireTrace and
+  Uninstall.
+- **Linux, AppImage.** Delete the `.AppImage` file.
+- **Linux, `.deb`.** `sudo apt remove wiretrace`
+- **From source.** Delete the cloned folder.
+
+Your settings and logs are left in place. Settings are in
+`%APPDATA%\WireTrace\Config` on Windows, `~/.config/WireTrace` on Linux
+and `~/Library/Application Support/WireTrace` on macOS; logs are in
+`Documents/WireTrace/Logs` unless you chose another folder. Delete them
+too to remove everything.
 
 ## Privacy
 

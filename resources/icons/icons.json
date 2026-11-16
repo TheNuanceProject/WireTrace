@@ -41,6 +41,12 @@
       "stroke_width": "1.5",
       "sha256": "b7d002213d785a1897523ff1fe74b433dc2a6a365d085459744fbb6248abd412"
     },
+    "control_lines": {
+      "source": "lucide-static 1.49.0: icons/cable.svg",
+      "source_sha256": "ef71d6e5512db909394a0da9c53ddd4af0edd56a08047374999f3abe45b6f52b",
+      "stroke_width": "1.5",
+      "sha256": "1f2123ae6ee082bc37b23ce14d8705b2cff0c15fb7911a485512132e610e7610"
+    },
     "export": {
       "source": "lucide-static 1.49.0: icons/download.svg",
       "source_sha256": "d29f0143a9c0c11b344db6bb07c9f917143f211860ad7e2360682b3bbdc76b20",
@@ -76,6 +82,12 @@
       "source_sha256": "530dbe9fc46b460e71f9bcd69b8edce0285cc8365459d73d39a4beaf4224ad11",
       "stroke_width": "1.5",
       "sha256": "a775a28758879359367f356d4db9d948de1ebc3dd84aa5b4fe97912e97299af3"
+    },
+    "port_settings": {
+      "source": "lucide-static 1.49.0: icons/sliders-horizontal.svg",
+      "source_sha256": "f0a755619fdbbff89fb3e517cf45e74e9581f5d5783639f07f50ea08607c2788",
+      "stroke_width": "1.5",
+      "sha256": "c9c29715a7eee6f5052da26bf125b8225f9205afb25b33a975fcb327eec1efcc"
     },
     "refresh": {
       "source": "lucide-static 1.49.0: icons/refresh-cw.svg",

@@ -679,6 +679,12 @@ QLabel#plotValueLast {
     font-weight: {{w.medium}};
 }
 
+QFrame#plotNote {
+    background-color: {{surface}};
+    border: none;
+    border-bottom: {{m.border}}px solid {{divider}};
+}
+
 QFrame#plotMeasure {
     background-color: {{surface}};
     border: none;

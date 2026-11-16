@@ -478,6 +478,7 @@ class TestKeptSafe:
             ' "deletions": [{"installation": "00112233445566778899aabbccddeeff", "first_delivered": "soon"}]}',
             '{"format": 2, "installation": null, "notes": null, "waiting": [], "deletions": [],'
             ' "runs": {"../../etc": "2026-10-13"}}',
+            "[" * 100_000,
         ],
     )
     def test_a_damaged_or_altered_file_starts_again_and_never_fails(self, usage, config, content):
@@ -835,6 +836,6 @@ class TestWhatIsNoted:
         wait_until(qapp, lambda: tab.is_connected)
 
         port.transport.drop()
-        wait_until(qapp, lambda: not tab.is_connected)
+        wait_until(qapp, lambda: tab.is_waiting)
 
         assert "connection_lost" in _stored(window.usage)["notes"]["problems"]

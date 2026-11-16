@@ -193,6 +193,7 @@
     <h2>Start here</h2>
     <a href="#overview">What it does</a>
     <a href="#connect">Connect a device</a>
+    <a href="#port-settings">Port settings</a>
     <a href="#window">The window</a>
     <a href="#first-log">Start a log</a>
   </section>
@@ -224,8 +225,14 @@
     <a href="#plot">Open the plot</a>
     <a href="#plot-values">How values are found</a>
     <a href="#plot-reading">Reading the plot</a>
+    <a href="#plot-older">Older time</a>
     <a href="#plot-measure">Measure</a>
     <a href="#configure-plot">Configure plot</a>
+  </section>
+  <section>
+    <h2>The board's sessions</h2>
+    <a href="#restarts">Restarts and the session report</a>
+    <a href="#alerts">Alerts</a>
   </section>
   <section>
     <h2>Working with several devices</h2>
@@ -274,9 +281,24 @@
   <li>Check the baud rate. The list offers {{const:BAUD_RATES}}; you can also type any whole number from {{count:BAUD_RATE_MIN}} to {{count:BAUD_RATE_MAX}}. It must match the rate the device uses.</li>
   <li>Choose <strong>Connect</strong>.</li>
 </ol>
-<p>Every connection uses 8 data bits, no parity and 1 stop bit (8N1), with no flow control.</p>
+<p>Most devices use 8 data bits, no parity and 1 stop bit (8N1), with no flow control, and that is where every port starts. The button beside the baud rate shows the port's settings; choose it to change them. See <a href="#port-settings">Port settings</a>.</p>
 <p>A port you have used before is offered the baud rate it last used. A port used for the first time is offered {{const:DEFAULT_BAUD_RATE}}, or the rate you set in <a href="#preferences">Preferences</a>.</p>
 <p>If the port does not appear, press {{key:refresh_ports}} and see <a href="#troubleshooting">Troubleshooting</a>.</p>
+
+<h2 id="port-settings">Port settings</h2>
+<p>The button beside the baud rate, for example <strong>8N1</strong>, opens the settings of the chosen port. They are remembered for that port and used each time it is connected.</p>
+<table class="wrap">
+  <thead><tr><th>Setting</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td>Data bits</td><td>5, 6, 7 or 8 bits in each character.</td></tr>
+    <tr><td>Parity</td><td>None, Even or Odd; Mark and Space on Windows and Linux.</td></tr>
+    <tr><td>Stop bits</td><td>1 or 2; 1.5 on Windows.</td></tr>
+    <tr><td>Flow control</td><td>None, Hardware (RTS/CTS) or Software (XON/XOFF).</td></tr>
+    <tr><td>DTR at open, RTS at open</td><td>Whether each line is set on as soon as the port opens. Many boards reset when DTR or RTS changes. With hardware flow control the driver sets RTS.</td></tr>
+  </tbody>
+</table>
+<p><strong>Usual settings</strong> returns to 8N1 with no flow control and both lines on. The settings cannot change while the port is open: disconnect first. A choice the device or its driver refuses is reported as the reason the port could not be opened.</p>
+<p>While connected, <strong>Lines</strong> in the toolbar sets DTR and RTS, sends a break of {{const:BREAK_DURATION_MS}} ms, and shows the input lines. Each change you make is noted in the session as a line of {{const:APP_NAME}}'s own. The status bar shows the input lines CTS, DSR, DCD and RI: a line that is on is drawn brighter, one that is off is dimmed.</p>
 
 <h2 id="window">The window</h2>
 <figure>
@@ -286,12 +308,12 @@
 <table class="wrap">
   <thead><tr><th>Part</th><th>What it is for</th></tr></thead>
   <tbody>
-    <tr><td>Tabs</td><td>One per device. The dot shows the state: hollow when not connected, filled when connected, and the logging colour while a log is being written.</td></tr>
-    <tr><td>Toolbar</td><td>Port and baud rate, <strong>Connect</strong> or <strong>Disconnect</strong>, <strong>Start log</strong>, <strong>Pause</strong>, <strong>Clear</strong>, <strong>Export</strong>, <strong>Plot</strong>, <strong>Text</strong> and <strong>HEX</strong>, and Find. In a narrow window the buttons that do not fit move into the <strong>More</strong> menu at the right end.</td></tr>
+    <tr><td>Tabs</td><td>One per device. The dot shows the state: hollow when not connected, filled when connected, and the logging colour while a log is being written. It is filled in the warning colour while the tab has an alert you have not yet seen.</td></tr>
+    <tr><td>Toolbar</td><td>Port and baud rate, the port's settings, or <strong>Lines</strong> while connected, <strong>Connect</strong> or <strong>Disconnect</strong>, <strong>Start log</strong>, <strong>Pause</strong>, <strong>Clear</strong>, <strong>Export</strong>, <strong>Plot</strong>, <strong>Text</strong> and <strong>HEX</strong>, and Find. In a narrow window the buttons that do not fit move into the <strong>More</strong> menu at the right end.</td></tr>
     <tr><td>Level buttons</td><td>Show only errors, warnings and so on, with a count on each. Beside them: the filter field, the timestamp button and <strong>Following</strong>.</td></tr>
     <tr><td>Console</td><td>The received lines, each with the time it arrived.</td></tr>
     <tr><td>Command row</td><td>Type a command and send it to the device.</td></tr>
-    <tr><td>Status bar</td><td>The port and its settings, lines per second, the number of lines, and the state of the log.</td></tr>
+    <tr><td>Status bar</td><td>The port and its settings, the input lines, lines per second, the number of lines, and the state of the log.</td></tr>
   </tbody>
 </table>
 <p>The menus hold the same commands, and show the keyboard shortcut of each that has one. The port, the baud rate and <strong>Pause</strong> are in the toolbar only.</p>
@@ -329,6 +351,12 @@
 <p>The level buttons above the console show <strong>All</strong>, <strong>Error</strong> (errors and critical lines), <strong>Warning</strong>, <strong>Info</strong>, <strong>Debug</strong> and <strong>Data</strong> (data and the commands you sent). Each shows how many lines it holds. In a narrow window they become one drop-down.</p>
 <p>To show every line alike, turn off <strong>Colour lines by severity</strong> on the Console page of Preferences.</p>
 
+<h3 id="highlights">Highlight rules</h3>
+<p>To make the lines you are watching for stand out, add a rule on the Highlights page of <a href="#preferences">Preferences</a>: a text to look for and a colour. A line that holds the text, whatever its case, is drawn in that colour, with a mark beside it in the margin. The first rule a line matches decides its colour. Up to {{const:HIGHLIGHT_RULES_MAX}} rules can be set. Highlights are on screen only: logs and exports keep every line as received.</p>
+
+<h3 id="ansi-colours">ANSI colours</h3>
+<p>Some firmware colours its text with ANSI codes. These codes are always removed from the text that is shown, logged and exported. Switch on <strong>ANSI colours</strong> on the Features page of Preferences to see the colours in the console: each of the 16 ANSI colours is drawn in a version made to be read on the theme's background, and colours chosen with the 256-colour or true-colour codes are shown as the nearest of the 16. Background colours, bold and underline are not shown. A highlight rule's colour comes before an ANSI colour.</p>
+
 <h2 id="filter">Filter lines</h2>
 <p>Type in the <strong>Filter lines</strong> field, or press {{key:filter}}, to show only the lines that contain that text. Letter case is ignored. The filter and the level buttons work together.</p>
 <p>A filter changes only what is shown. Lines that are hidden are still received, logged and exported. Press {{key:close_find}} to clear it.</p>
@@ -340,14 +368,16 @@
   <li>{{key:close_find}} closes Find.</li>
 </ul>
 <p>Find highlights and leaves every line in place; Filter hides the lines that do not match. Use Find to move through a log, and Filter to cut it down.</p>
+<p>Lines that begin with <code>[WireTrace]</code> are {{const:APP_NAME}}'s own notes in the session: they are in the console, the log and exports. A problem, such as lines not recorded or a lost connection, is marked <strong>WRN</strong>; an event, such as a control line you set, a break sent or the board back, is marked <strong>INF</strong>. No filter hides them, and the level counts never include them.</p>
 
 <h2 id="timestamps">Timestamps</h2>
-<p>Each line carries the time it arrived. The button above the console switches between two ways of showing it:</p>
+<p>Each line carries the time it arrived. The button above the console switches between three ways of showing it, also offered in <span class="menu">View &gt; Timestamps</span>:</p>
 <ul>
   <li><strong>Time of day</strong>, to the millisecond.</li>
+  <li><strong>Date and time</strong>, to the millisecond, exactly as the log writes it: for a session that runs past midnight, or to match a line with its log. This is the default.</li>
   <li><strong>Since previous line</strong>, which shows how long each line came after the one before it. Useful for timing.</li>
 </ul>
-<p>This changes the screen only. Log files always hold the full date and time.</p>
+<p>This changes the screen, and what is copied from it, only. Log files always hold the full date and time.</p>
 
 <h2 id="following">Following new lines</h2>
 <p>While <strong>Following</strong> is on, the console stays on the newest line. Scroll up to read something and following stops by itself, so the text you are reading does not move. A button at the bottom right then counts the new lines; choose it, or choose <strong>Not following</strong>, to return to the newest line.</p>
@@ -452,7 +482,7 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 <h2 id="safety">How your data is kept safe</h2>
 <ul>
   <li><strong>Reading and writing do not wait for the screen.</strong> If a device sends faster than this computer can draw, the console skips ahead and says how many lines it did not show. Those lines are still in the session and in the log.</li>
-  <li><strong>Lines reach the disk quickly.</strong> Unless you change it in Preferences, a received line waits in memory for at most {{seconds:LOG_FLUSH_INTERVAL_MS}} second before it is written, and every {{seconds:LOG_FSYNC_INTERVAL_MS}} seconds the system is told to put the file on the storage device, which limits what a power cut can cost.</li>
+  <li><strong>Lines reach the disk quickly.</strong> A received line is written within {{seconds:LOG_FLUSH_INTERVAL_MS}} second unless you change it in Preferences, and the file is regularly made safe on the storage device, which limits what a power cut can cost.</li>
   <li><strong>A disk problem does not end the log.</strong> If the file cannot be written, for example because a network drive went away, {{const:APP_NAME}} says so and keeps trying. Logging continues by itself when the file can be written again.</li>
   <li><strong>Losses are never silent.</strong> If lines could not be written, their number is shown, and the place is marked in the console and in the log.</li>
   <li><strong>Closing asks first.</strong> Closing a tab or the program while a log or an export is running asks before it stops them.</li>
@@ -461,7 +491,7 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 <!-- ────────────────────────────── Live plot ────────────────────────────── -->
 
 <h2 id="plot">Open the plot</h2>
-<p>Choose <strong>Plot</strong> or press {{key:plot}}. The plot opens under the console and draws the numbers in the lines as they arrive. Drag the bar between the console and the plot to give either more room.</p>
+<p>Choose <strong>Plot</strong> or press {{key:plot}}. The plot opens in a window of its own and draws the numbers in the lines as they arrive. Closing that window closes the plot; {{key:plot}} opens it again, where it last was for that port. To have the plot open under the console instead, switch off <strong>Where it opens</strong> on the Plot page of Preferences; drag the bar between the console and the plot to give either more room.</p>
 <p>To close it, choose the cross at the right end of the plot's toolbar, choose <strong>Plot</strong> again, or press {{key:plot}} again. While the plot is closed, no values are read from the lines; the console and the log carry on as before. Open it again and it carries on from the most recent lines.</p>
 <figure>
   {{image:plot|The live plot: a list of values with their latest figures on the left, panels of traces on the right, and two measuring cursors}}
@@ -496,24 +526,29 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
   <tbody>
     <tr><td>Value list</td><td>Each value with its latest figure and, below, the least, greatest and average of what is shown. Untick a value to hide its trace.</td></tr>
     <tr><td>One chart</td><td>Every value in one chart, on one scale.</td></tr>
-    <tr><td>Panels by scale</td><td>Values of similar size share a panel, so that a small value is not flattened by a large one. A value joins a panel while it is at most {{const:PLOT_PANEL_SCALE_RATIO}} times the smallest value in it. At most {{const:PLOT_MAX_PANELS}} panels are shown.</td></tr>
-    <tr><td>Time shown</td><td>How much recent time is on screen. Nothing is discarded by changing it. The plot keeps the latest {{count:PLOT_RING_BUFFER_SIZE}} samples of each value.</td></tr>
+    <tr><td>Panels by scale</td><td>How the plot opens. Values of similar size share a panel, so that a small value is not flattened by a large one. At most {{const:PLOT_MAX_PANELS}} panels are shown.</td></tr>
+    <tr><td>Time shown</td><td>How much recent time is on screen. Nothing is discarded by changing it. <strong>All</strong> shows the whole session; see <a href="#plot-older">Older time</a>.</td></tr>
     <tr><td>Pause</td><td>Holds the picture still. Values keep being collected, and <strong>Resume</strong> shows them.</td></tr>
-    <tr><td>Fit</td><td>Undoes any zoom and shows the newest data. In panels, it also sorts the values into panels again.</td></tr>
+    <tr><td>Fit</td><td>Undoes any zoom and shows the newest data, live again if a drag held the plot. In panels, it also sorts the values into panels again.</td></tr>
     <tr><td>Clear</td><td>Forgets the samples drawn so far. The values stay.</td></tr>
-    <tr><td>Pop out</td><td>Moves the plot to a window of its own, for a second monitor. <strong>Dock</strong> puts it back under the console.</td></tr>
+    <tr><td>Pop out</td><td>Moves the plot to a window of its own, for a second monitor. <strong>Dock</strong> puts it under the console.</td></tr>
+    <tr><td>Export (the icon beside Pop out)</td><td>Saves the chart as shown as a picture, PNG or SVG; or saves the values, of the time shown or of the whole session, as a CSV file. The file holds every sample exactly as found in the lines. Each row is one line: the time it was received, as the log writes it, its time on the chart in seconds, and each value, empty where the line did not hold it. Cells are written so that no spreadsheet can take one for a formula.</td></tr>
   </tbody>
 </table>
-<p>Scroll over a chart to zoom and drag to move. Right-click a chart for more ways to view it. <strong>Fit</strong> returns to the live view.</p>
+<p>While the plot is live, scroll over a chart to show less or more recent time: the plot keeps following the newest data, and <strong>Time shown</strong> says <strong>Custom</strong> until you choose from it again. Scrolling out past everything held shows <strong>All</strong>. Drag the chart to look back in time: the plot holds where you take it, as <strong>Pause</strong> does. While the plot is held, scrolling zooms in or out on time where the pointer is, and dragging moves along it. Every panel moves together, and each panel's scale always fits the values in the time shown. <strong>Fit</strong> undoes the zoom and, after a drag, returns to the live view.</p>
 <p>Point at a chart to read it. A line marks the sample nearest the pointer, a dot marks each value there, and a card beside the line gives the time the sample was received (as the console writes it), its time on the chart in seconds, and each value shown at that moment. A value given at a moment is the last one received at or before it; a dash means none had been received yet.</p>
-<p>Each tab has its own plot. The time along the bottom is in seconds, counted from the first line the plot received. It is taken from the arrival time of each line, the time the console and the log show.</p>
+<p>Each tab has its own plot. The time along the bottom is in seconds, counted from the first line received in the session (or after <strong>Clear</strong>). It is taken from the arrival time of each line, the time the console and the log show.</p>
+
+<h2 id="plot-older">Older time</h2>
+<p>The plot reaches back to the start of the session, as far as the session recording still holds; the start of a very long session may no longer be there, and the plot then says so.</p>
+<p>While the plot is live, older time is drawn by the least and greatest value of each moment, so no spike is lost however far you zoom out; a note above the chart says so, and the figures beside each value show its latest value only. <strong>Pause</strong> or <strong>Measure</strong>, and the time shown is drawn in full detail, with exact figures beside each value. Where a single value cannot be shown, the card under the pointer and the measuring table say <em>zoom in</em>.</p>
 
 <h2 id="plot-measure">Measure</h2>
 <p><strong>Measure</strong> puts two cursors, A and B, on the plot. Use it to time an event or to read a drop or a rise.</p>
 <ul>
   <li><strong>Measuring holds the plot still,</strong> so the cursors stay on what you are measuring. Values keep being collected; <strong>Resume</strong> goes back to live and ends measuring.</li>
   <li><strong>Drag A or B, or click a chart</strong> to move the nearer cursor there. A cursor always stops on a sample, never between two.</li>
-  <li><strong>The table under the plot</strong> has a row for A, a row for B, and a row for B minus A. For A and B it gives the time each sample was received and each value then; in the last row, the time between them in seconds and how much each value changed. The table takes its room from the console (or, with the plot in its own window, makes the window taller), so the chart keeps its height.</li>
+  <li><strong>The table under the plot</strong> has a row for A, a row for B, and a row for B minus A. For A and B it gives the time each sample was received and each value then; in the last row, the time between them in seconds and how much each value changed. Under the console, the table takes its room from the console, so the chart keeps its height. In its own window, the window keeps the size you gave it and the table takes its room from the chart.</li>
 </ul>
 <p>Choose <strong>Measure</strong> again to remove the cursors. A plot that measuring held goes back to live.</p>
 
@@ -534,6 +569,30 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 <h3>Profiles</h3>
 <p><strong>Save as...</strong> keeps a pattern under a name, so you can use it again. A port remembers the profile it last used. The profile for a port that has none yet is set in Preferences.</p>
 
+<!-- ─────────────────────────── The board's sessions ────────────────────── -->
+
+<h2 id="restarts">Restarts and the session report</h2>
+<p>When a board restarts, it says so in the lines it prints as it starts. {{const:APP_NAME}} recognises two of these and adds a notice after the line, such as <code>[WireTrace] Board restart 2 of this session: POWERON_RESET</code>, to the console, the log and any export:</p>
+<ul>
+  <li><strong>ESP32</strong> (every chip of the family): the line the boot ROM prints at each reset, such as <code>rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)</code>. The name in brackets is the reason the chip gives.</li>
+  <li><strong>Zephyr</strong>: the boot banner each image prints as it starts, <code>*** Booting Zephyr OS ...</code>, or <code>*** Using Zephyr OS ...</code> with the nRF Connect SDK.</li>
+</ul>
+<p>With a bootloader built on Zephyr whose own log is switched off, each restart is counted twice. Restart detection can be switched off on the Features page of <a href="#preferences">Preferences</a>.</p>
+<p>Choose <span class="menu">Device &gt; Session report...</span> for the report of the session in front, while it runs or after it ends: the port and its settings, when it was connected and how the connection ended, the running time, the lines received, the errors and warnings among them, the lines that could not be recorded because the disk could not keep up, each time the connection was lost and waited for, with how long the board was away, and each restart with its time and reason. The figures are exact, even when the screen skipped lines. <strong>Copy</strong> puts the report on the clipboard; <strong>Save...</strong> writes it to a text file.</p>
+
+<h2 id="alerts">Alerts</h2>
+<p>Switch on <strong>Alerts</strong> on the Features page of <a href="#preferences">Preferences</a>, and choose on the Alerts page what to be told about. Each tab alerts on its own board:</p>
+<ul>
+  <li><strong>Error lines:</strong> a banner says how many lines at the Error or Critical level arrived, and quotes the latest. It keeps counting until you dismiss it. The count is exact, even when the screen skipped lines. Like an alarm, it reminds you while error lines keep arriving, at most once every <strong>Time between alerts</strong>, until you dismiss the banner. Dismissing it acknowledges them: lines that go on arriving only count on the banner, silently. Once none has arrived for the Time between alerts, the next one alerts again.</li>
+  <li><strong>Connection lost:</strong> the tab already says so; the alert makes sure you notice.</li>
+  <li><strong>Quiet board:</strong> while connected, when no line arrives for the time you set. The banner goes by itself once lines arrive again.</li>
+</ul>
+<p>When a tab other than the one in front alerts, its dot on the tab bar is filled in the warning colour, and its tooltip says New alert, until you open it.</p>
+<p>An alert also flashes the window's button in the taskbar (or its icon in the dock) while you are working in another window. If you chose <strong>Sound</strong>, it plays your system's own sound: on Windows the Notification sound of your sound scheme, elsewhere the system's alert sound. It follows your system's sound settings, so a computer set to play no sounds stays silent. Choosing <strong>Sound</strong> in Preferences plays it once, so you know what to listen for.</p>
+<p>With <strong>Desktop notification</strong> chosen, an alert also shows a notification while you are working in another application, and WireTrace shows its icon in the notification area while this is on. The notification names the tab and what happened, never the text of a line, as it can show on a locked screen. Clicking it brings WireTrace forward at that tab. On Windows the notification plays the Notification sound itself, so you hear it once. Desktop notifications are not yet available on macOS, nor on a Linux desktop without a notification area.</p>
+<p>However many tabs alert, sounds and notifications are paced. Alerts that arrive together, such as boards lost when a hub is unplugged, give one sound and one notification. After that, nothing more sounds or notifies for the <strong>Time between alerts</strong> ({{const:ALERT_PAUSE_SECONDS_DEFAULT}} seconds by default). Anything that happens meanwhile comes together in one alert when that time ends. The banners in the tabs always show at once.</p>
+<p><span class="menu">Device &gt; Alerts</span> switches alerts on or off for the tab in front only, whatever the Features page says. Each tab follows Preferences until it is switched this way.</p>
+
 <!-- ─────────────────────── Working with several devices ────────────────── -->
 
 <h2 id="tabs">Tabs</h2>
@@ -545,7 +604,7 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 </ul>
 
 <h2 id="port-memory">What each port remembers</h2>
-<p>For every port you have connected to, {{const:APP_NAME}} remembers the baud rate, the line ending for commands, the plot profile and the name of its tab, and offers them again the next time you choose that port. Up to {{const:PORT_MEMORY_LIMIT}} ports are remembered; beyond that, the one used longest ago is forgotten.</p>
+<p>For every port you have connected to, {{const:APP_NAME}} remembers the baud rate and line settings, the line ending for commands, the plot profile, where its plot window was and the name of its tab, and offers them again the next time you choose that port. Up to {{const:PORT_MEMORY_LIMIT}} ports are remembered; beyond that, the one used longest ago is forgotten.</p>
 
 <!-- ───────────────────── When something goes wrong ────────────────────── -->
 
@@ -561,7 +620,21 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 </table>
 
 <h2 id="connection-lost">Connection lost</h2>
-<p>If a device is unplugged, or another program takes the port, {{const:APP_NAME}} says when it happened. Nothing received is lost: the console keeps its lines and a running log is closed properly.</p>
+<p>If a device is unplugged, resets its USB connection, or another program takes the port, {{const:APP_NAME}} says when it happened and waits for the same board to come back. The session goes on: the console keeps its lines, a running log stays open, and the plot keeps its values. Nothing received is lost.</p>
+<figure>
+  {{image:waiting-for-board|A bar at the top of the tab saying the connection was lost and the tab is waiting for the same board, with a button to stop waiting}}
+  <figcaption>The status bar says since when the tab has been waiting.</figcaption>
+</figure>
+<p>When the board is back, the tab opens its port with the same settings and carries on, in the same log file. A notice in the console, the log and any export says when the connection was lost and when it came back, and how the board was recognised. Anything the board sent while it was disconnected could not be received, and the plot leaves a gap there rather than joining the lines across it. The <a href="#restarts">session report</a> lists each time.</p>
+<p>A board is taken back only when it is recognised as the same one:</p>
+<ul>
+  <li><strong>By serial number:</strong> a board whose USB adapter has a serial number of its own is recognised in any USB socket, under any port name. Some adapters share one serial number; when two connected adapters do, the board is recognised by its USB socket instead, or the tab asks.</li>
+  <li><strong>By USB port:</strong> a board without a serial number is recognised when it comes back in the same USB socket, through the same hubs.</li>
+  <li><strong>By port name:</strong> a port with no USB identity at all, such as a built-in COM port, a PCI card or a Bluetooth serial port, has only its name to go by. This can be switched off in <a href="#preferences">Preferences</a>.</li>
+</ul>
+<p>If a board of the same model appears somewhere else and {{const:APP_NAME}} cannot tell whether it is yours, the tab asks. <strong>Reconnect</strong> takes it; <strong>Not this board</strong> keeps waiting and does not ask about that port again. A board another tab is connected to is never offered.</p>
+<p><strong>Stop waiting</strong>, or <strong>Disconnect</strong>, ends the session as if the board had not come back. The tab can also stop waiting by itself after the time set in <a href="#preferences">Preferences</a>. For a tab that should end its session at once when the connection is lost, switch off <span class="menu">Device &gt; Reconnect lost board</span> while it is in front. Each tab follows Preferences until it is switched this way.</p>
+<p>When a session ends because its board was lost, the tab says so in a bar:</p>
 <figure>
   {{image:connection-lost|A bar at the top of the tab saying the connection was lost, with buttons to export the session and to connect again}}
   <figcaption>The bar stays until you act on it or dismiss it.</figcaption>
@@ -620,13 +693,30 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
     <tr><td>Colours</td><td><strong>Colour lines by severity</strong>: errors and warnings stand out. Off shows every line alike.</td></tr>
     <tr><td>Following</td><td>Whether new tabs stay on the newest line.</td></tr>
     <tr><td>Blank lines</td><td>Hide empty lines on screen. Logs and exports keep every line.</td></tr>
-    <tr><td>Connection</td><td>Baud rate</td><td>Offered for a port that has not been used before.</td></tr>
+    <tr><td rowspan="4">Connection</td><td>Baud rate</td><td>Offered for a port that has not been used before.</td></tr>
+    <tr><td>Reconnect</td><td>Wait for a lost board to return and continue the session. On by default. <strong>Device &gt; Reconnect lost board</strong> switches it for one tab. See <a href="#connection-lost">Connection lost</a>.</td></tr>
+    <tr><td>Stop waiting after</td><td>How long a tab waits, up to {{count:RECONNECT_LIMIT_MINUTES_MAX}} minutes. Never keeps waiting until you stop it.</td></tr>
+    <tr><td>Ports without USB identity</td><td><strong>Reconnect by port name</strong>: a built-in COM port, a PCI card or a Bluetooth port is taken back by its name.</td></tr>
     <tr><td rowspan="4">Logging</td><td>Log folder</td><td>Where new logs are written. Choosing another folder when you start a log changes it, so the next log goes to the folder you used last.</td></tr>
     <tr><td>Log format</td><td>Text, or Text and CSV, as the choice a new log starts with.</td></tr>
     <tr><td>Maximum log file size</td><td>A log that reaches this size continues in a new file. Up to {{count:LOG_SPLIT_MAX_MB}} MB. Off keeps each log in one file.</td></tr>
     <tr><td>Line endings in files</td><td>LF, the same on every system, or CR LF for older Windows tools.</td></tr>
-    <tr><td rowspan="2">Plot</td><td>Default profile</td><td>Used by a port that has no profile of its own yet.</td></tr>
+    <tr><td rowspan="6">Features</td><td>Live plot</td><td>Switch a feature off when you do not use it: it then adds nothing to the window. The change applies to every tab at once.</td></tr>
+    <tr><td>Restart detection</td><td>Marks and counts each restart of the board. See <a href="#restarts">Restarts and the session report</a>.</td></tr>
+    <tr><td>Session report</td><td>The report of each session, in the Device menu.</td></tr>
+    <tr><td>Alerts</td><td>Off by default. Tells you about error lines, a lost connection or a quiet board. See <a href="#alerts">Alerts</a>.</td></tr>
+    <tr><td>Highlight rules</td><td>Draws the lines that hold a chosen text in a chosen colour. See <a href="#highlights">Highlight rules</a>.</td></tr>
+    <tr><td>ANSI colours</td><td>Off by default. Shows the colours a device sets with ANSI codes. See <a href="#ansi-colours">ANSI colours</a>.</td></tr>
+    <tr><td rowspan="3">Plot</td><td>Where it opens</td><td>Show the plot in its own window (on), or under the console (off). Pop out and Dock move an open plot either way.</td></tr>
+    <tr><td>Default profile</td><td>Used by a port that has no profile of its own yet.</td></tr>
     <tr><td>Profiles</td><td>Opens Configure plot to add, rename, delete or test profiles.</td></tr>
+    <tr><td rowspan="6">Alerts</td><td>Error lines</td><td>Alert on new lines at the Error or Critical level, reminding until you dismiss the banner. Off by default.</td></tr>
+    <tr><td>Connection lost</td><td>Alert when the board is unplugged or the link fails.</td></tr>
+    <tr><td>Quiet board</td><td>Alert after no line for the time set, while connected.</td></tr>
+    <tr><td>Sound</td><td>Play your system's sound with an alert: the Notification sound on Windows. Choosing it, or switching Alerts on with it chosen, plays it once. On by default.</td></tr>
+    <tr><td>Desktop notification</td><td>Show a notification while you work in another application. Off by default.</td></tr>
+    <tr><td>Time between alerts</td><td>The least time from one sound or notification to the next; alerts meanwhile come together as one. {{const:ALERT_PAUSE_SECONDS_DEFAULT}} seconds by default.</td></tr>
+    <tr><td>Highlights</td><td>Rules</td><td>A text to look for and a colour, one row each. <strong>Add a rule</strong> adds a row; the cross removes one. See <a href="#highlights">Highlight rules</a>.</td></tr>
     <tr><td rowspan="2">Updates and privacy</td><td>Updates</td><td>Whether {{const:APP_NAME}} looks for a newer version by itself.</td></tr>
     <tr><td>Usage statistics</td><td>Whether usage statistics are shared. Off unless you switch them on; switching them off deletes them here and on the server. <strong>What is sent</strong> opens the privacy policy.</td></tr>
     <tr><td rowspan="4">Advanced</td><td>Console line limit</td><td>Lines kept on screen, from {{count:MAX_CONSOLE_LINES_MIN}} to {{count:MAX_CONSOLE_LINES_MAX}}. Starts at {{count:MAX_CONSOLE_LINES}}. Older lines stay in the session and the log.</td></tr>

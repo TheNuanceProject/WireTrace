@@ -11,6 +11,13 @@ Bounded like everything else:
   oldest segment is discarded, and an export says that earlier data
   is no longer available.
 
+Reading as it grows:
+  The plot reads the spool while it is written, to draw older time. A
+  ``SpoolPosition`` says how far a reader has come; ``snapshot_from``
+  gives what was added after it, and ``SpoolSnapshot.blocks`` gives
+  the records with the byte range each block of them came from, so a
+  range can be read again later with ``SpoolSnapshot.read``.
+
 Ownership:
   Each spool directory holds a lock file that stays locked for as long
   as its session is alive. A directory whose lock can be taken belongs
@@ -36,7 +43,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -60,14 +67,41 @@ _READ_BLOCK_BYTES = 1024 * 1024
 
 @dataclass(slots=True)
 class _Segment:
+    number: int
     path: str
     size: int = 0
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class SpoolPosition:
+    """A place in the spool: a byte offset in a numbered segment."""
+
+    segment: int
+    offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class SpoolRange:
+    """The records stored between two offsets of one segment."""
+
+    segment: int
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class SpoolBlock:
+    """Records read together, and the byte range they were stored in."""
+
+    where: SpoolRange
+    records: list[LineRecord]
 
 
 @dataclass(frozen=True, slots=True)
 class _Slice:
     """A byte range of one segment file."""
 
+    number: int
     path: str
     start: int
     end: int
@@ -78,12 +112,17 @@ class SpoolSnapshot:
 
     Attributes:
         truncated: True if older data had already been discarded, so
-            the snapshot does not reach back to the start of the session.
+            the snapshot does not reach back as far as it was asked to.
+        oldest_segment: The number of the oldest segment the spool still
+            held, or None if it held none; anything older is gone.
     """
 
-    def __init__(self, slices: list[_Slice], truncated: bool, release) -> None:
+    def __init__(
+        self, slices: list[_Slice], truncated: bool, release, oldest_segment: int | None = None,
+    ) -> None:
         self._slices = slices
         self.truncated = truncated
+        self.oldest_segment = oldest_segment
         self._release = release
         self._released = False
 
@@ -92,10 +131,45 @@ class SpoolSnapshot:
         """True if the snapshot holds no records."""
         return not self._slices
 
+    @property
+    def end(self) -> SpoolPosition | None:
+        """Where the snapshot ends, or None if it holds nothing."""
+        if not self._slices:
+            return None
+        last = self._slices[-1]
+        return SpoolPosition(last.number, last.end)
+
     def records(self) -> Iterator[LineRecord]:
         """Yield every record in the snapshot, oldest first."""
+        for block in self.blocks():
+            yield from block.records
+
+    def blocks(self) -> Iterator[SpoolBlock]:
+        """Yield the records of the snapshot block by block, oldest first."""
         for piece in self._slices:
             yield from _read_slice(piece)
+
+    def holds(self, wanted: SpoolRange) -> bool:
+        """True if the snapshot holds every record of ``wanted``."""
+        return any(
+            piece.number == wanted.segment and piece.start <= wanted.start and wanted.end <= piece.end
+            for piece in self._slices
+        )
+
+    def read(self, ranges: Iterable[SpoolRange]) -> Iterator[SpoolBlock]:
+        """Yield the records of ``ranges`` that the snapshot holds, in the order given.
+
+        A range of a segment the snapshot does not hold, or beyond its
+        end, is left out.
+        """
+        held = {piece.number: piece for piece in self._slices}
+        for wanted in ranges:
+            piece = held.get(wanted.segment)
+            if piece is None:
+                continue
+            start, end = max(wanted.start, piece.start), min(wanted.end, piece.end)
+            if start < end:
+                yield from _read_slice(_Slice(piece.number, piece.path, start, end))
 
     def release(self) -> None:
         """Allow the spool to discard the segments this snapshot covers."""
@@ -207,12 +281,35 @@ class SessionSpool:
                 started = True
                 start = self._mark[1]
             if segment.size > start:
-                slices.append(_Slice(segment.path, start, segment.size))
-
-        with self._holds_lock:
-            self._holds += 1
+                slices.append(_Slice(segment.number, segment.path, start, segment.size))
         truncated = self._truncated and self._mark is None
-        return SpoolSnapshot(slices, truncated, self._release_hold)
+        return self._hold(slices, truncated)
+
+    def snapshot_from(
+        self, position: SpoolPosition | None, max_segments: int | None = None,
+    ) -> SpoolSnapshot:
+        """Capture what was added after ``position``; None is the start of the session.
+
+        At most ``max_segments`` segments are included, so a reader far
+        behind holds back the discarding of old segments one at a time.
+        The snapshot is ``truncated`` if records after ``position`` had
+        already been discarded.
+        """
+        if position is None:
+            truncated = self._truncated
+            position = SpoolPosition(0, 0)
+        else:
+            truncated = bool(self._segments) and self._segments[0].number > position.segment
+        slices: list[_Slice] = []
+        for segment in self._segments:
+            if segment.number < position.segment:
+                continue
+            start = position.offset if segment.number == position.segment else 0
+            if segment.size > start:
+                slices.append(_Slice(segment.number, segment.path, start, segment.size))
+            if max_segments is not None and len(slices) == max_segments:
+                break
+        return self._hold(slices, truncated)
 
     def close(self) -> None:
         """Stop appending. The files stay readable until ``delete``."""
@@ -275,11 +372,11 @@ class SessionSpool:
         if self._descriptor is not None:
             descriptor, self._descriptor = self._descriptor, None
             self._backend.close(descriptor)
-        name = _SEGMENT_NAME_FORMAT.format(number=self._next_segment_number)
-        path = os.path.join(self._directory, name)
+        number = self._next_segment_number
+        path = os.path.join(self._directory, _SEGMENT_NAME_FORMAT.format(number=number))
         self._descriptor = self._backend.create(path, PRIVATE_FILE_MODE)
         self._next_segment_number += 1
-        self._segments.append(_Segment(path))
+        self._segments.append(_Segment(number, path))
 
     def _discard_oldest_segments(self) -> None:
         """Drop the oldest segments while the spool is over its cap.
@@ -302,6 +399,12 @@ class SessionSpool:
             self._truncated = True
             if self._mark is not None and self._mark[0] == oldest.path:
                 self._mark = None
+
+    def _hold(self, slices: list[_Slice], truncated: bool) -> SpoolSnapshot:
+        with self._holds_lock:
+            self._holds += 1
+        oldest = self._segments[0].number if self._segments else None
+        return SpoolSnapshot(slices, truncated, self._release_hold, oldest)
 
     def _release_hold(self) -> None:
         with self._holds_lock:
@@ -342,12 +445,13 @@ def _decode(line: str) -> LineRecord | None:
         return None
 
 
-def _read_slice(piece: _Slice) -> Iterator[LineRecord]:
-    """Yield the records stored in one byte range of a segment."""
-    remaining = piece.end - piece.start
+def _read_slice(piece: _Slice) -> Iterator[SpoolBlock]:
+    """Yield the records stored in one byte range of a segment, block by block."""
+    position = piece.start
     tail = b""
     with open(piece.path, "rb") as segment:
         segment.seek(piece.start)
+        remaining = piece.end - piece.start
         while remaining > 0:
             block = segment.read(min(_READ_BLOCK_BYTES, remaining))
             if not block:
@@ -355,10 +459,15 @@ def _read_slice(piece: _Slice) -> Iterator[LineRecord]:
             remaining -= len(block)
             lines = (tail + block).split(b"\n")
             tail = lines.pop()
-            for raw in lines:
-                record = _decode(raw.decode(_ENCODING))
-                if record is not None:
-                    yield record
+            if not lines:
+                continue
+            start = position
+            position += sum(len(raw) + 1 for raw in lines)
+            records = [
+                record for raw in lines
+                if (record := _decode(raw.decode(_ENCODING))) is not None
+            ]
+            yield SpoolBlock(SpoolRange(piece.number, start, position), records)
 
 
 # ── Directory Lock ───────────────────────────────────────────────────────────

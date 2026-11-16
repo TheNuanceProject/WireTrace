@@ -48,13 +48,10 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
 
 - **Several devices, one tab each.** A tab reads, shows and logs on its
   own. Switching tabs interrupts nothing.
-- **Reading, writing and drawing are separate.** The port is read on
-  one thread and the log is written on another, so a busy window or a
-  slow disk does not delay reading. A test sends a burst through a
-  stand-in for the port, using the real reader and writer, and holds
-  the path to the log file to ten thousand lines a second, complete and
-  in order, on every run of the checks
-  (`tests_gui/test_throughput.py`).
+- **The log comes first.** Every line goes from the port to the log
+  without waiting for the screen, so a busy window never slows a
+  capture. A test holds the path from the port to the log file to ten
+  thousand lines a second, complete and in order, on every change.
 - **Nothing is lost quietly.** On disconnect, on an unplugged device
   and on closing, what is waiting is written before the result is
   reported. If the disk cannot keep up or fails, the number of lines
@@ -72,10 +69,26 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
   what it holds, without changing what is written to disk.
 - **Text and HEX.** Bytes can be shown and recorded as offset, hex and
   printable characters.
+- **A lost board is waited for.** When a board is unplugged or resets
+  its USB connection, the tab waits for the same board and continues
+  the same session and log.
 - **Live plot.** Numbers are found in JSON, `key: value` pairs and
-  delimited values and drawn as traces under the console. For other
+  delimited values and drawn as traces, in a window of their own or
+  under the console, back to the start of the session. For other
   formats, a pattern with named groups can be given and saved as a
-  profile.
+  profile. The chart can be saved as PNG or SVG and its values as CSV.
+- **Restarts and the session report.** ESP32 and Zephyr restarts are
+  recognised and noted. The session report counts lines, errors,
+  warnings, lost connections and restarts exactly.
+- **Alerts and highlights.** A banner, a flash of the window, a sound
+  and, if you choose, a desktop notification for new errors, a lost
+  connection or a quiet board, paced by a time between alerts; rules that
+  colour the lines you look for; ANSI colours from the device, on
+  screen only.
+- **Line settings.** Data bits, parity, stop bits, flow control, DTR,
+  RTS and break, per port.
+- **Switch off what you do not use.** Each feature can be switched off
+  in Preferences, and is then not loaded at all.
 - **CSV.** Lines that carry the detected columns become rows; the text
   log is always written beside the CSV.
 - **Commands.** Send to the device, with history and saved commands on
@@ -171,8 +184,8 @@ system, the processor type, how WireTrace was installed and the date of
 the previous check. It carries no identifier and nothing about you,
 your devices or your data. Like any request, it reaches the server from
 a network address: the server derives the country and an approximate
-area (about 100 km) from it, uses the address for no more than a minute
-to limit abuse, and never stores it. The file it reads is on the
+city from it, uses the address for no more than a minute to limit abuse,
+and never stores it. The file it reads is on the
 website, which GitHub Pages hosts, so GitHub also receives the request,
 as it does every visit to the website. The check can be turned off in
 the Windows installer and at any time in Preferences, under Updates and

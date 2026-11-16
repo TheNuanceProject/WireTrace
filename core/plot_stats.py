@@ -2,7 +2,8 @@
 """Numbers the plot shows beside its lines.
 
 Three things, each a plain function of the samples:
-  - the last, least, greatest and mean value within the visible time
+  - the last, least, greatest and mean value within the visible time,
+    also when its older part was read in full from the recording
   - which values are near enough in size to share one panel
   - what was received at a moment: the sample nearest a time, and the
     value each series last received at or before it, for the readout
@@ -14,6 +15,7 @@ This module does not touch the GUI, the disk, the serial port or any other I/O.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 
@@ -51,6 +53,47 @@ def visible_stats(
         minimum=float(window.min()),
         maximum=float(window.max()),
         mean=float(window.mean()),
+    )
+
+
+class OlderFigures(Protocol):
+    """Exact figures of the samples before a range of samples in memory."""
+
+    count: int
+    minimum: float
+    maximum: float
+    total: float
+    last_y: float
+
+
+def stats_after(
+    older: OlderFigures | None, x: np.ndarray, y: np.ndarray, start: float, x_max: float,
+) -> SeriesStats | None:
+    """Statistics of ``older`` followed by the samples with ``start <= x <= x_max``.
+
+    For a range whose older part was read in full from the recording
+    and whose newer part is in memory. Returns None when neither holds
+    a sample.
+    """
+    first = int(np.searchsorted(x, start, side="left")) if x.size else 0
+    end = int(np.searchsorted(x, x_max, side="right")) if x.size else 0
+    window = y[first:end]
+    window = window[np.isfinite(window)]
+    count = window.size + (older.count if older is not None else 0)
+    if count == 0:
+        return None
+    lows = [float(window.min())] if window.size else []
+    highs = [float(window.max())] if window.size else []
+    total = float(window.sum())
+    if older is not None and older.count:
+        lows.append(older.minimum)
+        highs.append(older.maximum)
+        total += older.total
+    return SeriesStats(
+        last=float(window[-1]) if window.size else older.last_y,
+        minimum=min(lows),
+        maximum=max(highs),
+        mean=total / count,
     )
 
 

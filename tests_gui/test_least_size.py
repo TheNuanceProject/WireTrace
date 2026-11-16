@@ -116,7 +116,6 @@ def test_the_test_display_is_named_without_a_drive():
     assert QGuiApplication.primaryScreen().availableGeometry().width() > 800
 
 
-
 def _run_and_let_go(owner: QWidget) -> None:
     """Run a dialog over ``owner`` as WireTrace does, then let go of it."""
     dialog = QDialog(owner)

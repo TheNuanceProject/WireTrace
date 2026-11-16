@@ -82,6 +82,27 @@ def note(
     return label
 
 
+def setting_row(label: str, hint: str, field: QWidget) -> QHBoxLayout:
+    """A setting: its name and hint on the left, its field on the right."""
+    metrics = tokens.METRICS
+    text = QVBoxLayout()
+    text.setContentsMargins(0, 0, 0, 0)
+    text.setSpacing(metrics.space_half)
+    text.addWidget(heading(label))
+    text.addWidget(note(hint, small=True))
+    text_column = QWidget()
+    text_column.setLayout(text)
+    text_column.setFixedWidth(metrics.form_label_width)
+
+    row = QHBoxLayout()
+    row.setSpacing(metrics.space_6)
+    row.addWidget(text_column, 0, Qt.AlignmentFlag.AlignTop)
+    row.addWidget(field, 0, Qt.AlignmentFlag.AlignTop)
+    row.addStretch(1)
+    field.setAccessibleName(label)
+    return row
+
+
 def rule() -> QFrame:
     """A horizontal hairline between two parts of a dialog."""
     line = QFrame()

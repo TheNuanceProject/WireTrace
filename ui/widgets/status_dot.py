@@ -2,7 +2,10 @@
 """The small dot that shows the state of a connection.
 
 An outline while nothing is connected, filled green while connected,
-filled red while logging. Used in the status bar and on each tab.
+filled red while logging, and a ring in the warning colour while waiting
+for a lost board to return. Used in the status bar and on each tab. On
+a tab, it is filled in the warning colour while the tab has an alert the
+user has not yet seen.
 """
 
 from __future__ import annotations
@@ -22,14 +25,21 @@ class LinkState(enum.Enum):
     IDLE = "idle"
     CONNECTED = "connected"
     LOGGING = "logging"
+    WAITING = "waiting"
 
 
-def _paint_dot(painter: QPainter, area: QRectF, state: LinkState) -> None:
+def _paint_dot(painter: QPainter, area: QRectF, state: LinkState, alert: bool = False) -> None:
     palette = tokens.palette()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    if state is LinkState.IDLE:
-        pen = QPen(QColor(palette.edge))
-        pen.setWidthF(tokens.METRICS.border)
+    if alert:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(palette.warning))
+        painter.drawEllipse(area)
+        return
+    if state in (LinkState.IDLE, LinkState.WAITING):
+        waiting = state is LinkState.WAITING
+        pen = QPen(QColor(palette.warning if waiting else palette.edge))
+        pen.setWidthF(tokens.METRICS.mark if waiting else tokens.METRICS.border)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         inset = pen.widthF() / 2
@@ -41,14 +51,14 @@ def _paint_dot(painter: QPainter, area: QRectF, state: LinkState) -> None:
     painter.drawEllipse(area)
 
 
-def state_icon(state: LinkState, pixel_ratio: float) -> QIcon:
-    """The dot as an icon, for a tab."""
+def state_icon(state: LinkState, pixel_ratio: float, alert: bool = False) -> QIcon:
+    """The dot as an icon, for a tab; ``alert`` while it has an alert not yet seen."""
     size = tokens.METRICS.status_dot
     pixmap = QPixmap(round(size * pixel_ratio), round(size * pixel_ratio))
     pixmap.setDevicePixelRatio(pixel_ratio)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
-    _paint_dot(painter, QRectF(0, 0, size, size), state)
+    _paint_dot(painter, QRectF(0, 0, size, size), state, alert)
     painter.end()
     return QIcon(pixmap)
 

@@ -9,11 +9,26 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from app.constants import DisplayMode, ExportFormat, LineEnding
+from app.constants import (
+    BREAK_DURATION_MS,
+    TAG_NOTICE,
+    TAG_NOTICE_EVENT,
+    DisplayMode,
+    ExportFormat,
+    LineEnding,
+)
 from core.device_pipeline import DevicePipeline, DisplayBuffer, arrival_times
 from core.export_job import ExportRequest
 from core.log_writer import LogRequest, LogStartError
 from core.records import LineRecord, RecordOrigin
+from core.serial_settings import (
+    FlowControl,
+    InputLines,
+    LineSettings,
+    LineStates,
+    Parity,
+    StopBits,
+)
 from tests_gui.support import LoopbackPort, line_text, log_body, wait_until
 
 _PORT = "PORT0"
@@ -109,6 +124,22 @@ def _connect(qapp, pipeline: DevicePipeline) -> Events:
     pipeline.open(_PORT, _BAUD)
     wait_until(qapp, lambda: bool(events.connected))
     return events
+
+
+def _connect_following_lines(qapp, pipeline: DevicePipeline) -> list[LineStates]:
+    """Connect, then return the line states reported after the connection.
+
+    The open reports the port's line states itself, separately from the
+    connection, so both are waited for before the list is emptied. A
+    report that arrives late is then never counted as one that followed.
+    """
+    states: list[LineStates] = []
+    pipeline.lines_changed.connect(states.append)
+    events = Events(pipeline)
+    pipeline.open(_PORT, _BAUD)
+    wait_until(qapp, lambda: bool(events.connected) and bool(states))
+    states.clear()
+    return states
 
 
 def _take_all(qapp, pipeline: DevicePipeline, count: int) -> list[LineRecord]:
@@ -260,7 +291,6 @@ class TestDisplayBuffer:
         assert summary.lines_written == 1_000
         assert pipeline.take_display(10)[1] == 0
 
-
     def test_the_characters_waiting_are_bounded_as_well(self):
         buffer = DisplayBuffer(capacity=10_000, max_characters=1_000)
         start = datetime(2026, 1, 2, 3, 4, 5)
@@ -300,6 +330,311 @@ class TestDisplayBuffer:
 
         pipeline.discard_display()
         assert pipeline.take_display(10) == ([], 0)
+
+
+class TestConsumers:
+    def test_a_consumer_receives_every_record_the_console_skips(
+        self, qapp, make_pipeline, port,
+    ):
+        pipeline = make_pipeline(display_capacity=100)
+        consumer = pipeline.add_consumer()
+        events = _connect(qapp, pipeline)
+        port.feed(b"".join(f"line {i}\n".encode() for i in range(1_000)))
+        wait_until(qapp, lambda: any(total == 1_000 for _, total in events.stats))
+
+        assert pipeline.take_display(10_000)[1] == 900
+        records, skipped = consumer.take(10_000)
+        assert skipped == 0
+        assert [r.text for r in records] == [f"line {i}" for i in range(1_000)]
+
+    def test_a_consumer_that_falls_behind_counts_what_it_missed_and_the_log_is_whole(
+        self, qapp, make_pipeline, port, tmp_path,
+    ):
+        pipeline = make_pipeline()
+        consumer = pipeline.add_consumer()
+        consumer.set_capacity(50)
+        events = _connect(qapp, pipeline)
+        pipeline.start_log(_log_request(tmp_path))
+        port.feed(b"".join(f"line {i}\n".encode() for i in range(500)))
+        wait_until(qapp, lambda: any(total == 500 for _, total in events.stats))
+
+        records, skipped = consumer.take(10_000)
+        assert skipped == 450
+        assert [r.text for r in records] == [f"line {i}" for i in range(450, 500)]
+        assert pipeline.stop_log().lines_written == 500
+
+    def test_a_removed_consumer_is_no_longer_filled(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        kept = pipeline.add_consumer()
+        removed = pipeline.add_consumer()
+        events = _connect(qapp, pipeline)
+        pipeline.remove_consumer(removed)
+        port.feed(b"one\ntwo\n")
+        wait_until(qapp, lambda: any(total == 2 for _, total in events.stats))
+
+        assert [r.text for r in kept.take(10)[0]] == ["one", "two"]
+        assert removed.take(10) == ([], 0)
+
+    def test_a_new_session_starts_each_consumer_empty(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        consumer = pipeline.add_consumer()
+        events = _connect(qapp, pipeline)
+        port.feed(b"old\n")
+        _take_all(qapp, pipeline, 1)
+        pipeline.close()
+        wait_until(qapp, lambda: bool(events.disconnected))
+
+        pipeline.open(_PORT, _BAUD)
+        wait_until(qapp, lambda: len(events.connected) == 2)
+        port.feed(b"new\n")
+        _take_all(qapp, pipeline, 1)
+
+        texts = [r.text for r in consumer.take(10)[0] if r.origin is RecordOrigin.DEVICE]
+        assert texts == ["new"]
+
+
+class TestSessionFigures:
+    def test_restarts_are_marked_after_their_line_and_counted(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        _connect(qapp, pipeline)
+        port.feed(
+            b"boot\n"
+            b"rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\n"
+            b"*** Booting Zephyr OS build v3.7.0 ***\n"
+            b"E (12) app: sensor missing\n"
+            b"*** Booting Zephyr OS build v3.7.0 ***\n"
+        )
+        records = _take_all(qapp, pipeline, 7)
+
+        assert [r.text for r in records] == [
+            "boot",
+            "rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)",
+            "[WireTrace] Board restart 1 of this session: POWERON_RESET",
+            "*** Booting Zephyr OS build v3.7.0 ***",
+            "E (12) app: sensor missing",
+            "*** Booting Zephyr OS build v3.7.0 ***",
+            "[WireTrace] Board restart 2 of this session: Zephyr boot banner",
+        ]
+        assert records[2].origin is RecordOrigin.NOTICE
+        assert records[2].timestamp == records[1].timestamp
+        figures = pipeline.session_figures()
+        assert figures.lines == 5
+        assert figures.restart_count == 2
+        assert figures.by_level.get("ERROR") == 1
+
+    def test_restarts_are_left_alone_when_detection_is_off(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        pipeline.set_restart_detection(False)
+        _connect(qapp, pipeline)
+        port.feed(b"rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\nnext\n")
+
+        records = _take_all(qapp, pipeline, 2)
+
+        assert [r.text for r in records] == [
+            "rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)", "next",
+        ]
+        assert pipeline.session_figures().restart_count == 0
+
+    def test_lines_the_disk_could_not_keep_up_with_are_counted(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline(max_pending_lines=10)
+        dropped: list[int] = []
+        pipeline.lines_dropped.connect(dropped.append)
+        events = _connect(qapp, pipeline)
+        for start in range(0, 2_000, 100):
+            port.feed(b"".join(f"line {i}\n".encode() for i in range(start, start + 100)))
+        wait_until(qapp, lambda: any(total == 2_000 for _, total in events.stats))
+        pipeline.close()
+        wait_until(qapp, lambda: bool(events.disconnected))
+
+        figures = pipeline.session_figures()
+        assert figures.lines == 2_000
+        assert figures.not_recorded == sum(dropped)
+
+    def test_the_end_of_the_session_is_kept(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        events = _connect(qapp, pipeline)
+        assert pipeline.session_figures().ended is None
+
+        port.transport.drop()
+        wait_until(qapp, lambda: bool(events.disconnected))
+
+        figures = pipeline.session_figures()
+        assert figures.ended is not None and figures.ended_unexpectedly is True
+        assert (figures.port, figures.baud) == (_PORT, _BAUD)
+
+
+class TestAnsiColours:
+    def test_lines_carry_their_colours_and_the_log_stays_plain(
+        self, qapp, make_pipeline, port, tmp_path,
+    ):
+        pipeline = make_pipeline()
+        pipeline.set_ansi_colours(True)
+        _connect(qapp, pipeline)
+        pipeline.start_log(_log_request(tmp_path))
+        port.feed(b"\x1b[0;31mE (5) app: fault\x1b[0m\nplain\n")
+        records = _take_all(qapp, pipeline, 2)
+        pipeline.stop_log()
+
+        assert [(r.text, r.colours) for r in records] == [
+            ("E (5) app: fault", ((0, 16, 1),)), ("plain", ()),
+        ]
+        assert [line_text(line) for line in log_body(str(tmp_path / "session.txt"))] == [
+            "E (5) app: fault", "plain",
+        ]
+
+    def test_without_colours_switched_on_lines_carry_none(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        _connect(qapp, pipeline)
+        port.feed(b"\x1b[0;32mok\x1b[0m\n")
+
+        assert [(r.text, r.colours) for r in _take_all(qapp, pipeline, 1)] == [("ok", ())]
+
+
+class TestReconnect:
+    @staticmethod
+    def _waiting(qapp, pipeline):
+        lost: list[tuple[str, str]] = []
+        back: list[tuple[str, int, float]] = []
+        failed: list[tuple[str, str]] = []
+        pipeline.connection_lost.connect(lambda *a: lost.append(a))
+        pipeline.connection_back.connect(lambda *a: back.append(a))
+        pipeline.reconnect_failed.connect(lambda *a: failed.append(a))
+        return lost, back, failed
+
+    def test_the_session_and_its_log_go_on_after_the_board_returns(
+        self, qapp, make_pipeline, port, tmp_path,
+    ):
+        pipeline = make_pipeline()
+        pipeline.set_reconnect(True)
+        lost, back, _ = self._waiting(qapp, pipeline)
+        events = _connect(qapp, pipeline)
+        pipeline.start_log(_log_request(tmp_path))
+        port.feed(b"before 1\nbefore 2\npartial")
+        _take_all(qapp, pipeline, 2)
+
+        port.transport.drop("the device was removed")
+        wait_until(qapp, lambda: bool(lost))
+        assert lost == [(_PORT, "the device was removed")]
+        assert events.disconnected == []
+
+        pipeline.reconnect("PORT9", _BAUD, LineSettings(), "identified by serial number 0001",
+                           lambda: True)
+        wait_until(qapp, lambda: bool(back))
+        assert back[0][:2] == ("PORT9", _BAUD)
+        port.feed(b"after 1\n")
+        taken: list[LineRecord] = []
+        wait_until(qapp, lambda: "after 1" in [
+            record.text for record in taken.extend(pipeline.take_display(100)[0]) or taken
+        ])
+        summary = pipeline.stop_log()
+        tags = {
+            record.text.split(" ", 2)[1]: record.tag
+            for record in taken if record.origin is RecordOrigin.NOTICE
+        }
+        # The loss is a problem; the board back is an event.
+        assert tags == {"Connection": TAG_NOTICE, "Reconnected": TAG_NOTICE_EVENT}
+
+        texts = [line_text(line) for line in log_body(str(tmp_path / "session.txt"))]
+        assert texts[:3] == ["before 1", "before 2", "partial"]
+        assert texts[3] == (
+            "[WireTrace] Connection to PORT0 lost: the device was removed. "
+            "Waiting for the same board to return."
+        )
+        assert texts[4].startswith("[WireTrace] Reconnected on PORT9 after ")
+        assert texts[4].endswith(
+            " s, identified by serial number 0001. Anything the board sent while it was "
+            "disconnected was not received."
+        )
+        assert texts[5:] == ["after 1"]
+        assert summary.lines_lost == 0
+        figures = pipeline.session_figures()
+        assert figures.disconnect_count == 1 and figures.disconnects[0].back is not None
+
+    def test_the_board_is_reopened_with_the_driver_its_session_used(
+        self, qapp, make_pipeline, port,
+    ):
+        drivers: list[object] = []
+        opened = port.factory
+
+        def factory(name, baud, line=None, driver=None):
+            drivers.append(driver)
+            return opened(name, baud, line, driver)
+
+        pipeline = make_pipeline(transport_factory=factory)
+        pipeline.set_reconnect(True)
+        lost, back, _ = self._waiting(qapp, pipeline)
+        _connect(qapp, pipeline)
+        session_driver = type(port.transport)
+
+        port.transport.drop("the device was removed")
+        wait_until(qapp, lambda: bool(lost))
+        pipeline.reconnect("PORT0", _BAUD, LineSettings(), "identified by port name", lambda: True)
+        wait_until(qapp, lambda: bool(back))
+
+        assert drivers == [None, session_driver]
+
+    def test_a_port_that_no_longer_shows_the_board_is_closed_unread(
+        self, qapp, make_pipeline, port,
+    ):
+        pipeline = make_pipeline()
+        pipeline.set_reconnect(True)
+        lost, back, failed = self._waiting(qapp, pipeline)
+        _connect(qapp, pipeline)
+        port.transport.drop()
+        wait_until(qapp, lambda: bool(lost))
+
+        pipeline.reconnect("PORT9", _BAUD, LineSettings(), "identified by USB port 1-2",
+                           lambda: False)
+        wait_until(qapp, lambda: bool(failed))
+
+        assert failed == [("PORT9", "the port no longer shows the board that was found")]
+        assert back == []
+        assert not port.transport.is_open
+
+        port.refuse_with = "Access denied"
+        pipeline.reconnect("PORT9", _BAUD, LineSettings(), "identified by USB port 1-2",
+                           lambda: True)
+        wait_until(qapp, lambda: len(failed) == 2)
+        assert failed[1] == ("PORT9", "Access denied")
+
+    def test_stopping_the_wait_ends_the_session_as_a_disconnect(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        pipeline.set_reconnect(True)
+        lost, _, _ = self._waiting(qapp, pipeline)
+        events = _connect(qapp, pipeline)
+        port.transport.drop()
+        wait_until(qapp, lambda: bool(lost))
+
+        pipeline.close()
+        wait_until(qapp, lambda: bool(events.disconnected))
+
+        assert events.disconnected[0][:2] == (_PORT, False)
+        figures = pipeline.session_figures()
+        assert figures.disconnects[0].back is None and figures.ended is not None
+
+    def test_without_reconnect_a_loss_ends_the_session(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        lost, _, _ = self._waiting(qapp, pipeline)
+        events = _connect(qapp, pipeline)
+
+        port.transport.drop()
+        wait_until(qapp, lambda: bool(events.disconnected))
+
+        assert lost == [] and events.disconnected[0][1] is True
+
+    def test_connecting_while_waiting_starts_a_new_session(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        pipeline.set_reconnect(True)
+        lost, _, _ = self._waiting(qapp, pipeline)
+        events = _connect(qapp, pipeline)
+        port.transport.drop()
+        wait_until(qapp, lambda: bool(lost))
+
+        pipeline.open(_PORT, _BAUD)
+        wait_until(qapp, lambda: len(events.connected) == 2)
+
+        assert len(events.disconnected) == 1
+        assert pipeline.session_figures().disconnect_count == 0
 
 
 class TestLogging:
@@ -576,3 +911,101 @@ class TestShutdown:
         _connect(qapp, pipeline)
         pipeline.shutdown()
         assert pipeline.shutdown() is None
+
+
+class TestControlLines:
+    def _states(self, pipeline: DevicePipeline) -> list[LineStates]:
+        states: list[LineStates] = []
+        pipeline.lines_changed.connect(states.append)
+        return states
+
+    def test_the_port_is_opened_with_its_line_settings(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        states = self._states(pipeline)
+        events = Events(pipeline)
+        line = LineSettings(7, Parity.EVEN, StopBits.TWO, dtr_on_open=False, rts_on_open=True)
+
+        pipeline.open(_PORT, _BAUD, line)
+        wait_until(qapp, lambda: bool(events.connected) and bool(states))
+
+        assert port.transport.line == line
+        assert states[-1] == LineStates(False, True, port.transport.inputs)
+
+    def test_dtr_and_rts_are_set_and_noted_in_the_session(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        states = _connect_following_lines(qapp, pipeline)
+
+        pipeline.set_dtr(False)
+        pipeline.set_rts(False)
+        wait_until(qapp, lambda: len(states) == 2)
+
+        assert (port.transport.dtr, port.transport.rts) == (False, False)
+        assert states[-1].dtr is False and states[-1].rts is False
+        records = _take_all(qapp, pipeline, 2)
+        assert [record.text for record in records] == [
+            "[WireTrace] DTR set off", "[WireTrace] RTS set off",
+        ]
+        # The user's own change is an event, not a problem.
+        assert {record.tag for record in records} == {TAG_NOTICE_EVENT}
+
+    def test_rts_is_left_to_hardware_flow_control(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        failures: list[str] = []
+        pipeline.control_failed.connect(failures.append)
+        events = Events(pipeline)
+        pipeline.open(_PORT, _BAUD, LineSettings(flow_control=FlowControl.HARDWARE))
+        wait_until(qapp, lambda: bool(events.connected))
+
+        pipeline.set_rts(False)
+        wait_until(qapp, lambda: bool(failures))
+
+        assert failures == ["RTS is driven by hardware flow control"]
+        assert port.transport.rts is None
+
+    def test_a_break_is_held_then_released_and_noted(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        _connect(qapp, pipeline)
+
+        pipeline.send_break()
+        wait_until(qapp, lambda: port.transport.breaks == [True, False])
+
+        records = _take_all(qapp, pipeline, 1)
+        assert records[0].text == f"[WireTrace] Break sent for {BREAK_DURATION_MS} ms"
+        assert records[0].origin is RecordOrigin.NOTICE
+        assert records[0].tag == TAG_NOTICE_EVENT
+
+    def test_an_input_line_change_is_reported(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        states = _connect_following_lines(qapp, pipeline)
+
+        port.transport.inputs = InputLines(cts=True, dsr=False, dcd=True, ri=False)
+        wait_until(qapp, lambda: bool(states))
+
+        assert states[-1].inputs == InputLines(cts=True, dsr=False, dcd=True, ri=False)
+
+    def test_a_refused_control_is_reported_and_not_noted(self, qapp, make_pipeline, port):
+        pipeline = make_pipeline()
+        _connect(qapp, pipeline)
+        failures: list[str] = []
+        pipeline.control_failed.connect(failures.append)
+        port.transport.control_error = "not supported by the driver"
+
+        pipeline.set_dtr(False)
+        wait_until(qapp, lambda: bool(failures))
+
+        assert failures == ["DTR could not be set: not supported by the driver"]
+        assert pipeline.take_display(10)[0] == []
+
+    def test_controls_without_a_connection_are_refused(self, qapp, make_pipeline):
+        pipeline = make_pipeline()
+        _connect(qapp, pipeline).connected.clear()
+        failures: list[str] = []
+        pipeline.control_failed.connect(failures.append)
+        pipeline.close()
+        wait_until(qapp, lambda: not pipeline._worker._transport)
+
+        pipeline.set_dtr(True)
+        pipeline.send_break()
+        wait_until(qapp, lambda: len(failures) == 2)
+
+        assert failures == ["The device is not connected"] * 2

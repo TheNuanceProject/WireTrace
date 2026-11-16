@@ -135,6 +135,10 @@ class Palette:
     # Plot traces, in order
     plot_traces: tuple[str, ...]
 
+    # The console's ANSI colours 0 to 15, and the highlight rules' colours
+    ansi: tuple[str, ...]
+    highlights: tuple[str, ...]
+
     def colours(self) -> dict[str, str]:
         """Every role by name, as the stylesheet writes it."""
         result: dict[str, str] = {}
@@ -149,6 +153,10 @@ class Palette:
 
 _OWN_PREFIX = "wiretrace."
 _PLOT_PREFIX = "wiretrace.plot."
+_ANSI_PREFIX = "wiretrace.ansi."
+_HIGHLIGHT_PREFIX = "wiretrace.highlight."
+#: Colours that come in numbered series, and the number of the first.
+_SERIES = {_PLOT_PREFIX: 1, _ANSI_PREFIX: 0, _HIGHLIGHT_PREFIX: 1}
 _OPAQUE = 1
 
 
@@ -159,19 +167,29 @@ def _role(token: str) -> str:
 def _palette(theme: ThemeID) -> Palette:
     """The palette of ``theme``, built from its colour tokens."""
     roles: dict[str, Any] = {}
-    traces: dict[int, str] = {}
+    series: dict[str, dict[int, str]] = {prefix: {} for prefix in _SERIES}
     for token, (colour, opacity) in design_tokens.COLOURS[theme.value].items():
-        if token.startswith(_PLOT_PREFIX):
+        prefix = next((prefix for prefix in _SERIES if token.startswith(prefix)), None)
+        if prefix is not None:
             if opacity != _OPAQUE:
-                raise ValueError(f"the plot trace {token} must be opaque")
-            traces[int(token.removeprefix(_PLOT_PREFIX))] = colour
+                raise ValueError(f"the colour {token} must be opaque")
+            series[prefix][int(token.removeprefix(prefix))] = colour
         elif opacity == _OPAQUE:
             roles[_role(token)] = colour
         else:
             roles[_role(token)] = Tint(colour, opacity)
-    if sorted(traces) != list(range(1, len(traces) + 1)):
-        raise ValueError(f"the plot traces of {theme.value} are not numbered 1 to {len(traces)}")
-    return Palette(**roles, plot_traces=tuple(traces[n] for n in sorted(traces)))
+    ordered: dict[str, tuple[str, ...]] = {}
+    for prefix, first in _SERIES.items():
+        numbered = series[prefix]
+        if sorted(numbered) != list(range(first, first + len(numbered))):
+            raise ValueError(f"the colours {prefix}* of {theme.value} are not numbered in order")
+        ordered[prefix] = tuple(numbered[n] for n in sorted(numbered))
+    return Palette(
+        **roles,
+        plot_traces=ordered[_PLOT_PREFIX],
+        ansi=ordered[_ANSI_PREFIX],
+        highlights=ordered[_HIGHLIGHT_PREFIX],
+    )
 
 
 PALETTES: dict[ThemeID, Palette] = {theme: _palette(theme) for theme in ThemeID}

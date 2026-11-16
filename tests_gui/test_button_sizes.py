@@ -107,7 +107,6 @@ def test_joined_buttons_are_each_as_wide_as_the_widest(qapp, theme_manager):
         joined.deleteLater()
 
 
-
 def test_the_focus_ring_moves_nothing(qapp, theme_manager):
     """A focused control's outline is two pixels instead of one; the box
     keeps its size, so nothing beside it moves when the focus arrives."""

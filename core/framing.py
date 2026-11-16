@@ -35,9 +35,9 @@ _LINE_ENDINGS = b"\r\n"
 # ANSI/VT100 escape sequences: CSI (colour, cursor and screen control),
 # OSC (window title) and two-character sequences, as emitted by RTOS
 # shells, bootloaders and coloured firmware CLIs.
-# WireTrace is a serial monitor, not a terminal emulator, so these are
-# removed rather than rendered.
-_ANSI_ESCAPE_RE = re.compile(
+# They are removed from the text that is shown and logged; the colours
+# they set can be shown in the console (see ``core/ansi.py``).
+ANSI_ESCAPE_RE = re.compile(
     r"\x1b(?:"
     r"\[[0-?]*[ -/]*[@-~]"                 # CSI: colours, cursor, private modes
     r"|\][^\x07\x1b]*(?:\x07|\x1b\\)"     # OSC: window title and the like
@@ -228,7 +228,7 @@ def decode_line(raw: bytes) -> str | None:
         # No control character of any kind, so nothing to remove or
         # escape. This is nearly every line of a normal stream.
         return text
-    stripped = _ANSI_ESCAPE_RE.sub("", text)
+    stripped = ANSI_ESCAPE_RE.sub("", text)
     if not stripped:
         return None
     return escape_control_characters(stripped)

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from tests_gui.screens import every_screen
+from ui.alert_notifier import WINDOWS_ALERT_SOUND_NAME
 from ui.themes import tokens
 from ui.themes.theme_manager import font_sizes, font_weights
 from ui.widgets.styling import COMPACT
@@ -38,9 +39,9 @@ from version import APP_NAME
 
 _HEADINGS = ("sectionTitle", "pageTitle", "displayTitle")
 
-#: Words that keep their capital inside a sentence: the application and
-#: the feature the menus call Find.
-_PROPER = frozenset({APP_NAME, "Find"})
+#: Words that keep their capital inside a sentence: the application, the
+#: feature the menus call Find, and the name of the Windows sound alerts play.
+_PROPER = frozenset({APP_NAME, "Find", WINDOWS_ALERT_SOUND_NAME})
 
 _ELLIPSIS_CHARACTER = chr(0x2026)
 

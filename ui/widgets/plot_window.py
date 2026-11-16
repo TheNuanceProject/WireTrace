@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The plot in a window of its own, for a second monitor.
 
-The window holds the same ``PlotView`` the tab shows under the console.
-Closing it does not close the plot: the tab puts the plot back.
+The window holds the same ``PlotView`` the tab can show under the
+console. Closing it closes the plot; the tab's Plot button opens it
+again.
 """
 
 from __future__ import annotations
@@ -16,17 +17,14 @@ from ui.themes import tokens
 from ui.widgets.least_size import keep_least_size
 from ui.widgets.plot_view import PlotView
 from ui.widgets.status_bar import ElidedLabel
-from ui.widgets.styling import SECONDARY, plain_label
 from version import APP_NAME
-
-_CLOSING_HINT = "Closing this window puts the plot back under the console"
 
 
 class PlotWindow(QWidget):
     """A top-level window around a tab's plot.
 
     Signals:
-        closed():  The user closed the window; the plot should be docked.
+        closed():  The user closed the window; the plot should close.
     """
 
     closed = Signal()
@@ -40,8 +38,6 @@ class PlotWindow(QWidget):
         self._state = ""
 
         self._summary = ElidedLabel()
-        hint = plain_label(_CLOSING_HINT)
-        hint.setProperty(SECONDARY, True)
         footer = QFrame()
         footer.setObjectName("plotFooter")
         footer.setFixedHeight(metrics.status_height)
@@ -49,7 +45,6 @@ class PlotWindow(QWidget):
         footer_layout.setContentsMargins(metrics.space_3, 0, metrics.space_3, 0)
         footer_layout.setSpacing(metrics.space_4)
         footer_layout.addWidget(self._summary, 1)
-        footer_layout.addWidget(hint)
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -94,6 +89,18 @@ class PlotWindow(QWidget):
             self._layout.removeWidget(view)
         return view
 
+    def hasHeightForWidth(self) -> bool:
+        """Never: the window keeps the size the user gives it.
+
+        Wrapped text inside (the measuring table, the note) makes the
+        layout's height depend on its width. A window that says so is
+        resized by Qt on Windows, at every move and resize, to the
+        height all its content prefers (``QWidgetWindowPrivate::
+        closestAcceptableGeometry``). Inside the window the layout still
+        wraps its text to the width it is given.
+        """
+        return False
+
     # ── Internal ─────────────────────────────────────────────────────────
 
     def _show_summary(self) -> None:
@@ -103,7 +110,7 @@ class PlotWindow(QWidget):
         self._summary.setText(FIELD_SEPARATOR.join(parts))
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        # The tab docks the plot and then hides this window, so the
-        # window is never destroyed with the plot still inside it.
+        # The plot hides this window; it is destroyed only once the plot
+        # has been taken out of it.
         event.ignore()
         self.closed.emit()

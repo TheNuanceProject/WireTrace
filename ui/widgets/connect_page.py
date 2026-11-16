@@ -28,6 +28,7 @@ from app.constants import (
     DEFAULT_BAUD_RATE,
     PORT_SCAN_INTERVAL_MS,
 )
+from core.serial_settings import LineSettings
 from core.transport import PortInfo
 from ui import shortcuts
 from ui.formatting import format_count
@@ -56,6 +57,13 @@ _NEW_PORT_BADGE = "New"
 _NEW_PORT_TOOLTIP = "This port appeared while this screen was open"
 #: Shown on Linux only, as one more thing to check and not as the cause.
 _LINUX_PERMISSION_NOTE = "On Linux, your user account also needs permission to open serial ports."
+
+
+def no_ports_help(platform: str = sys.platform) -> str:
+    """What the empty port list says to check, for ``platform``."""
+    if platform.startswith("linux"):
+        return f"{_NO_PORTS_HELP}\n{_LINUX_PERMISSION_NOTE}"
+    return _NO_PORTS_HELP
 
 
 class PortRow(QFrame):
@@ -134,11 +142,13 @@ class ConnectPage(DotGridWidget):
         connect_requested(str, int):  Port and baud rate to open.
         ports_wanted():               The port list should be read again.
         port_chosen(str):             The user selected a port in the list.
+        port_settings_requested():    Open the settings of the chosen port.
     """
 
     connect_requested = Signal(str, int)
     ports_wanted = Signal()
     port_chosen = Signal(str)
+    port_settings_requested = Signal()
 
     def __init__(
         self,
@@ -184,10 +194,7 @@ class ConnectPage(DotGridWidget):
         self._empty.setObjectName("portList")
         empty_title = plain_label(_NO_PORTS_TITLE)
         empty_title.setObjectName("portName")
-        help_text = _NO_PORTS_HELP
-        if sys.platform.startswith("linux"):
-            help_text += f"\n{_LINUX_PERMISSION_NOTE}"
-        self._empty_help = plain_label(help_text)
+        self._empty_help = plain_label(no_ports_help())
         self._empty_help.setProperty(SECONDARY, True)
         self._empty_help.setWordWrap(True)
         empty_layout = QVBoxLayout(self._empty)
@@ -212,6 +219,11 @@ class ConnectPage(DotGridWidget):
         self._baud.lineEdit().textChanged.connect(self._refresh_connect)
         self._baud.lineEdit().returnPressed.connect(self._connect_selected)
 
+        self._port_settings = Button()
+        bind_icon(self._port_settings, "port_settings")
+        self._port_settings.clicked.connect(self.port_settings_requested)
+        self.set_line_settings(LineSettings())
+
         self._refresh = Button("Refresh")
         self._refresh.setToolTip(shortcuts.with_keys("Read the list of ports again", "refresh_ports"))
         bind_icon(self._refresh, "refresh")
@@ -225,6 +237,7 @@ class ConnectPage(DotGridWidget):
         controls.setSpacing(metrics.space_2)
         controls.addWidget(baud_label)
         controls.addWidget(self._baud)
+        controls.addWidget(self._port_settings)
         controls.addWidget(self._refresh)
         controls.addStretch(1)
         controls.addWidget(self._connect)
@@ -282,6 +295,16 @@ class ConnectPage(DotGridWidget):
 
     def set_baud(self, baud: int) -> None:
         self._baud.setCurrentText(str(baud))
+
+    def set_line_settings(self, line: LineSettings) -> None:
+        """Show the line settings the chosen port will be opened with."""
+        self._port_settings.setText(line.framing)
+        self._port_settings.setToolTip(f"Port settings: {line.describe()}")
+        self._port_settings.setAccessibleName(f"Port settings, {line.describe()}")
+
+    @property
+    def port_settings_text(self) -> str:
+        return self._port_settings.text()
 
     def port_devices(self) -> list[str]:
         return [row.device for row in self._rows]
@@ -375,6 +398,7 @@ class ConnectPage(DotGridWidget):
         valid = self.selected_baud is not None
         set_state(self._baud.lineEdit(), INVALID, bool(text) and not valid)
         self._connect.setEnabled(bool(self._selected) and valid)
+        self._port_settings.setEnabled(bool(self._selected))
 
     def _connect_selected(self) -> None:
         baud = self.selected_baud

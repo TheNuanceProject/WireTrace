@@ -25,6 +25,7 @@ from app.constants import (
     ThemeID,
     TimestampMode,
 )
+from app.modules import ALERTS, ModuleSettings
 from core.transport import PortInfo
 from tests_gui.support import LoopbackPort, pixel, wait_until
 from ui import shortcuts
@@ -56,7 +57,9 @@ def window(
     port: LoopbackPort,
 ) -> MainWindow:
     theme_manager.apply_theme(ThemeID.LIGHT)
-    main_window = MainWindow(config, theme_manager, transport_factory=port.factory)
+    main_window = MainWindow(
+        config, theme_manager, transport_factory=port.factory, read_ports=port.identities,
+    )
     main_window.show()
     qapp.processEvents()
     yield main_window
@@ -388,6 +391,7 @@ _SESSION_ONLY = frozenset({
     "Edit/Close Find and clear the filter",
     "Edit/Clear console",
     "View/Timestamps/Time of day",
+    "View/Timestamps/Date and time",
     "View/Timestamps/Since previous line",
     "View/Follow new lines",
     "Device/Line ending for commands/None",
@@ -453,7 +457,7 @@ class TestMenuState:
         window.new_tab()
 
         assert {
-            "View/Timestamps/Time of day",
+            "View/Timestamps/Date and time",
             "View/Display/Text",
             "Device/Line ending for commands/LF",
             "View/Follow new lines",
@@ -467,7 +471,7 @@ class TestMenuState:
 
         first.set_timestamp_mode(TimestampMode.RELATIVE)
 
-        assert actions["View/Timestamps/Time of day"].isChecked()
+        assert actions["View/Timestamps/Date and time"].isChecked()
 
     def test_menu_entries_act_on_the_tab_in_front(self, qapp, window):
         tab = window.current_tab()
@@ -481,6 +485,8 @@ class TestMenuState:
         actions["View/Live plot"].trigger()
 
         assert tab.session.timestamp_mode is TimestampMode.RELATIVE
+        actions["View/Timestamps/Date and time"].trigger()
+        assert tab.session.timestamp_mode is TimestampMode.DATE_TIME
         assert tab.session.display_mode is DisplayMode.HEX
         assert tab.line_ending is LineEnding.CR
         assert tab.following is False
@@ -549,6 +555,53 @@ class TestView:
 
         assert config.hide_blank_lines is True
         assert tab.console.visible_count == 2
+
+    def test_reconnect_lost_board_is_the_tab_in_fronts_and_stops_its_wait(
+        self, qapp, window, config, port,
+    ):
+        tab = window.current_tab()
+        other = window.new_tab()
+        tabs = window.findChild(TabWidget)
+        tabs.setCurrentIndex(0)
+        _connect(qapp, tab)
+        port.transport.drop()
+        wait_until(qapp, lambda: tab.is_waiting)
+        action = _actions(window)["Device/Reconnect lost board"]
+        assert action.isChecked() is config.reconnect is True
+
+        action.trigger()
+
+        wait_until(qapp, lambda: not tab.is_connected)
+        assert not tab.is_waiting
+        assert config.reconnect is True
+        assert (tab.reconnect_enabled, other.reconnect_enabled) == (False, True)
+        tabs.setCurrentIndex(1)
+        assert action.isChecked()
+        tabs.setCurrentIndex(0)
+        assert not action.isChecked()
+
+    def test_alerts_switch_the_tab_in_front_only(self, qapp, window, config):
+        ModuleSettings(config).set_enabled(ALERTS, True)
+        window._apply_preferences_to_tabs()
+        first = window.current_tab()
+        second = window.new_tab()
+        action = _actions(window)["Device/Alerts"]
+        assert action.isChecked()
+
+        action.trigger()
+
+        assert (first.alerts_enabled, second.alerts_enabled) == (True, False)
+        window.findChild(TabWidget).setCurrentIndex(0)
+        assert action.isChecked()
+
+    def test_a_tab_without_its_own_choice_follows_preferences(self, qapp, window, config):
+        tab = window.current_tab()
+
+        config.reconnect = False
+        tab.apply_preferences()
+
+        assert tab.reconnect_enabled is False
+        assert not _actions(window)["Device/Reconnect lost board"].isChecked()
 
 
 class TestSavedCommands:
@@ -688,6 +741,64 @@ class TestPreferences:
         _actions(window)["File/Preferences..."].trigger()
 
         assert len(opened) == 1
+
+    def test_switching_the_plot_off_removes_it_from_every_tab_and_the_menus(
+        self, qapp, window, monkeypatch,
+    ):
+        from ui.dialogs.preferences_dialog import PreferencesDialog
+
+        second = window.current_tab()
+        tab = window.new_tab()
+        _connect(qapp, tab)
+        _actions(window)["View/Live plot"].trigger()
+        assert tab.is_plot_visible()
+
+        def switch(on: bool):
+            def save(dialog: PreferencesDialog) -> QDialog.DialogCode:
+                dialog._module_switches["plot"].setChecked(on)
+                dialog._apply()
+                return QDialog.DialogCode.Accepted
+            monkeypatch.setattr(PreferencesDialog, "exec", save)
+            _actions(window)["File/Preferences..."].trigger()
+
+        switch(False)
+
+        actions = _actions(window)
+        assert tab.plot is None and second.plot is None
+        assert not tab.is_plot_visible()
+        assert not actions["View/Live plot"].isVisible()
+        assert not actions["View/Configure plot..."].isVisible()
+
+        switch(True)
+
+        actions = _actions(window)
+        assert tab.plot is not None and second.plot is not None
+        assert actions["View/Live plot"].isVisible()
+        assert actions["View/Live plot"].isEnabled()
+        assert not actions["View/Live plot"].isChecked()
+
+    def test_the_session_report_entry_follows_its_switch_and_the_session(
+        self, qapp, window, monkeypatch,
+    ):
+        from ui.dialogs.preferences_dialog import PreferencesDialog
+
+        tab = window.current_tab()
+        entry = _actions(window)["Device/Session report..."]
+        assert entry.isVisible() and not entry.isEnabled()
+
+        _connect(qapp, tab)
+        assert entry.isEnabled()
+
+        def switch_off(dialog: PreferencesDialog) -> QDialog.DialogCode:
+            dialog._module_switches["report"].setChecked(False)
+            dialog._apply()
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(PreferencesDialog, "exec", switch_off)
+        _actions(window)["File/Preferences..."].trigger()
+
+        assert tab.report is None
+        assert not entry.isVisible()
 
 
 class TestEdit:
@@ -898,7 +1009,6 @@ class TestClosing:
         assert "written to the files first" in detail
         assert "cancels the export" in detail
 
-
     @pytest.mark.parametrize("attempt", range(6))
     def test_window_with_a_plot_is_destroyed_without_harm(
         self, qapp, config, theme_manager, port, attempt,
@@ -938,3 +1048,62 @@ def test_window_draws_the_first_screen_on_the_paper_colour(qapp, window):
     corner = pixel(window.current_tab(), 2, window.current_tab().height() - 2)
 
     assert corner.name().upper() == tokens.palette().paper
+
+
+class TestAlertedTabs:
+    """A tab that alerts while another is in front is marked until opened."""
+
+    @staticmethod
+    def _tooltip(window, tab) -> str:
+        return window._tabs.tabToolTip(window._tabs.indexOf(tab))
+
+    def test_a_tab_in_the_background_is_marked_until_it_is_opened(self, qapp, window):
+        from ui.alert_notifier import AlertKind
+
+        first = window.current_tab()
+        second = window.new_tab()
+        assert window.current_tab() is second
+
+        first._alert(AlertKind.CONNECTION_LOST, "Connection lost")
+
+        assert "New alert" in self._tooltip(window, first)
+        assert first in window._alerted
+
+        window._tabs.setCurrentWidget(first)
+
+        assert "New alert" not in self._tooltip(window, first)
+        assert first not in window._alerted
+
+    def test_the_tab_in_front_is_never_marked(self, qapp, window):
+        from ui.alert_notifier import AlertKind
+
+        tab = window.current_tab()
+        tab._alert(AlertKind.QUIET, "No line for 5 seconds")
+
+        assert "New alert" not in self._tooltip(window, tab)
+        assert window._alerted == set()
+
+    def test_a_closed_tab_leaves_no_mark_behind(self, qapp, window):
+        from ui.alert_notifier import AlertKind
+
+        first = window.current_tab()
+        window.new_tab()
+        first._alert(AlertKind.CONNECTION_LOST, "Connection lost")
+
+        window.close_tab(window._tabs.indexOf(first))
+
+        assert window._alerted == set()
+
+    def test_the_mark_is_drawn_in_the_warning_colour(self, qapp, window):
+        from PySide6.QtGui import QColor
+
+        from ui.themes import tokens
+        from ui.widgets.status_dot import LinkState, state_icon
+
+        size = tokens.METRICS.status_dot
+        marked = state_icon(LinkState.CONNECTED, 1.0, alert=True).pixmap(size, size).toImage()
+        plain = state_icon(LinkState.CONNECTED, 1.0).pixmap(size, size).toImage()
+        middle = size // 2
+
+        assert marked.pixelColor(middle, middle) == QColor(tokens.palette().warning)
+        assert plain.pixelColor(middle, middle) == QColor(tokens.palette().connected)

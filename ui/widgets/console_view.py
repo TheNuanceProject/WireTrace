@@ -25,10 +25,11 @@ or serial.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import re
 from collections import Counter, deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import NamedTuple
 
@@ -56,11 +57,13 @@ from app.constants import (
     CONSOLE_TAB_WIDTH,
     DEFAULT_FONT_FAMILY,
     DEFAULT_FONT_SIZE,
+    DEFAULT_TIMESTAMP_MODE,
     MAX_CONSOLE_LINES,
     TimestampMode,
 )
 from core.framing import hex_row_marks
-from core.records import LineRecord, RecordOrigin
+from core.highlight_rules import HighlightMatcher, HighlightRule
+from core.records import LineRecord, RecordOrigin, format_timestamp
 from ui.formatting import format_time_of_day
 from ui.themes import tokens
 from ui.themes.fonts import monospace_font
@@ -72,12 +75,18 @@ _UNBOUNDED_LINE_WIDTH = float(2**24)
 
 # ── Row layout, in character cells ───────────────────────────────────────────
 
-_TIME_COLS = 12                      # "HH:MM:SS.mmm"
+#: The width of the time column in each timestamp mode, in characters.
+_TIME_COLS: dict[TimestampMode, int] = {
+    TimestampMode.ABSOLUTE: len("HH:MM:SS.mmm"),
+    TimestampMode.DATE_TIME: len("YYYY-MM-DD HH:MM:SS.mmm"),
+    TimestampMode.RELATIVE: len("HH:MM:SS.mmm"),
+}
 _LEVEL_COLS = 3                      # "ERR", "WRN", ...
 _GAP = "  "
 _FIRST_RELATIVE_TIME = "+0.000 s"
 
-#: A layout is kept for this many rows that need full text shaping.
+#: A layout is kept for this many rows that need full text shaping,
+#: and the coloured parts for this many rows.
 _LAYOUT_CACHE_ROWS = 512
 
 #: While a drag is held past the top or bottom edge, the view scrolls
@@ -90,6 +99,15 @@ _FIXED_PITCH_TOLERANCE = 0.01
 _FIXED_PITCH_SAMPLE = 64
 
 _WORD = re.compile(r"\w+")
+
+
+#: The kinds of colour ``ConsoleView.colours_shown`` reports.
+COLOURS_HIGHLIGHT = "highlight"
+COLOURS_ANSI = "ansi"
+
+
+def _span_end(span: tuple[int, int, QColor]) -> int:
+    return span[1]
 
 
 class Position(NamedTuple):
@@ -119,6 +137,11 @@ class ConsoleView(QAbstractScrollArea):
         search_changed(int, int):  Number of matches, and the index of
                                    the current one (-1 for none).
         level_counts_changed():    The number of lines per level changed.
+        colours_shown(str):        A line was drawn in a highlight colour
+                                   ("highlight") or in its ANSI colours
+                                   ("ansi"); once for each, until the
+                                   rules, the setting or the console
+                                   change.
     """
 
     line_count_changed = Signal(int)
@@ -127,6 +150,7 @@ class ConsoleView(QAbstractScrollArea):
     selection_changed = Signal()
     search_changed = Signal(int, int)
     level_counts_changed = Signal()
+    colours_shown = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -146,11 +170,16 @@ class ConsoleView(QAbstractScrollArea):
         self._level_counts: Counter[str] = Counter()
 
         # What is shown, and how.
-        self._timestamp_mode = TimestampMode.ABSOLUTE
+        self._timestamp_mode = DEFAULT_TIMESTAMP_MODE
         self._filter_text = ""
         self._levels: frozenset[str] | None = None
         self._hide_blank_lines = False
         self._severity_colours = True
+        self._ansi_colours = False
+        self._highlights = HighlightMatcher()
+        # The kinds of colour reported by ``colours_shown`` since the
+        # rules, the setting or the console last changed.
+        self._colours_reported: set[str] = set()
 
         # Following the newest line.
         self._auto_follow = True
@@ -175,6 +204,9 @@ class ConsoleView(QAbstractScrollArea):
         self._fixed_pitch = False
         self._max_width = 0.0
         self._layouts: dict[int, QTextLayout] = {}
+        #: The coloured parts of rows, by row, with the length of the
+        #: row text they were found for.
+        self._row_spans: dict[int, tuple[int, list[tuple[int, int, QColor]]]] = {}
 
         self._drag_timer = QTimer(self)
         self._drag_timer.setInterval(_DRAG_SCROLL_INTERVAL_MS)
@@ -281,6 +313,7 @@ class ConsoleView(QAbstractScrollArea):
     def clear_console(self) -> None:
         """Remove every line."""
         self._entries.clear()
+        self._colours_reported.clear()
         self._characters = 0
         self._level_counts.clear()
         self._rebuild_rows()
@@ -337,14 +370,20 @@ class ConsoleView(QAbstractScrollArea):
         self._rebuild_rows()
 
     def set_timestamp_mode(self, mode: TimestampMode) -> None:
-        """Show the time each line arrived, or the time since the previous line."""
+        """Show the time of day each line arrived, its date and time, or the
+        time since the previous line."""
         if mode == self._timestamp_mode:
             return
         self._timestamp_mode = mode
-        # The time column changed, so positions inside rows moved.
+        # The time column changed, so positions inside rows moved, and
+        # its width may have changed with it.
         self._clear_selection()
-        self._layouts.clear()
+        self._forget_drawn()
+        self._max_width = self._prefix_width() + self._cell_width * max(
+            (self._message_cols(e.record.text) for e in self._rows), default=0
+        )
         self._search_again()
+        self._update_scroll_ranges()
         self.viewport().update()
 
     def set_severity_colours(self, enabled: bool) -> None:
@@ -352,8 +391,30 @@ class ConsoleView(QAbstractScrollArea):
         if enabled == self._severity_colours:
             return
         self._severity_colours = enabled
-        self._layouts.clear()
+        self._forget_drawn()
         self.viewport().update()
+
+    def set_ansi_colours(self, enabled: bool) -> None:
+        """Draw the colours a device set with ANSI codes, or leave them out."""
+        if enabled == self._ansi_colours:
+            return
+        self._ansi_colours = enabled
+        self._colours_reported.discard(COLOURS_ANSI)
+        self._forget_drawn()
+        self.viewport().update()
+
+    def set_highlights(self, rules: tuple[HighlightRule, ...]) -> None:
+        """Draw the lines matching ``rules`` in their colours; none for no highlights."""
+        self._highlights = HighlightMatcher(rules)
+        self._colours_reported.discard(COLOURS_HIGHLIGHT)
+        self._forget_drawn()
+        self.viewport().update()
+
+    def highlight_of(self, record: LineRecord) -> int | None:
+        """The highlight colour (from 1) of ``record``, or None."""
+        if not self._highlights or record.origin is RecordOrigin.NOTICE or record.hex_row:
+            return None
+        return self._highlights.colour_of(record.text)
 
     def set_font_family(self, family: str) -> None:
         size = self.font().pixelSize()
@@ -487,7 +548,7 @@ class ConsoleView(QAbstractScrollArea):
         """Choose the shown rows again. Row numbers start over."""
         self._rows = deque(e for e in self._entries if self._is_shown(e.record))
         self._row_base = 0
-        self._layouts.clear()
+        self._forget_drawn()
         self._clear_selection()
         self._max_width = self._prefix_width() + self._cell_width * max(
             (self._message_cols(e.record.text) for e in self._rows), default=0
@@ -538,12 +599,15 @@ class ConsoleView(QAbstractScrollArea):
             if entry.previous is None:
                 return _FIRST_RELATIVE_TIME
             return f"{(moment - entry.previous).total_seconds():+.3f} s"
+        if self._timestamp_mode == TimestampMode.DATE_TIME:
+            return format_timestamp(moment)
         return format_time_of_day(moment)
 
     def _prefix(self, entry: _Entry) -> str:
         """The time and level columns of a row, ending where the message starts."""
         label = tokens.tag_style(entry.record.tag).label
-        return f"{self._time_text(entry):>{_TIME_COLS}}{_GAP}{label:<{_LEVEL_COLS}}{_GAP}"
+        time_cols = _TIME_COLS[self._timestamp_mode]
+        return f"{self._time_text(entry):>{time_cols}}{_GAP}{label:<{_LEVEL_COLS}}{_GAP}"
 
     @staticmethod
     def _message(text: str) -> str:
@@ -552,6 +616,22 @@ class ConsoleView(QAbstractScrollArea):
 
     def _message_cols(self, text: str) -> int:
         return len(self._message(text))
+
+    @staticmethod
+    def _drawn_cols(text: str) -> Callable[[int], int]:
+        """The message column at which each character of ``text`` is drawn.
+
+        Worked out in one pass; the function returned answers for an index.
+        """
+        if "\t" not in text:
+            return lambda index: index
+        cols = [0] * (len(text) + 1)
+        drawn = 0
+        for index, char in enumerate(text):
+            cols[index] = drawn
+            drawn += CONSOLE_TAB_WIDTH - drawn % CONSOLE_TAB_WIDTH if char == "\t" else 1
+        cols[len(text)] = drawn
+        return lambda index: cols[min(index, len(text))]
 
     def _row_text(self, entry: _Entry) -> str:
         return self._prefix(entry) + self._message(entry.record.text)
@@ -588,7 +668,7 @@ class ConsoleView(QAbstractScrollArea):
         )
         self._row_height = max(1, round(metrics.height()) + tokens.METRICS.space_1)
         self._ascent = metrics.ascent() + tokens.METRICS.space_1 / 2
-        self._layouts.clear()
+        self._forget_drawn()
         self._max_width = self._prefix_width() + self._cell_width * max(
             (self._message_cols(e.record.text) for e in self._rows), default=0
         )
@@ -597,7 +677,7 @@ class ConsoleView(QAbstractScrollArea):
         self.viewport().update()
 
     def _prefix_width(self) -> float:
-        return (_TIME_COLS + _LEVEL_COLS + 2 * len(_GAP)) * self._cell_width
+        return (_TIME_COLS[self._timestamp_mode] + _LEVEL_COLS + 2 * len(_GAP)) * self._cell_width
 
     def _left_margin(self) -> float:
         return float(tokens.METRICS.space_3)
@@ -660,10 +740,15 @@ class ConsoleView(QAbstractScrollArea):
         super().changeEvent(event)
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
             # The theme changed: colours baked into cached layouts are stale.
-            self._layouts.clear()
+            self._forget_drawn()
             self.viewport().update()
 
     # ── Text shaping ─────────────────────────────────────────────────────
+
+    def _forget_drawn(self) -> None:
+        """Drop the layouts and coloured parts kept, after what rows look like changed."""
+        self._layouts.clear()
+        self._row_spans.clear()
 
     def _needs_layout(self, text: str) -> bool:
         """True when a row cannot be drawn by counting character cells."""
@@ -696,7 +781,7 @@ class ConsoleView(QAbstractScrollArea):
         layout.setTextOption(option)
         layout.setFormats([
             self._format_range(start, end - start, colour)
-            for start, end, colour in self._spans(entry, text, prefix_cols)
+            for start, end, colour in self._spans_of(row, entry, text, prefix_cols)
         ])
         layout.beginLayout()
         line = layout.createLine()
@@ -786,6 +871,31 @@ class ConsoleView(QAbstractScrollArea):
         level_start = prefix_cols - _LEVEL_COLS - len(_GAP)
         spans = [(0, level_start, time_colour), (level_start, prefix_cols, level_colour)]
         position = prefix_cols
+        record = entry.record
+        highlight = self.highlight_of(record)
+        if highlight is not None:
+            colour = QColor(tokens.palette().highlights[highlight - 1])
+            spans.append((prefix_cols, len(text), colour))
+            self._report_colours(COLOURS_HIGHLIGHT)
+            return spans
+        if self._ansi_colours and record.colours:
+            self._report_colours(COLOURS_ANSI)
+            ansi = [QColor(colour) for colour in tokens.palette().ansi]
+            drawn = self._drawn_cols(record.text)
+            for start, end, index in record.colours:
+                start = prefix_cols + drawn(start)
+                if start >= len(text):
+                    break
+                end = min(len(text), prefix_cols + drawn(end))
+                if start >= end:
+                    continue
+                if start > position:
+                    spans.append((position, start, message_colour))
+                spans.append((start, end, ansi[index]))
+                position = end
+            if position < len(text):
+                spans.append((position, len(text), message_colour))
+            return spans
         if entry.record.hex_row:
             quiet = QColor(tokens.palette().text_secondary)
             for start, end in hex_row_marks(entry.record.text):
@@ -797,6 +907,25 @@ class ConsoleView(QAbstractScrollArea):
                 spans.append((start, end, quiet))
                 position = end
         spans.append((position, len(text), message_colour))
+        return spans
+
+    def _report_colours(self, kind: str) -> None:
+        if kind not in self._colours_reported:
+            self._colours_reported.add(kind)
+            # After the paint that found it, not inside it.
+            QTimer.singleShot(0, self, lambda: self.colours_shown.emit(kind))
+
+    def _spans_of(
+        self, row: int, entry: _Entry, text: str, prefix_cols: int,
+    ) -> list[tuple[int, int, QColor]]:
+        """The coloured parts of a row, found once and kept while it looks the same."""
+        kept = self._row_spans.get(row)
+        if kept is not None and kept[0] == len(text):
+            return kept[1]
+        if len(self._row_spans) >= _LAYOUT_CACHE_ROWS:
+            self._row_spans.clear()
+        spans = self._spans(entry, text, prefix_cols)
+        self._row_spans[row] = (len(text), spans)
         return spans
 
     def _row_tint(self, record: LineRecord) -> QColor | None:
@@ -841,6 +970,13 @@ class ConsoleView(QAbstractScrollArea):
         tint = self._row_tint(entry.record)
         if tint is not None:
             painter.fillRect(QRectF(0, y, width, self._row_height), tint)
+        highlight = self.highlight_of(entry.record)
+        if highlight is not None:
+            # A mark in the margin, so a highlighted line is seen at a glance.
+            painter.fillRect(
+                QRectF(0, y, tokens.METRICS.mark, self._row_height),
+                QColor(palette.highlights[highlight - 1]),
+            )
 
         # Marked ranges of this row: (start, end, background, text colour).
         # A text colour of None leaves the row's own colours in place.
@@ -866,7 +1002,7 @@ class ConsoleView(QAbstractScrollArea):
         if self._needs_layout(text):
             end_x = self._paint_shaped(painter, row, entry, text, origin, y, marks)
         else:
-            end_x = self._paint_cells(painter, entry, text, origin, y, marks)
+            end_x = self._paint_cells(painter, row, entry, text, origin, y, marks)
         if line_end is not None:
             painter.fillRect(
                 QRectF(end_x, y, self._cell_width, self._row_height), line_end
@@ -875,6 +1011,7 @@ class ConsoleView(QAbstractScrollArea):
     def _paint_cells(
         self,
         painter: QPainter,
+        row: int,
         entry: _Entry,
         text: str,
         origin: float,
@@ -900,7 +1037,11 @@ class ConsoleView(QAbstractScrollArea):
             )
 
         prefix_cols = len(text) - self._message_cols(entry.record.text)
-        for start, end, colour in self._spans(entry, text, prefix_cols):
+        spans = self._spans_of(row, entry, text, prefix_cols)
+        # Only the parts inside the viewport are drawn.
+        for start, end, colour in spans[bisect.bisect_right(spans, first, key=_span_end):]:
+            if start >= last:
+                break
             start, end = max(start, first), min(end, last)
             if start < end:
                 painter.setPen(colour)

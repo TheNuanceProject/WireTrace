@@ -18,7 +18,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMenu
 
 import app.help_loader as help_loader
-from tests_gui.screens import lose_connection, main_window, start_session
+from tests_gui.screens import lose_connection, main_window, start_session, wait_for_board
 from ui.dialogs.preferences_dialog import PAGES, PreferencesDialog
 from ui.widgets.banner import Banner
 from ui.widgets.button import Button
@@ -61,6 +61,8 @@ def test_guide_names_every_button_of_a_session(qapp, config, theme_manager, guid
         # The other state of each button that changes its name.
         toolbar.set_logging(True, paused=True)
         names |= _button_texts(toolbar)
+        wait_for_board(qapp, window, port)
+        names |= _button_texts(tab.findChild(Banner))
         lose_connection(qapp, window, port)
         names |= _button_texts(toolbar) | _button_texts(tab.findChild(Banner))
 

@@ -20,10 +20,17 @@ from typing import Any
 
 from app._atomic import atomic_write_text
 from app.constants import (
+    ALERT_PAUSE_SECONDS_DEFAULT,
+    ALERT_PAUSE_SECONDS_MAX,
+    ALERT_PAUSE_SECONDS_MIN,
+    ALERT_SILENCE_SECONDS_DEFAULT,
+    ALERT_SILENCE_SECONDS_MAX,
+    ALERT_SILENCE_SECONDS_MIN,
     DEFAULT_BAUD_RATE,
     DEFAULT_FONT_FAMILY,
     DEFAULT_FONT_SIZE,
     DEFAULT_LOG_LINE_ENDING,
+    DEFAULT_TIMESTAMP_MODE,
     DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH,
     DEFAULT_WINDOW_X,
@@ -46,21 +53,27 @@ from app.constants import (
     MAX_CONSOLE_LINES_MAX,
     MAX_CONSOLE_LINES_MIN,
     PREFERENCES_FILENAME,
+    RECONNECT_LIMIT_MINUTES_MAX,
     SETTINGS_VERSION,
     SETTINGS_VERSION_UNVERSIONED,
     SHARED_FILE_LOCK_SUFFIX,
     SHARED_FILE_LOCK_TIMEOUT_S,
     THEME_FOLLOW_SYSTEM,
+    TIMESTAMP_MODE_WORDS,
     WINDOW_POSITION_MAX,
     WINDOW_POSITION_MIN,
     WINDOW_SIZE_MAX,
     WINDOW_SIZE_MIN,
     ExportFormat,
     LineEnding,
+    TimestampMode,
     get_config_dir,
     get_default_log_dir,
+    timestamp_mode_of,
 )
 from app.file_lock import held_lock
+from app.modules import SECTION as MODULES_SECTION
+from app.modules import module_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +103,7 @@ _DEFAULTS = {
         "font_size": str(DEFAULT_FONT_SIZE),
         "color_mode": "true",
         "auto_scroll": "true",
-        "timestamp_mode": "absolute",
+        "timestamp_mode": TIMESTAMP_MODE_WORDS[DEFAULT_TIMESTAMP_MODE],
         "hide_blank_lines": "false",
     },
     "Serial": {
@@ -117,6 +130,8 @@ _DEFAULTS = {
         # profile selected.
         "default_profile": "Auto-detect",
         "profiles_json": '[{"name":"Auto-detect","mode":"auto"}]',
+        # Where a plot opens: in a window of its own, or under the console.
+        "own_window": "true",
     },
     "Updates": {
         # Whether the choice made in the Windows installer about update
@@ -138,6 +153,31 @@ _DEFAULTS = {
         "usage_statistics": "false",
         "usage_question_shown": "0",
         "usage_question_answered": "false",
+    },
+    # Which modules are switched on. See app.modules.
+    MODULES_SECTION: module_defaults(),
+    "Highlights": {
+        # Persisted by core.highlight_rules.HighlightStore.
+        "rules_json": "[]",
+    },
+    "Reconnect": {
+        # Whether a lost board is waited for, for how long (minutes, 0 for
+        # no limit), and whether a port with no USB identity is taken
+        # back by its name.
+        "enabled": "true",
+        "limit_minutes": "0",
+        "by_port_name": "true",
+    },
+    "Alerts": {
+        # What the Alerts feature alerts on; whether it plays a sound and
+        # shows a desktop notification, and the least time between them.
+        "error_lines": "false",
+        "connection_lost": "true",
+        "silence": "false",
+        "silence_seconds": str(ALERT_SILENCE_SECONDS_DEFAULT),
+        "sound": "true",
+        "notification": "false",
+        "pause_seconds": str(ALERT_PAUSE_SECONDS_DEFAULT),
     },
     "Commands": {
         # Persisted by app.saved_commands.SavedCommands.
@@ -162,6 +202,7 @@ _DEFAULTS = {
 #: defaults leaves them as they are.
 _KEPT_ON_RESET: tuple[tuple[str, str], ...] = (
     ("Plot", "profiles_json"),
+    ("Highlights", "rules_json"),
     ("Ports", "remembered_json"),
     ("Commands", "saved_json"),
     ("Export", "last_directory"),
@@ -417,6 +458,98 @@ class ConfigManager:
     @auto_scroll.setter
     def auto_scroll(self, value: bool) -> None:
         self.set("Display", "auto_scroll", str(value).lower())
+
+    @property
+    def plot_own_window(self) -> bool:
+        """Whether a plot opens in a window of its own rather than under the console."""
+        return self.get_bool("Plot", "own_window", fallback=True)
+
+    @plot_own_window.setter
+    def plot_own_window(self, value: bool) -> None:
+        self.set("Plot", "own_window", str(value).lower())
+
+    @property
+    def reconnect(self) -> bool:
+        return self.get_bool("Reconnect", "enabled", fallback=True)
+
+    @reconnect.setter
+    def reconnect(self, value: bool) -> None:
+        self.set("Reconnect", "enabled", str(value).lower())
+
+    @property
+    def reconnect_limit_minutes(self) -> int:
+        value = self.get_int("Reconnect", "limit_minutes", fallback=0)
+        return min(max(value, 0), RECONNECT_LIMIT_MINUTES_MAX)
+
+    @reconnect_limit_minutes.setter
+    def reconnect_limit_minutes(self, value: int) -> None:
+        self.set("Reconnect", "limit_minutes", str(value))
+
+    @property
+    def reconnect_by_port_name(self) -> bool:
+        return self.get_bool("Reconnect", "by_port_name", fallback=True)
+
+    @reconnect_by_port_name.setter
+    def reconnect_by_port_name(self, value: bool) -> None:
+        self.set("Reconnect", "by_port_name", str(value).lower())
+
+    @property
+    def alert_error_lines(self) -> bool:
+        return self.get_bool("Alerts", "error_lines", fallback=False)
+
+    @alert_error_lines.setter
+    def alert_error_lines(self, value: bool) -> None:
+        self.set("Alerts", "error_lines", str(value).lower())
+
+    @property
+    def alert_connection_lost(self) -> bool:
+        return self.get_bool("Alerts", "connection_lost", fallback=True)
+
+    @alert_connection_lost.setter
+    def alert_connection_lost(self, value: bool) -> None:
+        self.set("Alerts", "connection_lost", str(value).lower())
+
+    @property
+    def alert_silence(self) -> bool:
+        return self.get_bool("Alerts", "silence", fallback=False)
+
+    @alert_silence.setter
+    def alert_silence(self, value: bool) -> None:
+        self.set("Alerts", "silence", str(value).lower())
+
+    @property
+    def alert_silence_seconds(self) -> int:
+        value = self.get_int("Alerts", "silence_seconds", fallback=ALERT_SILENCE_SECONDS_DEFAULT)
+        return min(max(value, ALERT_SILENCE_SECONDS_MIN), ALERT_SILENCE_SECONDS_MAX)
+
+    @alert_silence_seconds.setter
+    def alert_silence_seconds(self, value: int) -> None:
+        self.set("Alerts", "silence_seconds", str(value))
+
+    @property
+    def alert_sound(self) -> bool:
+        return self.get_bool("Alerts", "sound", fallback=True)
+
+    @alert_sound.setter
+    def alert_sound(self, value: bool) -> None:
+        self.set("Alerts", "sound", str(value).lower())
+
+    @property
+    def alert_notification(self) -> bool:
+        return self.get_bool("Alerts", "notification", fallback=False)
+
+    @alert_notification.setter
+    def alert_notification(self, value: bool) -> None:
+        self.set("Alerts", "notification", str(value).lower())
+
+    @property
+    def alert_pause_seconds(self) -> int:
+        value = self.get_int("Alerts", "pause_seconds", fallback=ALERT_PAUSE_SECONDS_DEFAULT)
+        return min(max(value, ALERT_PAUSE_SECONDS_MIN), ALERT_PAUSE_SECONDS_MAX)
+
+    @alert_pause_seconds.setter
+    def alert_pause_seconds(self, value: int) -> None:
+        self.set("Alerts", "pause_seconds", str(value))
 
     @property
     def timestamp_mode(self) -> str:
@@ -728,7 +861,10 @@ class ConfigManager:
         cannot be told apart from a choice. Moving to 2.0 therefore sets
         the theme and the console font and its size to the 2.0 defaults
         for everyone; every other setting is kept. (1.x stored the size in
-        points, 2.0 in pixels, so the old number would be wrong anyway.) The new version is saved with the
+        points, 2.0 in pixels, so the old number would be wrong anyway.)
+        Moving to 2.1, the console shows the date with the time where it
+        showed the time of day, the only absolute time offered before;
+        Since previous line is kept. The new version is saved with the
         file, so this happens on the first start only and a later choice
         made by the user is never overwritten.
         """
@@ -740,11 +876,17 @@ class ConfigManager:
             if not self._config.has_section(section):
                 self._config.add_section(section)
 
-        # 1 -> 2: the theme follows the system; the console uses the
-        # font shipped with the application, at the design's size.
-        self.set("General", "theme", THEME_FOLLOW_SYSTEM)
-        self.set("Display", "font_family", DEFAULT_FONT_FAMILY)
-        self.set("Display", "font_size", DEFAULT_FONT_SIZE)
+        if stored < 2:
+            # 1 -> 2: the theme follows the system; the console uses the
+            # font shipped with the application, at the design's size.
+            self.set("General", "theme", THEME_FOLLOW_SYSTEM)
+            self.set("Display", "font_family", DEFAULT_FONT_FAMILY)
+            self.set("Display", "font_size", DEFAULT_FONT_SIZE)
+        if stored < 3:
+            # 2 -> 3: the date with the time, in place of the time of day.
+            stored_mode = self._config.get("Display", "timestamp_mode", fallback="")
+            if timestamp_mode_of(stored_mode) is not TimestampMode.RELATIVE:
+                self.set("Display", "timestamp_mode", TIMESTAMP_MODE_WORDS[DEFAULT_TIMESTAMP_MODE])
 
         self.set("General", "settings_version", str(SETTINGS_VERSION))
         logger.info(

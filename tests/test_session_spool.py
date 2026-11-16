@@ -12,7 +12,7 @@ import pytest
 
 from app.constants import SPOOL_STALE_MIN_AGE_S
 from core.records import LineRecord, RecordOrigin, command_record, notice_record
-from core.session_spool import SessionSpool
+from core.session_spool import SessionSpool, SpoolPosition, SpoolRange
 
 _START = datetime(2026, 1, 2, 3, 4, 5, 123456)
 
@@ -120,6 +120,78 @@ class TestSegments:
         snapshot.release()
         snapshot.release()
         spool.delete()
+
+
+class TestReadingAsItGrows:
+    @pytest.fixture
+    def segmented(self, tmp_path):
+        instance = SessionSpool(str(tmp_path), segment_bytes=2_000, max_bytes=10**9)
+        instance.create()
+        yield instance
+        instance.delete()
+
+    @staticmethod
+    def _read_from(spool, position, max_segments=None):
+        snapshot = spool.snapshot_from(position, max_segments)
+        try:
+            return [r for block in snapshot.blocks() for r in block.records], snapshot.end
+        finally:
+            snapshot.release()
+
+    def test_a_reader_gets_each_record_once_however_it_follows(self, segmented):
+        written = _records(600)
+        read: list[LineRecord] = []
+        position = None
+        for start in range(0, 600, 30):
+            segmented.append(written[start:start + 30])
+            while True:
+                records, end = self._read_from(segmented, position, max_segments=1)
+                if end is None:
+                    break
+                read.extend(records)
+                position = end
+        assert read == written
+
+    def test_nothing_new_gives_an_empty_snapshot(self, segmented):
+        segmented.append(_records(10))
+        _, end = self._read_from(segmented, None)
+
+        records, again = self._read_from(segmented, end)
+
+        assert records == [] and again is None
+
+    def test_blocks_say_where_their_records_are_so_they_can_be_read_again(self, segmented):
+        written = _records(300)
+        for start in range(0, 300, 25):
+            segmented.append(written[start:start + 25])
+        snapshot = segmented.snapshot_from(None)
+        blocks = list(snapshot.blocks())
+        snapshot.release()
+        assert [r for block in blocks for r in block.records] == written
+
+        again = segmented.snapshot_from(None)
+        chosen = [blocks[2].where, blocks[0].where]
+        reread = [list(block.records) for block in again.read(chosen)]
+        assert all(again.holds(where) for where in chosen)
+        again.release()
+        assert reread == [blocks[2].records, blocks[0].records]
+
+    def test_a_reader_left_behind_the_cap_is_told(self, tmp_path):
+        spool = SessionSpool(str(tmp_path), segment_bytes=2_000, max_bytes=4_000)
+        spool.create()
+        spool.append(_records(20))
+        _, position = self._read_from(spool, None)
+        for start in range(20, 2_000, 20):
+            spool.append(_records(20, first=start))
+
+        snapshot = spool.snapshot_from(position)
+        assert snapshot.truncated
+        assert not snapshot.holds(SpoolRange(position.segment, 0, position.offset))
+        snapshot.release()
+        spool.delete()
+
+    def test_positions_order_by_segment_then_offset(self):
+        assert SpoolPosition(1, 900) < SpoolPosition(2, 0) < SpoolPosition(2, 5)
 
 
 class TestMark:

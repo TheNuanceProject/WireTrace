@@ -60,6 +60,7 @@ from PySide6.QtGui import QGuiApplication
 from app._atomic import atomic_write_text
 from app.config import ConfigManager
 from app.constants import (
+    MS_PER_SECOND,
     SHARED_FILE_LOCK_SUFFIX,
     SHARED_FILE_LOCK_TIMEOUT_S,
     THEME_FOLLOW_SYSTEM,
@@ -98,6 +99,15 @@ class Feature(Enum):
     TABS = "tabs"
     FILTER = "filter"
     FIND = "find"
+    RECONNECT = "reconnect"
+    ALERTS = "alerts"
+    NOTIFICATION = "notification"
+    HIGHLIGHTS = "highlights"
+    ANSI = "ansi"
+    LINE_SETTINGS = "line_settings"
+    CONTROL_LINES = "control_lines"
+    PLOT_EXPORT = "plot_export"
+    REPORT = "report"
 
 
 class Problem(Enum):
@@ -176,7 +186,6 @@ _RUN_LOCK_SUFFIX = ".lock"
 _HTTP_OK_FIRST, _HTTP_OK_LAST = 200, 299
 _HTTP_REFUSED_FIRST, _HTTP_REFUSED_LAST = 400, 499
 _HTTP_TOO_MANY = 429
-_MS_PER_SECOND = 1000
 #: What a report names a system or processor by when the system's own
 #: name for it is not one WireTrace can send.
 _OTHER = "other"
@@ -659,7 +668,7 @@ class UsageStatistics(QObject):
         if not self._update(begin):
             self._release_run()
             return
-        self._send_soon.start(USAGE_SEND_DELAY_S * _MS_PER_SECOND)
+        self._send_soon.start(USAGE_SEND_DELAY_S * MS_PER_SECOND)
         self._schedule_day_change()
         self._schedule_session()
         self._schedule_deletions(USAGE_SEND_DELAY_S)
@@ -845,7 +854,7 @@ class UsageStatistics(QObject):
             raise OSError(f"the usage notes could not be read: {exc}") from exc
         try:
             return _parse_state(json.loads(text)), False
-        except (ValueError, KeyError, TypeError) as exc:
+        except (ValueError, KeyError, TypeError, RecursionError) as exc:
             # A file written by hand or damaged on disk is not trusted;
             # the notes start again.
             logger.warning("The usage notes were not readable and start again: %s", exc)
@@ -881,7 +890,7 @@ class UsageStatistics(QObject):
         now = self._now()
         midnight = datetime.combine(now.date() + timedelta(days=1), time.min, now.tzinfo)
         wait = midnight - now + timedelta(seconds=USAGE_DAY_CHANGE_DELAY_S)
-        self._day_change.start(max(0, int(wait.total_seconds() * _MS_PER_SECOND)))
+        self._day_change.start(max(0, int(wait.total_seconds() * MS_PER_SECOND)))
 
     def _on_day_changed(self) -> None:
         if self._run is None or not self.enabled:
@@ -918,7 +927,7 @@ class UsageStatistics(QObject):
         seconds = self._session_seconds_today()
         for bound, _ in SESSION_RANGES:
             if seconds < bound:
-                self._session.start(max(0, int((bound - seconds) * _MS_PER_SECOND)))
+                self._session.start(max(0, int((bound - seconds) * MS_PER_SECOND)))
                 return
         self._session.stop()
 
@@ -965,7 +974,7 @@ class UsageStatistics(QObject):
         installation = item.report["installation"]
         self._update(lambda state: _remove_waiting(state, item.day, installation))
         if self._state.waiting and self._run is not None and self.enabled:
-            self._send_soon.start(int(self._spacing() * _MS_PER_SECOND))
+            self._send_soon.start(int(self._spacing() * MS_PER_SECOND))
 
     def _on_report_failed(self, message: str) -> None:
         self._report_item, self._report_task = None, None
@@ -981,7 +990,7 @@ class UsageStatistics(QObject):
         if due is None:
             self._deletion_retry.stop()
         else:
-            self._deletion_retry.start(int(max(delay_s, due) * _MS_PER_SECOND))
+            self._deletion_retry.start(int(max(delay_s, due) * MS_PER_SECOND))
 
     def _deletions_due_in(self) -> float | None:
         """In how many seconds a deletion request is next due; None if

@@ -52,7 +52,7 @@ class SavedCommands:
             return []
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
             logger.warning("Saved commands are unreadable and are ignored: %s", exc)
             return []
         return clean(data) if isinstance(data, list) else []

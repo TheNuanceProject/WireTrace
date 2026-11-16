@@ -7,8 +7,8 @@ edit: change the token files there and generate again. ``tokens.py``
 builds the palettes, sizes and type styles from these values.
 """
 
-SOURCES_SHA256 = "9cfba67ee2fc3632c56f7d681b96b8a8901d75ce81f44acc1be617d12537925e"
-BODY_SHA256 = "4baaae825c662e8271c29d945a69fc64eedb3878a36f41f4f24656f86327b616"
+SOURCES_SHA256 = "466cabf89f1bcb0e82aaaba60a20e69731eee425a6f7422b93f49a82e3001367"
+BODY_SHA256 = "092fe8d71ae03fb8afcca148f24f1584d70708bfb5768232e7273af432b965e8"
 
 #: Font families, first choice first.
 FONT_FAMILIES: dict[str, tuple[str, ...]] = {
@@ -206,6 +206,28 @@ COLOURS: dict[str, dict[str, tuple[str, float]]] = {
         "wiretrace.plot.6": ("#56B4E9", 1),
         "wiretrace.plot.7": ("#B45F06", 1),
         "wiretrace.plot.8": ("#666666", 1),
+        "wiretrace.ansi.0": ("#141413", 1),
+        "wiretrace.ansi.1": ("#CC2F24", 1),
+        "wiretrace.ansi.2": ("#247B41", 1),
+        "wiretrace.ansi.3": ("#856813", 1),
+        "wiretrace.ansi.4": ("#246ACC", 1),
+        "wiretrace.ansi.5": ("#AD3AAD", 1),
+        "wiretrace.ansi.6": ("#1C7684", 1),
+        "wiretrace.ansi.7": ("#6F6C65", 1),
+        "wiretrace.ansi.8": ("#676C78", 1),
+        "wiretrace.ansi.9": ("#D41E11", 1),
+        "wiretrace.ansi.10": ("#167C38", 1),
+        "wiretrace.ansi.11": ("#7F6B07", 1),
+        "wiretrace.ansi.12": ("#1266DD", 1),
+        "wiretrace.ansi.13": ("#B727B7", 1),
+        "wiretrace.ansi.14": ("#0F7786", 1),
+        "wiretrace.ansi.15": ("#716B60", 1),
+        "wiretrace.highlight.1": ("#CD2D21", 1),
+        "wiretrace.highlight.2": ("#995F0C", 1),
+        "wiretrace.highlight.3": ("#1F7B45", 1),
+        "wiretrace.highlight.4": ("#157878", 1),
+        "wiretrace.highlight.5": ("#2269CE", 1),
+        "wiretrace.highlight.6": ("#8B4CCB", 1),
     },
     "dark": {
         "paper": ("#1A1A18", 1),
@@ -242,5 +264,27 @@ COLOURS: dict[str, dict[str, tuple[str, float]]] = {
         "wiretrace.plot.6": ("#9DC9F0", 1),
         "wiretrace.plot.7": ("#FFE066", 1),
         "wiretrace.plot.8": ("#BBBBBB", 1),
+        "wiretrace.ansi.0": ("#909090", 1),
+        "wiretrace.ansi.1": ("#E77E76", 1),
+        "wiretrace.ansi.2": ("#34B25E", 1),
+        "wiretrace.ansi.3": ("#C0971B", 1),
+        "wiretrace.ansi.4": ("#6B9EE5", 1),
+        "wiretrace.ansi.5": ("#D47DD4", 1),
+        "wiretrace.ansi.6": ("#28ABBF", 1),
+        "wiretrace.ansi.7": ("#D2D0CD", 1),
+        "wiretrace.ansi.8": ("#B5B5B5", 1),
+        "wiretrace.ansi.9": ("#F79D96", 1),
+        "wiretrace.ansi.10": ("#25D05E", 1),
+        "wiretrace.ansi.11": ("#D4B30B", 1),
+        "wiretrace.ansi.12": ("#8BB8F6", 1),
+        "wiretrace.ansi.13": ("#E99AE9", 1),
+        "wiretrace.ansi.14": ("#19C7E1", 1),
+        "wiretrace.ansi.15": ("#FAF9F5", 1),
+        "wiretrace.highlight.1": ("#EA867E", 1),
+        "wiretrace.highlight.2": ("#E68E13", 1),
+        "wiretrace.highlight.3": ("#2EB968", 1),
+        "wiretrace.highlight.4": ("#20B4B4", 1),
+        "wiretrace.highlight.5": ("#73A4E8", 1),
+        "wiretrace.highlight.6": ("#B892DF", 1),
     },
 }

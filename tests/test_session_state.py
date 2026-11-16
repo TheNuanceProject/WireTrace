@@ -39,7 +39,7 @@ class TestDefaults:
     def test_display_defaults(self):
         s = DeviceSession()
         assert s.display_mode == DisplayMode.TEXT
-        assert s.timestamp_mode == TimestampMode.ABSOLUTE
+        assert s.timestamp_mode == TimestampMode.DATE_TIME
         assert s.filter_text == ""
 
     def test_metrics_defaults(self):

@@ -26,7 +26,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import QPoint, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QResizeEvent
@@ -48,32 +48,42 @@ from app.constants import (
     DISPLAY_TICK_BUDGET_FRACTION,
     FILTER_DEBOUNCE_MS,
     MENU_SELECTION_PREVIEW_CHARS,
+    MS_PER_MINUTE,
+    MS_PER_SECOND,
     NAME_SEPARATOR,
+    RECONNECT_RECORD_WAIT_MS,
     SPOOL_DIRECTORY_NAME,
+    TAG_NOTICE,
+    TAG_NOTICE_EVENT,
     DisplayMode,
     ExportFormat,
     LineEnding,
     TimestampMode,
     get_cache_dir,
+    timestamp_mode_of,
 )
 from app.file_names import output_base_path
-from app.plot_config import (
-    PlotConfig,
-    PlotProfileStore,
-)
+from app.modules import ALERTS, ANSI_COLOURS, HIGHLIGHTS, PLOT, REPORT, RESTARTS, ModuleSettings
 from app.port_memory import PortMemory
 from app.saved_commands import SavedCommands
 from core.device_pipeline import DevicePipeline, TransportFactory
 from core.export_job import ExportRequest, ExportResult
+from core.highlight_rules import HighlightStore
 from core.log_writer import LogRequest, LogStartError, LogSummary
-from core.plot_engine import PlotEngine, PlotMode
-from core.plot_parsers import RegexParserError
-from core.records import RecordOrigin, notice_record
+from core.port_identity import PortIdentity, PortLister, read_identities
+from core.reconnect import Ask, Basis, Found
+from core.records import notice_record
+from core.serial_settings import LineSettings, LineStates
 from core.session import DeviceSession
-from core.transport import available_ports, open_serial_transport
+from core.transport import PortInfo, available_ports, open_serial_transport
 from ui import shortcuts
+from ui.alert_notifier import AlertKind, AlertNotifier
+from ui.device_claims import CLAIMS
 from ui.dialogs.messages import confirm
+from ui.dialogs.port_settings_dialog import PortSettingsDialog
 from ui.formatting import describe_files, format_count
+from ui.module_host import ModuleHost, TabContext
+from ui.reconnect_watcher import ReconnectWatcher
 from ui.themes import tokens
 from ui.themes.theme_manager import ThemeManager
 from ui.widgets import banner as banners
@@ -82,7 +92,7 @@ from ui.widgets.button import Button
 from ui.widgets.command_bar import LINE_ENDING_NAMES, CommandBar
 from ui.widgets.connect_page import ConnectPage
 from ui.widgets.console_header import ConsoleHeader
-from ui.widgets.console_view import ConsoleView
+from ui.widgets.console_view import COLOURS_HIGHLIGHT, ConsoleView
 from ui.widgets.search_bar import SearchBar
 from ui.widgets.status_bar import DeviceStatusBar
 from ui.widgets.status_dot import LinkState
@@ -92,12 +102,11 @@ from ui.widgets.toast import Toast
 from updater.usage import Feature, Problem
 
 if TYPE_CHECKING:
-    from ui.widgets.plot_view import PlotView
-    from ui.widgets.plot_window import PlotWindow
+    from ui.features.plot_feature import PlotFeature
+    from ui.features.report_feature import ReportFeature
 
 logger = logging.getLogger(__name__)
 
-_MS_PER_SECOND = 1000
 _CLOCK_FORMAT = "%H:%M:%S"
 NEW_TAB_TITLE = "New tab"
 _SELECTION_NAME = "Selection"
@@ -114,6 +123,9 @@ _BANNER_SPOOL = "spool"
 _BANNER_SKIPPING = "skipping"
 _BANNER_COMMAND = "command"
 _BANNER_EXPORT = "export"
+_BANNER_MODULE = "module"
+_BANNER_WAITING = "waiting"
+_BANNER_ASK = "reconnect-ask"
 
 
 class DeviceTab(QWidget):
@@ -137,6 +149,12 @@ class DeviceTab(QWidget):
                                       ``Problem`` occurred, for the
                                       usage statistics.
         line_rate_measured(int):      Lines received in the last second.
+        reconnect_changed(bool):      Whether this tab waits for a lost
+                                      board changed.
+        alerts_changed(bool):         Whether alerts are on for this tab
+                                      changed.
+        alerted():                    This tab alerted: the sound and the
+                                      notification were asked for.
     """
 
     title_changed = Signal(str)
@@ -149,6 +167,9 @@ class DeviceTab(QWidget):
     plot_visibility_changed = Signal(bool)
     usage_noted = Signal(object)
     line_rate_measured = Signal(int)
+    reconnect_changed = Signal(bool)
+    alerts_changed = Signal(bool)
+    alerted = Signal()
 
     def __init__(
         self,
@@ -156,11 +177,18 @@ class DeviceTab(QWidget):
         config_manager: ConfigManager,
         parent: QWidget | None = None,
         transport_factory: TransportFactory = open_serial_transport,
+        read_ports: PortLister = read_identities,
+        alert_notifier: AlertNotifier | None = None,
     ) -> None:
         super().__init__(parent)
 
         self._theme_manager = theme_manager
         self._config_manager = config_manager
+        # The sound and notification of alerts, shared by the window's
+        # tabs; a tab on its own has its own.
+        self._alert_notifier = (
+            alert_notifier if alert_notifier is not None else AlertNotifier(config_manager, self)
+        )
         self._port_memory = PortMemory(config_manager)
 
         # Core modules (per-tab isolation)
@@ -173,9 +201,33 @@ class DeviceTab(QWidget):
             transport_factory=transport_factory,
             parent=self,
         )
+        # Reconnect: the identity of the board, the search for it once
+        # lost, and when it was lost while the tab waits.
+        self._watcher = ReconnectWatcher(self, read=read_ports, parent=self)
+        # This tab's own choice to wait for a lost board; None follows
+        # Preferences.
+        self._reconnect_choice: bool | None = None
+        self._waiting_since: datetime | None = None
+        # The port the board is being reopened on while it returns.
+        self._returning: PortIdentity | None = None
+        # The port and baud rate to open once the port's identity is read.
+        self._pending_open: tuple[str, int] | None = None
+        self._record_wait = QTimer(self)
+        self._record_wait.setSingleShot(True)
+        self._record_wait.setInterval(RECONNECT_RECORD_WAIT_MS)
+        self._record_wait.timeout.connect(self._open_pending)
+        self._wait_limit = QTimer(self)
+        self._wait_limit.setSingleShot(True)
+        self._wait_limit.timeout.connect(self.stop_waiting)
 
         # True from a connect request until the pipeline answers it.
         self._connecting = False
+        # The plot whose visibility this tab relays, if one is attached.
+        self._followed_plot: PlotFeature | None = None
+        # The line settings of the chosen port, and those the connection
+        # being opened, or open, uses.
+        self._line_settings = LineSettings()
+        self._open_line_settings = LineSettings()
         # Port and baud rate of the session that is, or was last,
         # recorded. An export made after the device has gone still
         # names them.
@@ -207,30 +259,36 @@ class DeviceTab(QWidget):
         self._filter_timer.setInterval(FILTER_DEBOUNCE_MS)
         self._filter_timer.timeout.connect(self._apply_filter)
 
-        # Plot subsystem.
-        # PlotEngine is eager so it holds the most recent lines from
-        # session start; it only parses while the plot panel is open.
-        # PlotView is lazy: pyqtgraph imports are deferred until first
-        # toggle.
-        self._plot_engine: PlotEngine = PlotEngine(self)
-        self._plot_engine.set_active(False)
-        self._plot_view: PlotView | None = None
-        self._plot_window: PlotWindow | None = None
-        self._plot_visible: bool = False
-
-        # Plot profile store: read-through to the shared ConfigManager.
-        # On first construction we apply the user's default profile so
-        # tabs open with the engineer's preferred mode rather than
-        # always starting in auto-detect.
-        self._plot_profile_store = PlotProfileStore(self._config_manager)
-        self._plot_active_config: PlotConfig = (
-            self._plot_profile_store.default_profile()
-        )
-        self._apply_plot_config_to_engine(
-            self._plot_active_config, emit_toast=False,
-        )
-
         self._setup_ui()
+        self._modules = ModuleHost(
+            TabContext(
+                widget=self,
+                theme_manager=theme_manager,
+                config=config_manager,
+                port_memory=self._port_memory,
+                toolbar=self._toolbar,
+                panels=self._console_plot_splitter,
+                title=lambda: self.title,
+                recorded_port=lambda: self._recorded_port,
+                recorded_baud=lambda: self._recorded_baud,
+                framing=lambda: self._open_line_settings.describe(),
+                is_connected=lambda: self._session.is_connected,
+                is_waiting=lambda: self.is_waiting,
+                note_usage=self.usage_noted.emit,
+                recording=self._pipeline.recording,
+                banners=self._banners,
+                report_problem=lambda title, detail: self._banners.show_banner(
+                    _BANNER_EXPORT, banners.ERROR, title, detail,
+                ),
+                open_folder=self._open_folder,
+                session_figures=self._pipeline.session_figures,
+                alert=self._alert,
+            ),
+            self._pipeline,
+            ModuleSettings(config_manager),
+            self,
+        )
+        self._modules.module_failed.connect(self._on_module_failed)
         self._connect_signals()
         self._apply_initial_preferences()
         self.apply_preferences()
@@ -264,6 +322,8 @@ class DeviceTab(QWidget):
 
     @property
     def link_state(self) -> LinkState:
+        if self._waiting_since is not None:
+            return LinkState.WAITING
         if self._session.is_logging:
             return LinkState.LOGGING
         if self._session.is_connected:
@@ -291,7 +351,7 @@ class DeviceTab(QWidget):
         self._custom_name = name.strip()
         if self._recorded_port:
             self._port_memory.remember(self._recorded_port, tab_name=self._custom_name)
-        self._show_plot_window_state()
+        self._modules.title_changed()
         self.title_changed.emit(self.title)
 
     def ordered_shutdown(self) -> None:
@@ -306,11 +366,13 @@ class DeviceTab(QWidget):
         logger.info("Ordered shutdown: %s", self._session.port_name)
         self._display_timer.stop()
         self._filter_timer.stop()
+        self._wait_limit.stop()
+        self._watcher.shutdown()
+        CLAIMS.release(self)
+        # Modules first: one may be reading the session recording.
+        self._modules.shutdown()
+        self._alert_notifier.forget(self)
         self._pipeline.shutdown()
-        if self._plot_window is not None:
-            self.set_plot_floating(False)
-        if self._plot_view is not None:
-            self._plot_view.shutdown()
         self._session.reset_connection_state()
 
     def apply_preferences(self) -> None:
@@ -322,6 +384,18 @@ class DeviceTab(QWidget):
         self._console.set_hide_blank_lines(config.hide_blank_lines)
         self._console.set_severity_colours(config.color_mode)
         self._display_timer.setInterval(config.gui_update_interval_ms)
+        self._modules.set_interval(config.gui_update_interval_ms)
+        self._apply_reconnect()
+        modules = ModuleSettings(config)
+        self._pipeline.set_restart_detection(modules.is_enabled(RESTARTS))
+        ansi = modules.is_enabled(ANSI_COLOURS)
+        self._pipeline.set_ansi_colours(ansi)
+        self._console.set_ansi_colours(ansi)
+        self._console.set_highlights(
+            HighlightStore(config).rules() if modules.is_enabled(HIGHLIGHTS) else ()
+        )
+        self.sync_modules()
+        self._modules.apply_preferences()
         self._pipeline.configure(
             display_capacity=config.max_console_lines,
             max_pending_lines=config.log_buffer_max_entries,
@@ -336,87 +410,56 @@ class DeviceTab(QWidget):
         """
         config = self._config_manager
         self._connect_page.set_baud(config.default_baud_rate)
-        mode = (
-            TimestampMode.RELATIVE if config.timestamp_mode == "relative"
-            else TimestampMode.ABSOLUTE
-        )
-        self.set_timestamp_mode(mode)
+        self.set_timestamp_mode(timestamp_mode_of(config.timestamp_mode))
         self._console.set_auto_follow(config.auto_scroll)
         self._header.set_following(self._console.following)
 
-    # ── Plot configuration API ───────────────────────────────────────────────
+    # ── Modules ──────────────────────────────────────────────────────────────
+
+    @property
+    def plot(self) -> PlotFeature | None:
+        """The live plot of this tab, or None while the plot is switched off."""
+        return cast("PlotFeature | None", self._modules.module(PLOT))
+
+    @property
+    def report(self) -> ReportFeature | None:
+        """The session report of this tab, or None while it is switched off."""
+        return cast("ReportFeature | None", self._modules.module(REPORT))
+
+    def open_session_report(self) -> None:
+        """Show the report of the current or last session."""
+        report = self.report
+        if report is not None:
+            report.open_report()
+
+    def sync_modules(self) -> None:
+        """Attach the modules switched on and detach those switched off."""
+        self._modules.sync()
+        self._follow_plot()
+
+    @Slot(str)
+    def _on_module_failed(self, message: str) -> None:
+        self._banners.show_banner(_BANNER_MODULE, banners.ERROR, message, "")
+        self._follow_plot()
+
+    def _follow_plot(self) -> None:
+        """Relay the visibility of the plot attached now, and announce it."""
+        plot = self.plot
+        if plot is not None and plot is not self._followed_plot:
+            plot.visibility_changed.connect(self.plot_visibility_changed)
+        self._followed_plot = plot
+        self.plot_visibility_changed.emit(self.is_plot_visible())
 
     def plot_recent_lines(self) -> list[str]:
-        """Most recent lines from the live engine.
-
-        The Configure plot dialog uses this as reference material and
-        as the corpus for its Test button. Always returns a list
-        (possibly empty) and never raises.
-        """
-        try:
-            return self._plot_engine.recent_lines()
-        except Exception:
-            logger.exception("plot_engine.recent_lines() failed")
-            return []
+        """Most recent lines from the live plot, for the Configure plot dialog."""
+        plot = self.plot
+        return plot.recent_lines() if plot is not None else []
 
     def open_plot_config_dialog(self) -> None:
-        """Open the Configure plot dialog rooted on this tab.
-
-        The dialog is constructed lazily so its imports don't pay a
-        cost on tabs that never use it. The applied config is stored
-        on the tab so subsequent dialog opens preselect the right
-        profile.
-        """
-        from ui.dialogs.plot_config_dialog import PlotConfigDialog
-
-        dialog = PlotConfigDialog(
-            store=self._plot_profile_store,
-            recent_lines_provider=self.plot_recent_lines,
-            current_config=self._plot_active_config,
-            parent=self,
-        )
-        dialog.configChanged.connect(self._on_plot_config_changed)
-        dialog.exec()
-
-    @Slot(object)
-    def _on_plot_config_changed(self, config: PlotConfig) -> None:
-        """Apply a new PlotConfig from the dialog."""
-        if not isinstance(config, PlotConfig):
-            return
-        self._apply_plot_config_to_engine(config, emit_toast=True)
-        if self._recorded_port and self._plot_active_config is config:
-            self._port_memory.remember(self._recorded_port, plot_profile=config.name)
-
-    def _apply_plot_config_to_engine(
-        self, config: PlotConfig, *, emit_toast: bool = True,
-    ) -> None:
-        """Push a PlotConfig down to the engine.
-
-        Auto mode calls engine.set_auto_config(); manual mode calls
-        engine.set_manual_config(pattern). On invalid
-        pattern (should not happen: the dialog validates first), falls
-        back to auto and surfaces the error via Toast.
-        """
-        try:
-            if config.mode == "auto":
-                self._plot_engine.set_auto_config()
-            else:
-                self._plot_engine.set_manual_config(config.pattern)
-                if self._plot_visible:
-                    self.usage_noted.emit(Feature.PLOT_PATTERN)
-        except RegexParserError as exc:
-            logger.warning("Plot config rejected by engine: %s", exc)
-            if emit_toast:
-                Toast.error(self, f"Plot pattern rejected: {exc}")
-            # Fall back to auto so the engine isn't left in a half-state
-            self._plot_engine.set_auto_config()
-            self._plot_active_config = PlotConfig.auto()
-            return
-
-        self._plot_active_config = config
-        if emit_toast:
-            mode_label = "Auto-detect" if config.mode == "auto" else "manual"
-            Toast.info(self, f"Plot mode: {mode_label} ({config.name})")
+        """Open the Configure plot dialog for this tab."""
+        plot = self.plot
+        if plot is not None:
+            plot.open_config_dialog()
 
     def set_display_mode(self, mode: DisplayMode) -> None:
         """Switch between TEXT and HEX display modes."""
@@ -539,8 +582,6 @@ class DeviceTab(QWidget):
             handle = self._console_plot_splitter.handle(1)
             if handle is not None:
                 handle.setToolTip("Drag to resize the console and the plot")
-        # Remembered split ratio across toggles within a session.
-        self._splitter_ratio: tuple[int, int] = (1, 1)
         view.addWidget(self._console_plot_splitter, 1)
 
         self._saved_commands = SavedCommands(self._config_manager)
@@ -556,11 +597,21 @@ class DeviceTab(QWidget):
         self._connect_page.connect_requested.connect(self._on_connect)
         self._connect_page.ports_wanted.connect(self.refresh_ports)
         self._connect_page.port_chosen.connect(self._on_port_chosen)
+        self._connect_page.port_settings_requested.connect(self.edit_port_settings)
 
         # Toolbar
         self._toolbar.connect_requested.connect(self._on_connect)
         self._toolbar.disconnect_requested.connect(self.disconnect_device)
         self._toolbar.ports_wanted.connect(self.refresh_ports)
+        self._toolbar.port_chosen.connect(self._on_port_chosen)
+        self._toolbar.port_settings_requested.connect(self.edit_port_settings)
+        self._toolbar.dtr_toggled.connect(self._pipeline.set_dtr)
+        self._toolbar.rts_toggled.connect(self._pipeline.set_rts)
+        self._toolbar.break_requested.connect(self._pipeline.send_break)
+        self._console.colours_shown.connect(self._on_colours_shown)
+        for used in (self._toolbar.dtr_toggled, self._toolbar.rts_toggled,
+                     self._toolbar.break_requested):
+            used.connect(lambda *_args: self.usage_noted.emit(Feature.CONTROL_LINES))
         self._toolbar.log_toggled.connect(self.toggle_log)
         self._toolbar.pause_toggled.connect(self._on_pause_toggle)
         self._toolbar.clear_requested.connect(self.clear_console)
@@ -574,8 +625,17 @@ class DeviceTab(QWidget):
         self._pipeline.connected.connect(self._on_connected)
         self._pipeline.connect_failed.connect(self._on_connect_failed)
         self._pipeline.disconnected.connect(self._on_disconnected)
+        self._pipeline.connection_lost.connect(self._on_connection_lost)
+        self._pipeline.connection_back.connect(self._on_connection_back)
+        self._pipeline.reconnect_failed.connect(self._on_reconnect_failed)
+        self._watcher.recorded.connect(self._on_port_recorded)
+        self._watcher.found.connect(self._on_board_found)
+        self._watcher.asked.connect(self._on_board_asked)
+        self._watcher.withdrawn.connect(self._on_ask_withdrawn)
         self._pipeline.transport_error.connect(self._on_serial_error)
         self._pipeline.command_failed.connect(self._on_command_failed)
+        self._pipeline.control_failed.connect(lambda reason: Toast.warning(self, reason))
+        self._pipeline.lines_changed.connect(self._on_lines_changed)
         self._pipeline.stats_updated.connect(self._on_stats_updated)
         self._pipeline.log_write_failed.connect(self._on_log_write_failed)
         self._pipeline.log_write_recovered.connect(self._on_log_write_recovered)
@@ -609,10 +669,15 @@ class DeviceTab(QWidget):
 
     def refresh_ports(self) -> None:
         """Read the list of serial ports again."""
+        self._show_ports()
+
+    def _show_ports(self) -> list[PortInfo]:
+        """Read the serial ports, show them in both port lists and return them."""
         ports = available_ports()
         in_use = self._get_in_use_ports()
         self._connect_page.set_ports(ports, in_use)
         self._toolbar.set_ports([(p.device, p.display_name) for p in ports], in_use)
+        return ports
 
     def _get_in_use_ports(self) -> set[str]:
         """Get ports connected in other tabs (via parent MainWindow)."""
@@ -628,10 +693,35 @@ class DeviceTab(QWidget):
 
     @Slot(str)
     def _on_port_chosen(self, port: str) -> None:
-        """Offer the baud rate this port was last used with."""
+        """Offer the baud rate and line settings this port was last used with."""
         settings = self._port_memory.get(port)
         if settings is not None and settings.baud_rate:
             self._connect_page.set_baud(settings.baud_rate)
+            self._toolbar.set_baud_text(str(settings.baud_rate))
+        self._show_line_settings(settings.line if settings is not None else LineSettings())
+
+    def _show_line_settings(self, line: LineSettings) -> None:
+        self._line_settings = line
+        self._connect_page.set_line_settings(line)
+        self._toolbar.set_line_settings(line)
+
+    def edit_port_settings(self) -> None:
+        """Open the line settings of the chosen port."""
+        if self._session.is_connected:
+            return
+        port = self._toolbar.selected_port if self.has_session else self._connect_page.selected_port
+        if not port:
+            Toast.warning(self, "Choose a serial port first")
+            return
+        dialog = PortSettingsDialog(port, self._line_settings, self)
+        if dialog.exec():
+            self._show_line_settings(dialog.settings)
+            self._port_memory.remember(port, line=dialog.settings)
+
+    @Slot(object)
+    def _on_lines_changed(self, states: LineStates) -> None:
+        self._toolbar.set_line_states(states)
+        self._status_bar.set_line_states(states)
 
     def connect_device(self) -> None:
         """Connect to the port and baud rate currently chosen."""
@@ -649,9 +739,24 @@ class DeviceTab(QWidget):
         if self._shut_down or self._connecting or self._session.is_connected:
             return
         self._connecting = True
+        self._open_line_settings = self._line_settings
         self._banners.clear(_BANNER_CONNECT)
         self._status_bar.set_connecting(port)
-        self._pipeline.open(port, baud)
+        # The port is opened once its board's identity has been read, so a
+        # board that drops as soon as it is opened is still known.
+        self._pending_open = (port, baud)
+        self._record_wait.start()
+        self._watcher.record(port)
+
+    @Slot()
+    def _open_pending(self) -> None:
+        """Open the port asked for, once its identity is read or the wait is over."""
+        if self._pending_open is None or self._shut_down:
+            return
+        port, baud = self._pending_open
+        self._pending_open = None
+        self._record_wait.stop()
+        self._pipeline.open(port, baud, self._open_line_settings)
 
     @Slot(str, str)
     def _on_connect_failed(self, port: str, reason: str) -> None:
@@ -659,7 +764,7 @@ class DeviceTab(QWidget):
         logger.error("Could not open %s: %s", port, reason)
         self._banners.show_banner(
             _BANNER_CONNECT, banners.ERROR,
-            f"Could not open {port}", reason,
+            f"Could not open {port}", f"{reason}.",
         )
         if self.has_session:
             self._status_bar.set_disconnected(port, "could not be opened")
@@ -690,10 +795,6 @@ class DeviceTab(QWidget):
         # with logging off.
         self._banners.clear_all()
         self._console.clear_console()
-        if self._plot_view is not None:
-            self._plot_view.reset_session()
-        else:
-            self._plot_engine.reset()
         self._skipped_lines = 0
         self._display_timer.start()
 
@@ -703,20 +804,214 @@ class DeviceTab(QWidget):
         self._restore_port_settings(port_name)
         self._port_memory.remember(
             port_name, baud_rate=baud, line_ending=self.line_ending.name,
+            line=self._open_line_settings,
         )
+        if not _usual_framing(self._open_line_settings):
+            self.usage_noted.emit(Feature.LINE_SETTINGS)
 
         self._stack.setCurrentWidget(self._session_view)
         self._toolbar.select(port_name, baud)
         self._toolbar.set_connected(True)
         self._command_bar.set_sending_enabled(True)
-        self._status_bar.set_connected(port_name, baud)
+        self._toolbar.set_line_settings(self._open_line_settings)
+        self._status_bar.set_connected(port_name, baud, self._open_line_settings.framing)
         self._status_bar.set_not_logging()
         self._status_bar.set_total_lines(0)
 
-        self._show_plot_window_state()
+        CLAIMS.claim(self, port_name)
+        self._modules.session_started()
         self.title_changed.emit(self.title)
         self.connection_changed.emit(True)
         self.link_state_changed.emit(self.link_state)
+
+    # ── Reconnect ────────────────────────────────────────────────────────
+
+    @property
+    def is_waiting(self) -> bool:
+        """True while the connection is lost and the tab waits for its board."""
+        return self._waiting_since is not None
+
+    @property
+    def alerts_enabled(self) -> bool:
+        """Whether alerts are on for this tab: its own choice, or Preferences."""
+        return self._modules.module(ALERTS) is not None
+
+    def set_alerts(self, on: bool) -> None:
+        """This tab's own choice, kept until the tab closes."""
+        self._modules.choose(ALERTS, on)
+        self.alerts_changed.emit(self.alerts_enabled)
+
+    @property
+    def reconnect_enabled(self) -> bool:
+        """Whether this tab waits for its board when the connection is lost."""
+        if self._reconnect_choice is not None:
+            return self._reconnect_choice
+        return self._config_manager.reconnect
+
+    def set_reconnect(self, on: bool) -> None:
+        """This tab's own choice, kept until the tab closes."""
+        self._reconnect_choice = on
+        self._apply_reconnect()
+
+    def _apply_reconnect(self) -> None:
+        """Bring the Reconnect settings into effect, also while waiting."""
+        on = self.reconnect_enabled
+        self._pipeline.set_reconnect(on)
+        self._watcher.set_by_port_name(self._config_manager.reconnect_by_port_name)
+        if self.is_waiting:
+            if on:
+                self._arm_wait_limit()
+            else:
+                self.stop_waiting()
+        self.reconnect_changed.emit(on)
+
+    def _arm_wait_limit(self) -> None:
+        """Stop waiting once the time set has passed since the board was lost."""
+        minutes = self._config_manager.reconnect_limit_minutes
+        if not minutes or self._waiting_since is None:
+            self._wait_limit.stop()
+            return
+        waited = (datetime.now() - self._waiting_since).total_seconds() * MS_PER_SECOND
+        self._wait_limit.start(max(0, round(minutes * MS_PER_MINUTE - waited)))
+
+    @Slot(str)
+    def _on_colours_shown(self, kind: str) -> None:
+        self.usage_noted.emit(Feature.HIGHLIGHTS if kind == COLOURS_HIGHLIGHT else Feature.ANSI)
+
+    def _alert(self, kind: AlertKind, message: str) -> None:
+        self._alert_notifier.alert(self, self.title, kind, message)
+        self.alerted.emit()
+        self.usage_noted.emit(Feature.ALERTS)
+
+    def stop_waiting(self) -> None:
+        """Stop waiting for the lost board: the session ends as a disconnect does."""
+        if self.is_waiting:
+            self._pipeline.close()
+
+    @Slot(str, str)
+    def _on_connection_lost(self, port_name: str, reason: str) -> None:
+        logger.warning("Waiting for the board on %s to return: %s", port_name, reason)
+        CLAIMS.release(self)
+        # A passing error reported while the port was open is over with it.
+        self._banners.clear(_BANNER_SERIAL)
+        self._waiting_since = datetime.now()
+        self._status_bar.set_waiting(port_name, self._waiting_since.strftime(_CLOCK_FORMAT))
+        self._status_bar.set_line_states(None)
+        self._toolbar.set_line_states(None)
+        self._command_bar.set_sending_enabled(False)
+        self._show_waiting(port_name, "")
+        self.usage_noted.emit(Problem.CONNECTION_LOST)
+        self._modules.connection_lost()
+        self._watcher.watch(self._config_manager.reconnect_by_port_name)
+        self._arm_wait_limit()
+        self.link_state_changed.emit(self.link_state)
+
+    def _show_waiting(self, port_name: str, detail: str) -> None:
+        what = (
+            "The log continues in the same file" if self._session.is_logging
+            else "The session continues"
+        )
+        self._banners.show_banner(
+            _BANNER_WAITING, banners.WARNING,
+            f"Connection to {port_name} lost. Waiting for the same board to return.",
+            detail or f"{what} once it is back.",
+            (banners.BannerAction("Stop waiting", self.stop_waiting),),
+            dismissible=False,
+        )
+
+    @Slot(object)
+    def _on_board_found(self, found: Found) -> None:
+        port = found.identity.port
+        self._banners.clear(_BANNER_ASK)
+        self._returning = found.identity
+        self._show_waiting(self._session.port_name, f"Found on {port}, {found.describe()}. Opening it.")
+        self._pipeline.reconnect(
+            port, self._recorded_baud, self._open_line_settings, found.describe(),
+            self._watcher.check_for(found.identity),
+        )
+
+    @Slot(object)
+    def _on_board_asked(self, ask: Ask) -> None:
+        identity = ask.identity
+
+        def reconnect() -> None:
+            self._banners.clear(_BANNER_ASK)
+            self._watcher.hold(identity)
+            self._returning = identity
+            self._pipeline.reconnect(
+                identity.port, self._recorded_baud, self._open_line_settings,
+                Basis.CONFIRMED.value, self._watcher.check_for(identity),
+            )
+
+        def decline() -> None:
+            self._banners.clear(_BANNER_ASK)
+            self._watcher.decline(identity.port)
+
+        self._banners.show_banner(
+            _BANNER_ASK, banners.INFO,
+            f"A board of the same model appeared on {identity.port}. "
+            "Is it the board this tab was connected to?",
+            identity.describe(),
+            (banners.BannerAction("Reconnect", reconnect),
+             banners.BannerAction("Not this board", decline)),
+            dismissible=False,
+        )
+
+    @Slot(str, str)
+    def _on_reconnect_failed(self, port_name: str, reason: str) -> None:
+        if not self.is_waiting:
+            return
+        self._show_waiting(self._session.port_name, f"Found on {port_name}, not yet ready: {reason}.")
+        self._watcher.retry_later()
+
+    @Slot(str)
+    def _on_port_recorded(self, port_name: str) -> None:
+        if self._pending_open is not None and self._pending_open[0] == port_name:
+            self._open_pending()
+
+    @Slot(str)
+    def _on_ask_withdrawn(self, port_name: str) -> None:
+        self._banners.clear(_BANNER_ASK)
+
+    @Slot(str, int, float)
+    def _on_connection_back(self, port_name: str, baud: int, seconds_away: float) -> None:
+        logger.info("Reconnected on %s after %.3f s", port_name, seconds_away)
+        self.usage_noted.emit(Feature.RECONNECT)
+        self._end_waiting_state()
+        CLAIMS.claim(self, port_name)
+        if self._returning is not None and self._returning.port == port_name:
+            self._watcher.adopt(self._returning)
+        else:
+            self._watcher.record(port_name)
+        self._returning = None
+        if port_name != self._session.port_name:
+            self._session.port_name = port_name
+            self._recorded_port = port_name
+            # The port list was read before the board came back, so it may
+            # not hold this port yet: read it now, so the port is listed with
+            # its description and the tab's title takes the same one.
+            ports = self._show_ports()
+            self._port_description = next(
+                (p.description for p in ports if p.device == port_name), "",
+            )
+            self._toolbar.select(port_name, baud)
+            self.title_changed.emit(self.title)
+            self._modules.title_changed()
+        self._status_bar.set_connected(port_name, baud, self._open_line_settings.framing)
+        self._command_bar.set_sending_enabled(True)
+        what = "the same log" if self._session.is_logging else "the same session"
+        Toast.success(self, f"Reconnected after {seconds_away:.1f} s, continuing {what}")
+        self._modules.connection_back(seconds_away)
+        self.link_state_changed.emit(self.link_state)
+
+    def _end_waiting_state(self) -> None:
+        if self._waiting_since is None:
+            return
+        self._waiting_since = None
+        self._wait_limit.stop()
+        self._watcher.stop()
+        self._banners.clear(_BANNER_WAITING)
+        self._banners.clear(_BANNER_ASK)
 
     def _restore_port_settings(self, port: str) -> None:
         """Bring back what this port was last used with."""
@@ -727,10 +1022,9 @@ class DeviceTab(QWidget):
         ending = settings.line_ending_choice()
         if ending is not None:
             self._command_bar.set_line_ending(ending)
-        if settings.plot_profile:
-            profile = self._plot_profile_store.get(settings.plot_profile)
-            if profile is not None:
-                self._apply_plot_config_to_engine(profile, emit_toast=False)
+        plot = self.plot
+        if settings.plot_profile and plot is not None:
+            plot.use_profile(settings.plot_profile)
 
     @Slot(str, bool, object)
     def _on_disconnected(
@@ -743,26 +1037,35 @@ class DeviceTab(QWidget):
         console stays on screen with every line received.
         """
         logger.info("Disconnected: %s", port_name)
+        lost_at = self._waiting_since
+        self._end_waiting_state()
+        CLAIMS.release(self)
         self._display_timer.stop()
         self._show_remaining_lines()
         self._session.reset_connection_state()
-        self._plot_engine.set_active(False)
+        self._modules.session_ended(unexpected)
 
-        moment = datetime.now().strftime(_CLOCK_FORMAT)
+        # A tab that stopped waiting lost its board when the wait began.
+        lost = unexpected or lost_at is not None
+        moment = (lost_at or datetime.now()).strftime(_CLOCK_FORMAT)
         self._toolbar.set_connected(False)
+        self._toolbar.set_line_states(None)
+        self._status_bar.set_line_states(None)
         self._command_bar.set_sending_enabled(False)
         self._banners.clear(_BANNER_LOG_WRITE)
         self._banners.clear(_BANNER_SKIPPING)
+        self._banners.clear(_BANNER_SERIAL)
         self._status_bar.set_disconnected(
-            port_name, f"lost at {moment}" if unexpected else f"closed at {moment}",
+            port_name, f"lost at {moment}" if lost else f"closed at {moment}",
         )
         self._status_bar.set_not_logging()
-        self._show_plot_window_state()
         self.connection_changed.emit(False)
         self.link_state_changed.emit(self.link_state)
 
         self._note_log_losses(summary)
-        if unexpected:
+        if lost_at is not None:
+            self._show_connection_lost(port_name, moment, summary)
+        elif unexpected:
             self.usage_noted.emit(Problem.CONNECTION_LOST)
             self._add_notice("Connection lost.")
             self._show_connection_lost(port_name, moment, summary)
@@ -864,7 +1167,7 @@ class DeviceTab(QWidget):
 
     @Slot()
     def _drain_display(self) -> None:
-        """Move received lines from the pipeline into the console and plot.
+        """Move received lines from the pipeline into the console.
 
         A tick spends a share of the refresh interval and leaves the
         rest for input and painting. If lines arrive faster than this
@@ -874,7 +1177,7 @@ class DeviceTab(QWidget):
         """
         budget = (
             self._display_timer.interval() * DISPLAY_TICK_BUDGET_FRACTION
-            / _MS_PER_SECOND
+            / MS_PER_SECOND
         )
         started = time.perf_counter()
         drawn = 0
@@ -887,16 +1190,13 @@ class DeviceTab(QWidget):
             if not records:
                 break
             self._console.append_records(records)
-            for record in records:
-                if record.origin is RecordOrigin.DEVICE:
-                    self._plot_engine.process(record.text, record.timestamp)
             drawn += len(records)
             elapsed = time.perf_counter() - started
             if elapsed >= budget:
                 lines_per_second = drawn / elapsed * DISPLAY_TICK_BUDGET_FRACTION
                 self._pipeline.limit_display_backlog(max(
                     DISPLAY_CHUNK_LINES,
-                    int(lines_per_second * DISPLAY_MAX_LAG_MS / _MS_PER_SECOND),
+                    int(lines_per_second * DISPLAY_MAX_LAG_MS / MS_PER_SECOND),
                 ))
                 break
 
@@ -904,7 +1204,7 @@ class DeviceTab(QWidget):
         """Tell the user, at most once per interval, how many lines the
         console skipped. The banner goes once the console keeps up again."""
         now = time.monotonic()
-        if (now - self._last_skip_notice) * _MS_PER_SECOND < DISPLAY_SKIP_NOTICE_INTERVAL_MS:
+        if (now - self._last_skip_notice) * MS_PER_SECOND < DISPLAY_SKIP_NOTICE_INTERVAL_MS:
             return
         if not self._skipped_lines:
             self._banners.clear(_BANNER_SKIPPING)
@@ -921,7 +1221,7 @@ class DeviceTab(QWidget):
             "They are all in the session and in the log.",
         )
 
-    def _add_notice(self, message: str) -> None:
+    def _add_notice(self, message: str, tag: str = TAG_NOTICE) -> None:
         """Show a line of WireTrace's own in the console.
 
         Lines received earlier may still be on their way to the console,
@@ -929,7 +1229,7 @@ class DeviceTab(QWidget):
         timestamps in the console then never run backwards.
         """
         moment = self._console.last_timestamp or datetime.now()
-        self._console.append_records([notice_record(message, moment)])
+        self._console.append_records([notice_record(message, moment, tag)])
 
     @Slot(int, int)
     def _on_stats_updated(self, lines_per_sec: int, total_lines: int) -> None:
@@ -971,158 +1271,35 @@ class DeviceTab(QWidget):
         if self._new_lines.isVisible():
             self._place_new_lines_button()
 
-    # ── Plot toggle ──────────────────────────────────────────────────────────
+    # ── Plot ─────────────────────────────────────────────────────────────────
 
     @Slot(bool)
     def _on_plot_toggled(self, show: bool) -> None:
-        """Show or hide the plot, under the console or in its own window.
-
-        Under the console the split starts even; later the split the
-        user dragged is kept across hiding and showing. Every change
-        goes through ``_set_plot_visible`` so the toolbar button and
-        the View menu stay in step.
-        """
-        if show:
-            self._ensure_plot_constructed()
-        if self._plot_window is not None:
-            self._plot_window.setVisible(show)
-        elif show:
-            self._plot_view.setVisible(True)
-            self._restore_split()
-        elif self._plot_view is not None:
-            self._remember_split()
-            self._plot_view.setVisible(False)
-        self._set_plot_visible(show)
-
-    def _remember_split(self) -> None:
-        sizes = self._console_plot_splitter.sizes()
-        if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
-            self._splitter_ratio = (sizes[0], sizes[1])
-
-    def _restore_split(self) -> None:
-        """Give the console and the plot the share of the height they last had."""
-        total = self._console_plot_splitter.size().height()
-        console_share, plot_share = self._splitter_ratio
-        floor = tokens.METRICS.pane_min_height
-        console_height = max(floor, total * console_share // (console_share + plot_share))
-        self._console_plot_splitter.setSizes([console_height, max(floor, total - console_height)])
-
-    def _set_plot_visible(self, value: bool) -> None:
-        """Record whether the plot is shown, and tell everything that shows it.
-
-        The only place the state changes: the engine reads values from
-        lines only while the plot is open, the toolbar button follows,
-        and ``plot_visibility_changed`` lets the View menu follow too.
-        It announces even when nothing changed, so a listener can
-        bring itself up to date after a tab switch.
-        """
-        self._plot_visible = value
-        self._plot_engine.set_active(value)
-        if value:
-            self.usage_noted.emit(Feature.PLOT)
-            if self._plot_engine.mode is PlotMode.MANUAL:
-                self.usage_noted.emit(Feature.PLOT_PATTERN)
-        self._toolbar.set_plot_open(value)
-        self.plot_visibility_changed.emit(value)
+        plot = self.plot
+        if plot is not None:
+            plot.set_visible(show)
 
     def is_plot_visible(self) -> bool:
         """True when the plot is shown, wherever it is."""
-        return self._plot_visible
+        plot = self.plot
+        return plot is not None and plot.is_visible()
 
     def is_plot_floating(self) -> bool:
         """True when the plot is in a window of its own."""
-        return self._plot_window is not None
+        plot = self.plot
+        return plot is not None and plot.is_floating()
 
     def toggle_plot(self) -> None:
         """Show the plot if it is hidden, hide it if it is shown."""
-        self._on_plot_toggled(not self._plot_visible)
+        plot = self.plot
+        if plot is not None:
+            plot.toggle()
 
-    def _ensure_plot_constructed(self) -> None:
-        """Build the plot view on first use.
-
-        pyqtgraph is imported only here, so a session that never opens
-        the plot does not pay for loading it.
-        """
-        if self._plot_view is not None:
-            return
-        from ui.widgets.plot_view import PlotView
-
-        # No minimum of its own: the plot's floor is what its content
-        # needs (a chart at least a pane high, its toolbar, and the
-        # measuring table while measuring). A minimum set here would
-        # replace that, and the splitter would squeeze the table.
-        self._plot_view = PlotView(self._plot_engine, self._theme_manager)
-        self._plot_view.configure_requested.connect(self.open_plot_config_dialog)
-        self._plot_view.float_requested.connect(self.set_plot_floating)
-        self._plot_view.close_requested.connect(lambda: self._on_plot_toggled(False))
-        self._plot_view.height_wanted.connect(self._give_plot_height)
-        self._console_plot_splitter.addWidget(self._plot_view)
-        self._console_plot_splitter.setStretchFactor(1, 1)
-
-    @Slot(int)
-    def _give_plot_height(self, pixels: int) -> None:
-        """Add ``pixels`` to the plot's height (fewer, when negative).
-
-        Under the console they are taken from the console, down to its
-        floor, and given back to it. In its own window, the window grows
-        or shrinks by them, never past what the screen holds.
-        """
-        if self._plot_window is not None:
-            window = self._plot_window
-            height = window.height() + pixels
-            screen = window.screen()
-            if screen is not None:
-                height = min(height, screen.availableGeometry().height())
-            window.resize(window.width(), max(height, window.minimumHeight()))
-            return
-        sizes = self._console_plot_splitter.sizes()
-        if len(sizes) != 2 or sizes[1] == 0:
-            return
-        console, plot = sizes
-        if pixels > 0:
-            # Never below the console's floor.
-            moved = max(0, min(pixels, console - tokens.METRICS.pane_min_height))
-        else:
-            # The splitter keeps the plot at least what its content needs.
-            moved = pixels
-        if moved:
-            self._console_plot_splitter.setSizes([console - moved, plot + moved])
-
-    @Slot(bool)
     def set_plot_floating(self, floating: bool) -> None:
         """Move the plot to a window of its own, or back under the console."""
-        if self._plot_view is None or floating == self.is_plot_floating():
-            return
-        if floating:
-            from ui.widgets.plot_window import PlotWindow
-
-            self._remember_split()
-            self._plot_window = PlotWindow(self.title, self)
-            self._plot_window.closed.connect(lambda: self.set_plot_floating(False))
-            self._plot_window.take(self._plot_view)
-            self._show_plot_window_state()
-            self._plot_window.show()
-        else:
-            window, self._plot_window = self._plot_window, None
-            window.release()
-            window.hide()
-            window.deleteLater()
-            self._console_plot_splitter.addWidget(self._plot_view)
-            self._console_plot_splitter.setStretchFactor(1, 1)
-            self._plot_view.setVisible(self._plot_visible)
-            if self._plot_visible:
-                self._restore_split()
-        self._plot_view.set_floating(floating)
-
-    def _show_plot_window_state(self) -> None:
-        """Tell the plot's own window which port it shows and whether it is live."""
-        if self._plot_window is None:
-            return
-        self._plot_window.set_title(self.title)
-        port = self._recorded_port
-        self._plot_window.set_state(
-            f"{port}, live" if self._session.is_connected else f"{port}, not connected"
-        )
+        plot = self.plot
+        if plot is not None:
+            plot.set_floating(floating)
 
     # ── Logging ──────────────────────────────────────────────────────────
 
@@ -1364,7 +1541,7 @@ class DeviceTab(QWidget):
 
     @Slot()
     def _on_log_write_recovered(self) -> None:
-        self._add_notice("The log is being written again.")
+        self._add_notice("The log is being written again.", TAG_NOTICE_EVENT)
         self._banners.clear(_BANNER_LOG_WRITE)
         Toast.success(self, "The log is being written again")
 
@@ -1412,7 +1589,7 @@ class DeviceTab(QWidget):
     def _on_command_failed(self, reason: str) -> None:
         logger.error("Command not sent: %s", reason)
         self._banners.show_banner(
-            _BANNER_COMMAND, banners.ERROR, "The command was not sent", reason,
+            _BANNER_COMMAND, banners.ERROR, "The command was not sent", f"{reason}.",
         )
 
     @property
@@ -1558,3 +1735,11 @@ class DeviceTab(QWidget):
             self, f"Saved {format_count(text.count(chr(10)) + 1, 'line')}: {os.path.basename(path)}",
             "Show", lambda: self._open_folder(folder),
         )
+
+
+def _usual_framing(line: LineSettings) -> bool:
+    """Whether a port is opened as most are: 8N1, without flow control."""
+    usual = LineSettings()
+    return (line.data_bits, line.parity, line.stop_bits, line.flow_control) == (
+        usual.data_bits, usual.parity, usual.stop_bits, usual.flow_control,
+    )

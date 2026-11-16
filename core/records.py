@@ -39,7 +39,10 @@ class LineRecord:
     """One line of a session, stamped at arrival.
 
     ``hex_row`` is True for a row of the HEX display (offset, bytes and
-    characters) rather than a line of text.
+    characters) rather than a line of text. ``colours`` gives the parts
+    of the text the device coloured with ANSI codes, as (start, end,
+    colour 0 to 15), when ANSI colours are switched on; it is for the
+    console only and is never written to a file.
     """
 
     timestamp: datetime
@@ -47,6 +50,7 @@ class LineRecord:
     tag: str
     origin: RecordOrigin = RecordOrigin.DEVICE
     hex_row: bool = False
+    colours: tuple[tuple[int, int, int], ...] = ()
 
 
 def command_record(command: str, timestamp: datetime) -> LineRecord:
@@ -59,12 +63,13 @@ def command_record(command: str, timestamp: datetime) -> LineRecord:
     )
 
 
-def notice_record(message: str, timestamp: datetime) -> LineRecord:
-    """Build a record for a line WireTrace adds to the stream."""
+def notice_record(message: str, timestamp: datetime, tag: str = TAG_NOTICE) -> LineRecord:
+    """Build a record for a line WireTrace adds to the stream: a problem
+    (``TAG_NOTICE``) or an event (``TAG_NOTICE_EVENT``)."""
     return LineRecord(
         timestamp=timestamp,
         text=f"{NOTICE_PREFIX} {message}",
-        tag=TAG_NOTICE,
+        tag=tag,
         origin=RecordOrigin.NOTICE,
     )
 

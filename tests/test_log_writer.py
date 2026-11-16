@@ -509,7 +509,6 @@ class TestSpool:
         writer.submit(_records(10))
         assert writer.stop_log().lines_written == 10
 
-
     def test_spool_write_failure_is_reported_and_the_log_is_unaffected(
         self, make_writer, tmp_path, listener,
     ):
@@ -658,7 +657,6 @@ class TestOverload:
         assert listener.dropped == []
         assert summary.lines_written == 1_001
         assert summary.lines_lost == 0
-
 
     def test_a_backlog_is_bounded_by_its_characters_as_well(
         self, make_writer, tmp_path, listener, monkeypatch,

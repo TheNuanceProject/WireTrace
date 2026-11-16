@@ -31,7 +31,7 @@ from pathlib import Path
 
 import version
 from app import constants
-from app.constants import ThemeID, get_cache_dir, get_config_dir, get_default_log_dir
+from app.constants import MS_PER_SECOND, ThemeID, get_cache_dir, get_config_dir, get_default_log_dir
 from core import records
 from ui import shortcuts
 from ui.formatting import format_size
@@ -51,7 +51,6 @@ _CACHE_NAME_PATTERN = "user_guide-*.html"
 _DIGEST_LENGTH = 16
 _PARTIAL_SUFFIX = ".tmp"
 _ENCODING = "utf-8"
-_MS_PER_SECOND = 1000
 _CHANNEL_MAX = 255
 
 #: ``{{kind}}`` or ``{{kind:argument}}``.
@@ -148,7 +147,7 @@ def _fill_size(name: str) -> str:
 
 def _fill_seconds(name: str) -> str:
     """A number of milliseconds as seconds: ``30``."""
-    return f"{int(_lookup(name)) / _MS_PER_SECOND:g}"
+    return f"{int(_lookup(name)) / MS_PER_SECOND:g}"
 
 
 def key_names(keys: str, platform: str = sys.platform) -> list[str]:

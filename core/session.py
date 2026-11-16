@@ -18,6 +18,7 @@ from datetime import datetime
 
 from app.constants import (
     DEFAULT_BAUD_RATE,
+    DEFAULT_TIMESTAMP_MODE,
     DisplayMode,
     ExportFormat,
     TimestampMode,
@@ -52,7 +53,7 @@ class DeviceSession:
     # ── Display ──────────────────────────────────────────────────────────
 
     display_mode: DisplayMode = DisplayMode.TEXT
-    timestamp_mode: TimestampMode = TimestampMode.ABSOLUTE
+    timestamp_mode: TimestampMode = DEFAULT_TIMESTAMP_MODE
     filter_text: str = ""  # Active filter (empty = show all)
 
     # ── Metrics ──────────────────────────────────────────────────────────

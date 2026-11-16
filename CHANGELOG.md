@@ -5,6 +5,91 @@ Notable changes to WireTrace, by version. Versions follow
 
 ---
 
+## [2.1.0] - 2026-11-17
+
+A tab can now wait for a lost board and carry on, the plot keeps the
+whole session, and the board's restarts and the session's figures are
+counted exactly. Every new feature can be switched off.
+
+### Added
+
+- **Reconnect.** When a board is unplugged or resets its USB
+  connection, the tab waits for the same board and continues the same
+  session and log once it is back. A board is recognised by its USB
+  serial number, by the USB socket it was in, or, for a port with no USB
+  identity, by its name; when these cannot tell it from another board
+  of the same model, the tab asks. A board another tab holds
+  is never offered. Notices record when the connection was lost and
+  when it came back, and the plot leaves a gap there. On by default, set
+  in Preferences with a time after which to stop waiting, and switched
+  per tab in the Device menu.
+- **Features that can be switched.** A Features page in Preferences
+  lists the live plot, restart detection, the session report, alerts,
+  highlight rules and ANSI colours. A feature that is off adds nothing
+  to the window; switching applies to every open tab without a restart.
+- **Line settings and control lines.** Data bits, parity, stop bits and
+  flow control per port, with DTR and RTS set as chosen when it opens.
+  While connected, Lines sets DTR and RTS and sends a break, and the
+  status bar shows CTS, DSR, DCD and RI. Only choices the system
+  supports are offered.
+- **The plot in its own window**, where it last was for the port, or
+  under the console, as chosen in Preferences. It opens with values of
+  similar size in panels of their own.
+- **The whole session in the plot.** Zoom out to the start of the
+  session; hold the plot still to see the time shown in full detail.
+- **Plot export.** The chart as shown as PNG or SVG, and its values, of
+  the time shown or the whole session, as CSV.
+- **Restart detection.** ESP32 reset lines, with the reason the chip
+  gives, and Zephyr boot banners are recognised, and each restart adds
+  a notice to the console, the log and exports.
+- **Session report.** Device > Session report... gives the port and its
+  settings, how the session ended, the lines received, errors,
+  warnings, lines not recorded, each time the connection was lost and
+  each restart, counted exactly. It can be copied or saved.
+- **Alerts** on new error lines, a lost connection or a quiet board,
+  with a banner, a flash of the window, the system's sound (the
+  Notification sound on Windows) and, if chosen, a desktop notification
+  that names the tab, never the text of a line. However many tabs
+  alert, alerts that come together give one sound, and the next waits
+  for the time between alerts set in Preferences. Error lines that keep
+  arriving remind at that pace until the banner is dismissed. A tab
+  that alerts while another is in front is marked on the tab bar until
+  it is opened. Choosing Sound in Preferences plays it once. Off by
+  default, and switched per tab in the Device menu.
+- **Date and time in the console.** A third way of showing timestamps,
+  beside Time of day and Since previous line: the full date and time to
+  the millisecond, as the log writes it. It is the default, and replaces
+  Time of day once on updating; Since previous line is kept.
+- **Highlight rules.** A line holding a rule's text is drawn in one of
+  six highlight colours with a mark beside it.
+- **ANSI colours.** Text coloured by the device with ANSI codes is
+  shown in the theme's own 16 colours. Off by default; logs stay plain.
+
+### Changed
+
+- A port another program holds, another WireTrace window included, is
+  not opened alongside it.
+- The plot opens at once the first time.
+- While the plot is live, scrolling over it shows less or more recent
+  time and it keeps following the newest data; dragging it back in time
+  holds it, and Fit returns to live.
+- The privacy statement is updated to match how the update server
+  records where a check comes from.
+
+### Fixed
+
+- **An unplugged adapter ends the connection on every driver.** On
+  Windows, an unplugged CH340 adapter could leave the session open,
+  repeating "Access is denied". An error that leaves the port unusable
+  now ends the connection at once; one that leaves it working is
+  reported once.
+- **No part of a window appears on its own** for a moment as it opens.
+- **A passing error is cleared** when its connection is lost or ended.
+- **Error messages end with one full stop.**
+- **WireTrace's own notes are marked by what they are:** WRN for a
+  problem, INF for an event such as a control line set or the board
+  back.
+
 ## [2.0.0] - 2026-10-18
 
 The path from the serial port to the disk has been rebuilt, the

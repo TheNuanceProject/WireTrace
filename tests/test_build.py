@@ -127,7 +127,7 @@ class TestCompiling:
 
     def test_packages_reached_only_at_run_time_are_named(self):
         command = build.nuitka_command("linux")
-        for package in ("pyqtgraph", "numpy"):
+        for package in ("pyqtgraph", "numpy", "ui.features"):
             assert f"--include-package={package}" in command
 
     def test_test_suites_and_examples_of_packages_are_left_out(self):
@@ -476,7 +476,7 @@ class TestTheWindowsInstaller:
         for stated in ("the version of WireTrace", "the operating system", "the processor type",
                        "how WireTrace was installed", "the date of the previous check",
                        "It carries no identifier", "network address",
-                       "the country and an approximate area", "never stores it",
+                       "the country and an approximate city", "never stores it",
                        "Usage statistics are off", "does not switch them on",
                        "Preferences", "GitHub receives each update check",
                        "Usage reports and deletion requests never reach GitHub",

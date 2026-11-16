@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The status bar of a tab: connection, line rate, line count and log state."""
+"""The status bar of a tab: connection, input lines, line rate, line count and log state."""
 
 from __future__ import annotations
 
@@ -9,13 +9,12 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 from app.constants import FIELD_SEPARATOR
 from core.log_writer import LogProgress
-from ui.formatting import format_count, format_duration, format_size
+from core.serial_settings import LineStates
+from ui.formatting import format_count, format_duration, format_size, input_line_texts
 from ui.themes import tokens
 from ui.widgets.status_dot import LinkState, StatusDot
-from ui.widgets.styling import SECONDARY, plain_label, plain_tooltip
+from ui.widgets.styling import SECONDARY, plain_label, plain_tooltip, set_state
 
-#: The framing every connection uses: 8 data bits, no parity, 1 stop bit.
-_FRAMING = "8N1"
 #: Received bytes are read as this encoding.
 _ENCODING = "UTF-8"
 
@@ -75,6 +74,8 @@ class DeviceStatusBar(QFrame):
         self._dot = StatusDot()
         self._connection = plain_label()
         self._detail = self._secondary_label()
+        self._input_lines = [self._secondary_label(name) for name, _ in input_line_texts(None)]
+        self._inputs_separator = self._separator()
         self._rate = self._secondary_label()
         self._lines = self._secondary_label()
         self._log = ElidedLabel()
@@ -87,6 +88,9 @@ class DeviceStatusBar(QFrame):
         layout.addWidget(self._dot)
         layout.addWidget(self._connection)
         layout.addWidget(self._detail)
+        layout.addWidget(self._inputs_separator)
+        for label in self._input_lines:
+            layout.addWidget(label)
         for widget in (self._rate, self._lines):
             layout.addWidget(self._separator())
             layout.addWidget(widget)
@@ -95,6 +99,7 @@ class DeviceStatusBar(QFrame):
         layout.addWidget(self._encoding)
 
         self.set_idle()
+        self.set_line_states(None)
         self.set_not_logging()
         self.set_data_rate(0)
         self.set_total_lines(0)
@@ -112,10 +117,30 @@ class DeviceStatusBar(QFrame):
         self._connection.setText(f"Connecting to {port}")
         self._detail.setText("")
 
-    def set_connected(self, port: str, baud: int) -> None:
+    def set_connected(self, port: str, baud: int, framing: str) -> None:
         self._set_link_state(LinkState.CONNECTED)
         self._connection.setText(port)
-        self._detail.setText(f"{baud} {_FRAMING}")
+        self._detail.setText(f"{baud} {framing}")
+
+    def set_line_states(self, states: LineStates | None) -> None:
+        """Show the input lines of the open port; hidden while not connected.
+
+        A line that is on is drawn in the main text colour, one that is
+        off or not reported in the secondary colour.
+        """
+        shown = states is not None
+        self._inputs_separator.setVisible(shown)
+        for label, (name, state) in zip(self._input_lines, input_line_texts(states), strict=True):
+            label.setVisible(shown)
+            set_state(label, SECONDARY, state != "on")
+            label.setToolTip(f"{name} is {state}")
+
+    def set_waiting(self, port: str, since: str) -> None:
+        """The connection was lost and the tab waits for the board."""
+        self._set_link_state(LinkState.WAITING)
+        self._connection.setText("Waiting")
+        self._detail.setText(f"for {port} since {since}")
+        self.set_data_rate(0)
 
     def set_disconnected(self, port: str, detail: str) -> None:
         """The connection has ended; ``detail`` says how and when."""
@@ -160,6 +185,13 @@ class DeviceStatusBar(QFrame):
         """Every text the bar shows, left to right."""
         labels = (self._connection, self._detail, self._rate, self._lines, self._log, self._encoding)
         return [label.text() for label in labels]
+
+    def input_line_states(self) -> dict[str, bool]:
+        """Each input line shown, and whether it is drawn as on."""
+        return {
+            label.text(): not label.property(SECONDARY)
+            for label in self._input_lines if not label.isHidden()
+        }
 
     # ── Internal ─────────────────────────────────────────────────────────
 

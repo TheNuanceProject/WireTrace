@@ -8,7 +8,7 @@ in Excel or LibreOffice Calc, a field that starts with ``=``, ``+``,
 runs device -> CSV -> spreadsheet -> analyst, so a malicious or buggy
 device could run code on the user's machine.
 
-``_csv_escape`` prefixes such a value with a single quote (OWASP CSV
+``csv_cell`` prefixes such a value with a single quote (OWASP CSV
 Injection guidance) so the spreadsheet renders it as literal text. It
 is the single chokepoint for both AUTO-mode and RAW-mode rows. A plain
 signed number is exempt, because it cannot carry a formula.
@@ -25,7 +25,7 @@ import io
 import pytest
 
 from app.constants import CSVMode
-from core.csv_engine import _CSV_FORMULA_TRIGGERS, CSVEngine
+from core.csv_engine import _CSV_FORMULA_TRIGGERS, CSVEngine, csv_cell
 
 MALICIOUS_PAYLOADS = [
     '=HYPERLINK("http://example.com/","x")',
@@ -39,12 +39,12 @@ MALICIOUS_PAYLOADS = [
 class TestCsvEscapeNeutralisation:
     def test_each_trigger_char_is_prefixed(self):
         for trigger in _CSV_FORMULA_TRIGGERS:
-            escaped = CSVEngine._csv_escape(f"{trigger}payload")
+            escaped = csv_cell(f"{trigger}payload")
             assert escaped.lstrip('"').startswith("'")
 
     @pytest.mark.parametrize("payload", MALICIOUS_PAYLOADS)
     def test_formula_payload_gets_single_quote(self, payload):
-        field = next(csv.reader(io.StringIO(CSVEngine._csv_escape(payload))))[0]
+        field = next(csv.reader(io.StringIO(csv_cell(payload))))[0]
         assert field == "'" + payload
 
     @pytest.mark.parametrize(
@@ -52,24 +52,24 @@ class TestCsvEscapeNeutralisation:
         ["-5.2", "+3", "-0.5", "-12", "+1e5", "-3.3E-2", "-.5", "+7."],
     )
     def test_plain_signed_number_is_left_as_a_number(self, number):
-        assert CSVEngine._csv_escape(number) == number
+        assert csv_cell(number) == number
 
     @pytest.mark.parametrize(
         "value",
         ["-5.2+1", "+8884445555x", "-", "+", "-1e", "--5", "-5.2.1", "-1 2"],
     )
     def test_value_that_only_resembles_a_number_is_neutralised(self, value):
-        assert CSVEngine._csv_escape(value) == "'" + value
+        assert csv_cell(value) == "'" + value
 
     def test_neutralise_then_rfc_quote_for_values_with_commas(self):
-        assert CSVEngine._csv_escape("=A1,B1") == '"\'=A1,B1"'
+        assert csv_cell("=A1,B1") == '"\'=A1,B1"'
 
     def test_benign_values_untouched(self):
         for value in ("22.4", "IDLE", "ok", "0x1F", "1e5"):
-            assert CSVEngine._csv_escape(value) == value
+            assert csv_cell(value) == value
 
     def test_empty_value(self):
-        assert CSVEngine._csv_escape("") == ""
+        assert csv_cell("") == ""
 
     def test_trigger_set_matches_owasp(self):
         assert set(_CSV_FORMULA_TRIGGERS) == {"=", "+", "-", "@", "\t", "\r"}

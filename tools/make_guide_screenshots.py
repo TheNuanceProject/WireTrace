@@ -108,7 +108,10 @@ class Studio:
         self.themes = ThemeManager(application)
         self.themes.apply_theme(theme)
         self.port = LoopbackPort()
-        self.window = MainWindow(self.config, self.themes, transport_factory=self.port.factory)
+        self.window = MainWindow(
+            self.config, self.themes,
+            transport_factory=self.port.factory, read_ports=self.port.identities,
+        )
         self.window.resize(*WINDOW_SIZE)
         self.window.show()
         self.settle()
@@ -153,9 +156,11 @@ class Studio:
 
     def plot(self) -> None:
         tab = self.window.current_tab()
+        # Under the console, so the picture shows the plot beside the lines.
         tab.toggle_plot()
+        tab.set_plot_floating(False)
         self.settle()
-        view = tab._plot_view
+        view = tab.plot.view
         # The lines in the console all arrived in one instant. The plot
         # is given a minute of samples of its own, spread over time.
         view.reset_session()
@@ -163,7 +168,7 @@ class Studio:
         start = datetime.now() - timedelta(seconds=PLOT_SECONDS)
         for index in range(PLOT_SECONDS * PLOT_SAMPLES_PER_SECOND):
             second = index / PLOT_SAMPLES_PER_SECOND
-            tab._plot_engine.process(motor_line(second, noise), start + timedelta(seconds=second))
+            tab.plot.engine.process(motor_line(second, noise), start + timedelta(seconds=second))
         view.set_layout_mode(PlotLayout.PANELS)
         view._pause_btn.setChecked(True)
         view._redraw(force=True)
@@ -178,6 +183,9 @@ class Studio:
     def connection_lost(self) -> None:
         tab = self.window.current_tab()
         self.port.transport.drop()
+        self.wait(lambda: tab.is_waiting)
+        self.save(self.window, "waiting-for-board")
+        tab.stop_waiting()
         self.wait(lambda: not tab.is_connected)
         self.save(self.window, "connection-lost")
 
@@ -211,11 +219,14 @@ def main() -> int:
     application.setStyle(BASE_STYLE)
     register_bundled_fonts()
     with tempfile.TemporaryDirectory(prefix="wiretrace-guide-") as folder:
-        workspace = Path(folder)
-        config_module.get_config_dir = lambda: str(workspace / "config")
-        for module in (device_tab_module, icons_module):
-            module.get_cache_dir = lambda: str(workspace / "cache")
         for theme in ThemeID:
+            # Each theme starts from fresh settings, so nothing the first
+            # theme's run remembered (ports used, their baud rates) shows
+            # in the next, and the two pictures of a scene match.
+            workspace = Path(folder) / theme.value
+            config_module.get_config_dir = lambda workspace=workspace: str(workspace / "config")
+            for module in (device_tab_module, icons_module):
+                module.get_cache_dir = lambda workspace=workspace: str(workspace / "cache")
             print(f"{theme.value}:")
             studio = Studio(application, theme, workspace)
             studio.first_screen()

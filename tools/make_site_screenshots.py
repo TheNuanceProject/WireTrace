@@ -46,6 +46,8 @@ import ui.device_tab as device_tab_module  # noqa: E402
 import ui.themes.icons as icons_module  # noqa: E402
 from app.config import ConfigManager  # noqa: E402
 from app.constants import ThemeID  # noqa: E402
+from core.port_identity import PortIdentity  # noqa: E402
+from core.serial_settings import LineSettings  # noqa: E402
 from core.transport import PortInfo, Transport  # noqa: E402
 from tests_gui.support import LoopbackTransport, wait_until  # noqa: E402
 from tools.make_guide_screenshots import (  # noqa: E402
@@ -126,11 +128,18 @@ class Ports:
     def __init__(self) -> None:
         self.by_port: dict[str, LoopbackTransport] = {}
 
-    def factory(self, port: str, baud: int) -> tuple[Transport | None, str]:
+    def factory(
+        self, port: str, baud: int, line: LineSettings, driver: type[Transport] | None = None,
+    ) -> tuple[Transport | None, str]:
         transport = LoopbackTransport()
-        transport.open(port, baud)
+        transport.open(port, baud, line)
         self.by_port[port] = transport
         return transport, ""
+
+    @staticmethod
+    def identities() -> list[PortIdentity]:
+        """No port is listed by the system: a lost board is waited for, not found."""
+        return []
 
 
 class Studio:
@@ -145,7 +154,10 @@ class Studio:
         self.themes = ThemeManager(application)
         self.themes.apply_theme(theme)
         self.ports = Ports()
-        self.window = MainWindow(self.config, self.themes, transport_factory=self.ports.factory)
+        self.window = MainWindow(
+            self.config, self.themes,
+            transport_factory=self.ports.factory, read_ports=self.ports.identities,
+        )
         self.window.resize(*WINDOW_SIZE)
         self.window.show()
         self.settle()
@@ -214,9 +226,11 @@ class Studio:
         self.save("session")
 
     def plot(self, motor: DeviceTab) -> None:
+        # Under the console, so the picture shows the plot beside the lines.
         motor.toggle_plot()
+        motor.set_plot_floating(False)
         self.settle()
-        view = motor._plot_view
+        view = motor.plot.view
         # The plot is given a minute of samples of its own, spread over
         # time, as in the user guide's picture.
         view.reset_session()
@@ -224,7 +238,7 @@ class Studio:
         start = datetime.now() - timedelta(seconds=PLOT_SECONDS)
         for index in range(PLOT_SECONDS * PLOT_SAMPLES_PER_SECOND):
             second = index / PLOT_SAMPLES_PER_SECOND
-            motor._plot_engine.process(motor_line(second, noise), start + timedelta(seconds=second))
+            motor.plot.engine.process(motor_line(second, noise), start + timedelta(seconds=second))
         view.set_layout_mode(PlotLayout.PANELS)
         view._pause_btn.setChecked(True)
         view._redraw(force=True)
@@ -238,6 +252,8 @@ class Studio:
 
     def connection_lost(self, motor: DeviceTab) -> None:
         self.ports.by_port[MOTOR.device].drop()
+        self.wait(lambda: motor.is_waiting)
+        motor.stop_waiting()
         self.wait(lambda: not motor.is_connected)
         self.save("connection-lost")
 

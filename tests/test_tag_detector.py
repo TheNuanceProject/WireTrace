@@ -66,7 +66,6 @@ class TestPriorityOrder:
     def test_info_beats_debug(self):
         assert TagDetector.detect("debug: device connected") == "INFO"
 
-
     @pytest.mark.parametrize(
         "message",
         ["link ok, then a fatal error", "fatal error after link ok"],
@@ -247,7 +246,6 @@ class TestFirmwareLevelMarkers:
 
     def test_line_without_marker_or_keyword_is_data(self):
         assert TagDetector.detect("RPM: 1465, Current: 2.45") == "DATA"
-
 
 
 class TestLettersOutsideAscii:

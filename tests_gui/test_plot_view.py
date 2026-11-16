@@ -6,9 +6,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import numpy as np
 import pytest
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtWidgets import QApplication, QFrame, QPushButton
+from PySide6.QtWidgets import QApplication, QFileDialog, QFrame, QPushButton
 
 from app.config import ConfigManager
 from app.constants import (
@@ -17,15 +18,20 @@ from app.constants import (
     PLOT_REGEX_MAX_CONSECUTIVE_TIMEOUTS,
     ThemeID,
 )
+from app.port_memory import PortMemory
 from core.plot_engine import PlotEngine
 from tests_gui.support import LoopbackPort, pixel, wait_until
 from ui import shortcuts
 from ui.device_tab import DeviceTab
+from ui.formatting import format_value
 from ui.themes import tokens
 from ui.themes.theme_manager import ThemeManager
+from ui.widgets.banner import BannerArea
 from ui.widgets.connect_page import ConnectPage
-from ui.widgets.plot_view import PlotLayout, PlotView
+from ui.widgets.plot_view import PlotExport, PlotLayout, PlotView
 from ui.widgets.plot_window import PlotWindow
+from ui.widgets.toast import Toast
+from updater.usage import Feature
 
 _START = datetime(2026, 4, 18, 19, 25, 0)
 _SECONDS = 60
@@ -217,7 +223,14 @@ class TestValues:
 
 
 class TestPanels:
+    def test_panels_by_scale_is_the_layout_at_first(self, running):
+        assert running.layout_mode is PlotLayout.PANELS
+        assert _button(running, "Panels by scale").isChecked()
+        assert running.panels() == [["RPM"], ["Current", "Voltage"], ["MotorTemp"]]
+
     def test_one_chart_holds_every_value(self, running):
+        _button(running, "One chart").click()
+
         assert running.layout_mode is PlotLayout.ONE_CHART
         assert running.panels() == [["RPM", "Current", "Voltage", "MotorTemp"]]
 
@@ -338,7 +351,7 @@ class TestTimeShown:
 
         assert engine.has_any_data is False
         assert [last for _, last, _ in running.value_texts()] == ["no data"] * 4
-        assert running.panels() == [["RPM", "Current", "Voltage", "MotorTemp"]]
+        assert running.panels() == [["RPM"], ["Current", "Voltage"], ["MotorTemp"]]
 
 
 _HEADING = ["", "Time", "RPM", "Current", "Voltage", "MotorTemp"]
@@ -389,7 +402,22 @@ class TestMeasuring:
         assert low < a < b < high
         assert {round(a * 10) / 10, round(b * 10) / 10} == {a, b}
         assert running._measure_table.isVisible()
-        assert [len(panel.cursors) for panel in running._panels] == [2]
+        assert [len(panel.cursors) for panel in running._panels] == [2, 2, 2]
+
+    def test_the_time_shown_stays_put_while_held_however_much_arrives(
+        self, qapp, running, engine,
+    ):
+        _button(running, "Measure").click()
+        held = running._time_in_view()
+
+        for second in range(_SECONDS + 1, _SECONDS + 30):
+            engine.process(
+                "RPM: 1460, Current: 2.4, Voltage: 12.5, MotorTemp: 46",
+                _START + timedelta(seconds=second),
+            )
+        running._redraw(force=True)
+
+        assert running._time_in_view() == pytest.approx(held)
 
     def test_table_gives_each_moment_each_value_and_b_minus_a(self, running):
         running.set_measuring(True)
@@ -568,7 +596,7 @@ class TestSessions:
         running._redraw()
 
         assert running._stack.currentIndex() == 1
-        assert running.panels() == [["RPM", "Current", "Voltage", "MotorTemp"]]
+        assert running.panels() == [["RPM"], ["Current", "Voltage"], ["MotorTemp"]]
 
     def test_no_drawing_happens_while_the_view_is_hidden(self, qapp, running):
         assert running._timer.isActive() and running._stats_timer.isActive()
@@ -608,6 +636,43 @@ class TestSessions:
         qapp.processEvents()
 
 
+class TestBreaks:
+    """No line joins the samples on either side of a time the board was away."""
+
+    def test_the_line_is_broken_after_the_last_sample_before_the_loss(self, qapp, running):
+        lost = _START + timedelta(seconds=_SECONDS - 5.05)
+
+        running.set_breaks([lost])
+        running._redraw()
+
+        x, y = running._traces["RPM"].getData()
+        (gap,) = np.flatnonzero(np.isnan(y))
+        assert x[gap] == x[gap - 1] == pytest.approx(_SECONDS - 5.1)
+        assert x[gap + 1] == pytest.approx(_SECONDS - 5.0)
+        assert running._traces["RPM"].opts["connect"] == "finite"
+        data_x, data_y = running._data["RPM"]
+        assert not np.isnan(data_y).any()
+        assert data_x.size == x.size - 1
+
+    def test_a_loss_outside_the_samples_breaks_nothing(self, qapp, running):
+        running.set_breaks([_START - timedelta(seconds=1), _START + timedelta(seconds=_SECONDS + 1)])
+        running._redraw()
+
+        _, y = running._traces["RPM"].getData()
+        assert not np.isnan(y).any()
+
+    def test_a_new_session_has_no_breaks(self, qapp, running, engine):
+        running.set_breaks([_START + timedelta(seconds=_SECONDS - 5.05)])
+        running.reset_session()
+        running.set_breaks([])
+
+        _feed(engine)
+        running._redraw()
+
+        _, y = running._traces["RPM"].getData()
+        assert not np.isnan(y).any()
+
+
 class TestOwnWindow:
     @pytest.fixture
     def port(self) -> LoopbackPort:
@@ -615,7 +680,9 @@ class TestOwnWindow:
 
     @pytest.fixture
     def tab(self, qapp, config: ConfigManager, theme_manager, port) -> DeviceTab:
+        """A connected tab whose plot was opened under the console."""
         theme_manager.apply_theme(ThemeID.LIGHT)
+        config.plot_own_window = False
         device_tab = DeviceTab(theme_manager, config, transport_factory=port.factory)
         device_tab.resize(1100, 700)
         device_tab.show()
@@ -675,7 +742,7 @@ class TestOwnWindow:
         assert tab.is_plot_visible() is False
         assert not view.isVisible()
         assert not view._timer.isActive() and not view._stats_timer.isActive()
-        assert tab._plot_engine._active is False
+        assert tab.plot.engine._active is False
 
     def test_close_button_closes_the_plot_in_its_own_window(self, qapp, tab):
         tab.set_plot_floating(True)
@@ -687,20 +754,32 @@ class TestOwnWindow:
         assert tab.is_plot_visible() is False
         assert not window.isVisible()
 
-    def test_closing_the_window_puts_the_plot_back(self, qapp, tab):
-        view = tab.findChild(PlotView)
+    def test_closing_the_window_closes_the_plot(self, qapp, tab):
         tab.set_plot_floating(True)
         window = tab.findChild(PlotWindow)
 
         window.close()
         qapp.processEvents()
 
-        assert tab.is_plot_floating() is False
-        assert tab.is_plot_visible() is True
-        assert view.isVisible()
-        assert _button(view, "Pop out").isVisible()
+        assert tab.is_plot_visible() is False
+        assert not window.isVisible()
+        assert tab.plot.engine._active is False
 
-    def test_plot_button_hides_and_shows_the_window(self, qapp, tab):
+    def test_a_plot_opens_where_preferences_say(self, qapp, tab, config):
+        tab.set_plot_floating(True)
+        tab.toggle_plot()
+
+        tab.toggle_plot()
+        assert tab.is_plot_floating() is False
+
+        tab.toggle_plot()
+        config.plot_own_window = True
+        tab.toggle_plot()
+        assert tab.is_plot_floating() is True
+        assert tab.findChild(PlotWindow).isVisible()
+
+    def test_plot_button_hides_and_shows_the_window(self, qapp, tab, config):
+        config.plot_own_window = True
         tab.set_plot_floating(True)
         window = tab.findChild(PlotWindow)
 
@@ -715,14 +794,41 @@ class TestOwnWindow:
     def test_window_says_what_it_shows(self, qapp, tab, port):
         port.feed(b"".join(b"temp: %d, rpm: %d\n" % (n, n * 2) for n in range(60)))
         wait_until(qapp, lambda: tab.console.total_count == 60)
+        wait_until(qapp, lambda: len(tab.plot.engine.columns) == 2)
         tab.set_plot_floating(True)
         window = tab.findChild(PlotWindow)
 
-        assert window.summary_text() == "PORT0, live  ·  2 values, last 60 s shown"
+        wait_until(qapp, lambda: "2 values" in window.summary_text())
+        assert window.summary_text() == "PORT0, connected  ·  2 values, last 60 s shown"
+
+        tab.plot.view._pause_btn.setChecked(True)
+        assert window.summary_text().startswith("PORT0, connected  ·  paused  ·  ")
+        tab.plot.view._pause_btn.setChecked(False)
+        assert window.summary_text().startswith("PORT0, connected  ·  2 values")
 
         tab.disconnect_device()
         wait_until(qapp, lambda: not tab.is_connected)
         assert window.summary_text().startswith("PORT0, not connected")
+
+    def test_window_says_while_the_tab_waits_for_its_board(self, qapp, tab, port):
+        tab.set_plot_floating(True)
+        window = tab.findChild(PlotWindow)
+
+        port.transport.drop()
+        wait_until(qapp, lambda: tab.is_waiting)
+        assert window.summary_text().startswith("PORT0, waiting for the board")
+
+        tab.stop_waiting()
+        wait_until(qapp, lambda: not tab.is_connected)
+        assert window.summary_text().startswith("PORT0, not connected")
+
+    def test_a_window_opened_while_the_tab_waits_says_so(self, qapp, tab, port):
+        port.transport.drop()
+        wait_until(qapp, lambda: tab.is_waiting)
+
+        tab.set_plot_floating(True)
+
+        assert tab.findChild(PlotWindow).summary_text().startswith("PORT0, waiting for the board")
 
     def test_window_takes_the_name_given_to_the_tab(self, qapp, tab):
         tab.set_plot_floating(True)
@@ -759,6 +865,71 @@ class TestOwnWindow:
         assert not any(isinstance(w, PlotWindow) and w.isVisible() for w in qapp.topLevelWidgets())
 
 
+class TestOwnWindowByDefault:
+    @pytest.fixture
+    def port(self) -> LoopbackPort:
+        return LoopbackPort()
+
+    @pytest.fixture
+    def make_tab(self, qapp, config: ConfigManager, theme_manager, port):
+        tabs: list[DeviceTab] = []
+        theme_manager.apply_theme(ThemeID.LIGHT)
+
+        def factory() -> DeviceTab:
+            device_tab = DeviceTab(theme_manager, config, transport_factory=port.factory)
+            device_tab.show()
+            device_tab.findChild(ConnectPage).connect_requested.emit("PORT0", 115200)
+            wait_until(qapp, lambda: device_tab.is_connected)
+            tabs.append(device_tab)
+            return device_tab
+
+        yield factory
+        for device_tab in tabs:
+            device_tab.ordered_shutdown()
+            device_tab.close()
+            device_tab.deleteLater()
+        qapp.processEvents()
+
+    def test_the_plot_opens_in_its_own_window(self, qapp, make_tab):
+        tab = make_tab()
+
+        tab.toggle_plot()
+        window = tab.findChild(PlotWindow)
+
+        assert tab.is_plot_visible() and tab.is_plot_floating()
+        assert window.isVisible()
+        assert tab._console_plot_splitter.count() == 1
+
+    def test_the_window_opens_where_it_last_was_for_its_port(self, qapp, make_tab, config):
+        tab = make_tab()
+        tab.toggle_plot()
+        window = tab.findChild(PlotWindow)
+        window.setGeometry(200, 150, 700, 480)
+        qapp.processEvents()
+        placed = window.frameGeometry()
+
+        window.close()
+        qapp.processEvents()
+        assert PortMemory(config).get("PORT0").plot_window
+
+        other = make_tab()
+        other.toggle_plot()
+        qapp.processEvents()
+        reopened = other.findChild(PlotWindow).frameGeometry()
+
+        assert (reopened.width(), reopened.height()) == (placed.width(), placed.height())
+        assert (reopened.x(), reopened.y()) == (placed.x(), placed.y())
+
+    def test_closing_the_tab_remembers_where_the_window_was(self, qapp, make_tab, config):
+        tab = make_tab()
+        tab.toggle_plot()
+        qapp.processEvents()
+
+        tab.ordered_shutdown()
+
+        assert PortMemory(config).get("PORT0").plot_window
+
+
 def test_measuring_takes_room_from_the_console_never_from_the_plot(qapp, config, theme_manager):
     from tests_gui.screens import main_window, start_session
 
@@ -766,8 +937,8 @@ def test_measuring_takes_room_from_the_console_never_from_the_plot(qapp, config,
         start_session(qapp, window, port)
         window.resize(window.width(), 1)
         tab = window.current_tab()
-        view = tab._plot_view
-        _feed(tab._plot_engine)
+        view = tab.plot.view
+        _feed(tab.plot.engine)
         view._redraw(force=True)
         wait_until(qapp, lambda: view._graphics.isVisible())
 
@@ -786,8 +957,8 @@ def test_the_chart_keeps_its_height_while_measuring(qapp, config, theme_manager)
     with main_window(qapp, config, theme_manager) as (window, port):
         start_session(qapp, window, port)
         tab = window.current_tab()
-        view = tab._plot_view
-        _feed(tab._plot_engine)
+        view = tab.plot.view
+        _feed(tab.plot.engine)
         view._redraw(force=True)
         wait_until(qapp, lambda: view._graphics.isVisible())
         chart, console = view._graphics.height(), tab.console.height()
@@ -805,23 +976,487 @@ def test_the_chart_keeps_its_height_while_measuring(qapp, config, theme_manager)
         assert view._graphics.height() == chart
 
 
-def test_a_popped_out_plot_grows_its_window_while_measuring(qapp, config, theme_manager):
+class _WheelOver:
+    """A scroll of the wheel, one notch towards the user, at ``position`` in a chart."""
+
+    _NOTCH = 120
+
+    def __init__(self, position) -> None:
+        self._position = position
+
+    def delta(self) -> int:
+        return self._NOTCH
+
+    def pos(self):
+        return self._position
+
+    def accept(self) -> None:
+        pass
+
+    def ignore(self) -> None:
+        pass
+
+
+class _RightClick:
+    """A click of the right mouse button in a chart."""
+
+    def button(self):
+        return Qt.MouseButton.RightButton
+
+    def accept(self) -> None:
+        pass
+
+    def ignore(self) -> None:
+        pass
+
+
+class TestLiveZoom:
+    """While live, the wheel changes how much recent time is shown and the
+    plot stays on the newest data; dragging back holds it; Fit goes back."""
+
+    @staticmethod
+    def _wheel(view: PlotView, notches: int) -> None:
+        box = view._panels[-1].item.getViewBox()
+        wheel = _WheelOver(box.boundingRect().center())
+        wheel.delta = lambda: _WheelOver._NOTCH * notches
+        box.wheelEvent(wheel)
+
+    @staticmethod
+    def _time_shown(qapp, view: PlotView) -> tuple[float, float]:
+        view._redraw()
+        qapp.processEvents()
+        return view._time_in_view()
+
+    def test_the_wheel_shows_less_recent_time_and_stays_on_the_newest(
+        self, qapp, running, engine,
+    ):
+        self._wheel(running, 2)
+
+        span = running._window_seconds
+        assert span < 60
+        assert running._window_combo.currentText() == "Custom"
+        assert not running.paused
+        low, high = self._time_shown(qapp, running)
+        assert high >= engine.latest_x and high - low < 60
+
+        _feed(engine, 70)
+        low, high = self._time_shown(qapp, running)
+        assert high >= engine.latest_x
+        assert running.summary() == f"4 values, last {format_value(span)} s shown"
+
+    def test_zooming_out_past_everything_held_shows_all(self, qapp, running):
+        self._wheel(running, -20)
+
+        assert running._window_seconds is None
+        assert running._window_combo.currentText() == "All"
+        assert running._window_combo.findText("Custom") < 0
+
+    def test_zooming_from_all_keeps_following(self, qapp, running, engine):
+        running._window_combo.setCurrentIndex(running._window_combo.findText("All"))
+        self._wheel(running, 3)
+
+        assert running._window_seconds < engine.latest_x
+        _feed(engine, 70)
+        assert self._time_shown(qapp, running)[1] >= engine.latest_x
+
+    def test_dragging_back_holds_the_plot_and_fit_goes_live(self, qapp, running):
+        import pyqtgraph as pg
+
+        self._wheel(running, 1)
+        box = running._panels[0].item.getViewBox()
+
+        class _Drag:
+            def button(self):
+                return Qt.MouseButton.LeftButton
+
+            def isStart(self):
+                return True
+
+            def isFinish(self):
+                return False
+
+            # Towards the right, back in time, by a tenth of the chart.
+            def pos(self):
+                return pg.Point(box.boundingRect().center()) + pg.Point(box.width() / 10, 0)
+
+            def lastPos(self):
+                return pg.Point(box.boundingRect().center())
+
+            def buttonDownPos(self, _button=None):
+                return pg.Point(box.boundingRect().center())
+
+            def accept(self):
+                pass
+
+            def ignore(self):
+                pass
+
+        before = running._time_in_view()
+        box.mouseDragEvent(_Drag())
+        assert running.paused
+        qapp.processEvents()
+        assert running._time_in_view()[1] < before[1]
+
+        running.fit()
+
+        assert not running.paused
+        assert running._window_seconds == 60
+        assert running._window_combo.currentText() == "60 s"
+        assert running._window_combo.findText("Custom") < 0
+
+    def test_a_choice_from_the_list_ends_the_custom_span(self, qapp, running):
+        self._wheel(running, 2)
+
+        running._window_combo.setCurrentIndex(running._window_combo.findText("10 s"))
+
+        assert running._window_seconds == 10
+        assert running._window_combo.findText("Custom") < 0
+        running.fit()
+        assert running._window_seconds == 10
+
+    def test_with_less_held_than_the_span_chosen_the_wheel_zooms_in_at_once(
+        self, qapp, view, engine,
+    ):
+        _feed(engine, 10)
+        view._redraw()
+        qapp.processEvents()
+        assert view._window_seconds == 60
+
+        self._wheel(view, 1)
+
+        assert view._window_combo.currentText() == "Custom"
+        assert view._window_seconds < engine.latest_x
+
+    def test_fit_after_the_wheel_reached_all_gives_back_the_choice(self, qapp, running):
+        self._wheel(running, 2)
+        self._wheel(running, -40)
+        assert running._window_combo.currentText() == "All"
+
+        running.fit()
+
+        assert running._window_seconds == 60
+        assert running._window_combo.currentText() == "60 s"
+
+    def test_all_chosen_from_the_list_is_what_fit_gives_back(self, qapp, running):
+        running._window_combo.setCurrentIndex(running._window_combo.findText("All"))
+        self._wheel(running, 2)
+
+        running.fit()
+
+        assert running._window_seconds is None
+        assert running._window_combo.currentText() == "All"
+
+    def test_the_time_list_shows_custom_whole_and_keeps_its_width(self, qapp, running):
+        from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+
+        combo = running._window_combo
+        width = combo.width()
+
+        self._wheel(running, 2)
+        qapp.processEvents()
+
+        option = QStyleOptionComboBox()
+        combo.initStyleOption(option)
+        field = combo.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option,
+            QStyle.SubControl.SC_ComboBoxEditField, combo,
+        )
+        assert combo.currentText() == "Custom"
+        assert field.width() >= combo.fontMetrics().horizontalAdvance("Custom")
+        assert combo.width() == width
+
+    def test_a_held_plot_zooms_where_the_pointer_is(self, qapp, running):
+        running._pause_btn.setChecked(True)
+
+        self._wheel(running, 2)
+
+        assert running._window_seconds == 60
+        assert running._window_combo.findText("Custom") < 0
+
+
+class TestZoom:
+    """The wheel and dragging act on time only; every scale fits the values shown."""
+
+    @staticmethod
+    def _held_plot(qapp, window, port):
+        import math
+
+        from tests_gui.screens import start_session
+
+        start_session(qapp, window, port)
+        tab = window.current_tab()
+        view = tab.plot.view
+        port.feed(b"".join(
+            b"rpm: %d, temp: %.2f\n" % (1000 + 300 * math.sin(n / 50), 50 + 5 * math.sin(n / 70))
+            for n in range(3000)
+        ))
+        wait_until(qapp, lambda: len(tab.plot.engine.columns) >= 2)
+        view._redraw(force=True)
+        wait_until(qapp, lambda: view._graphics.isVisible() and len(view._panels) >= 2)
+        view._pause_btn.setChecked(True)
+        qapp.processEvents()
+        return view
+
+    @staticmethod
+    def _shown_values(view, panel, low: float, high: float) -> tuple[float, float]:
+        values = []
+        for name in panel.names:
+            x, y = view._data[name]
+            inside = (x >= low) & (x <= high)
+            values.extend(y[inside].tolist())
+        return min(values), max(values)
+
+    def test_every_panel_takes_only_time_from_the_mouse(self, qapp, config, theme_manager):
+        from tests_gui.screens import main_window
+
+        with main_window(qapp, config, theme_manager) as (window, port):
+            view = self._held_plot(qapp, window, port)
+
+            for panel in view._panels:
+                assert panel.item.getViewBox().mouseEnabled() == [True, False]
+
+    def test_no_panel_offers_the_libraries_own_menu_or_buttons(
+        self, qapp, config, theme_manager, monkeypatch,
+    ):
+        from tests_gui.screens import main_window
+
+        with main_window(qapp, config, theme_manager) as (window, port):
+            view = self._held_plot(qapp, window, port)
+            raised: list[object] = []
+
+            for panel in view._panels:
+                box = panel.item.getViewBox()
+                monkeypatch.setattr(box, "raiseContextMenu", raised.append)
+                assert panel.item.menuEnabled() is False
+                assert box.menuEnabled() is False
+                assert panel.item.buttonsHidden is True
+                # A right-click on the chart, and on its value axis.
+                box.mouseClickEvent(_RightClick())
+                panel.item.getAxis("left").mouseClickEvent(_RightClick())
+
+            assert raised == []
+
+    def test_zooming_over_one_panel_keeps_every_scale_on_the_values_shown(
+        self, qapp, config, theme_manager,
+    ):
+        from tests_gui.screens import main_window
+
+        with main_window(qapp, config, theme_manager) as (window, port):
+            view = self._held_plot(qapp, window, port)
+            boxes = [panel.item.getViewBox() for panel in view._panels]
+            low, high = boxes[0].viewRange()[0]
+
+            # The library's own wheel handling, over a sample in the middle
+            # of the session: lines arrive in bursts, so the chart zooms
+            # where there are samples to fit.
+            x, _ = view._data[view._panels[-1].names[0]]
+            middle = float(np.median(x))
+            wheel = _WheelOver(boxes[-1].mapFromView(QPointF(middle, boxes[-1].viewRange()[1][0])))
+            for _ in range(10):
+                boxes[-1].wheelEvent(wheel)
+
+            def fitted() -> bool:
+                shown_low, shown_high = boxes[0].viewRange()[0]
+                for panel, box in zip(view._panels, boxes, strict=True):
+                    least, greatest = self._shown_values(view, panel, shown_low, shown_high)
+                    scale_low, scale_high = box.viewRange()[1]
+                    # Fitted to what is shown, with the library's small margin.
+                    if not (scale_low <= least and greatest <= scale_high
+                            and scale_high - scale_low <= (greatest - least) * 1.25 + 1e-9):
+                        return False
+                return True
+
+            # The library fits each scale on a later turn of the event loop.
+            wait_until(qapp, fitted)
+            shown_low, shown_high = boxes[0].viewRange()[0]
+            assert shown_high - shown_low < (high - low) / 10
+
+
+def test_a_popped_out_plot_keeps_its_window_size_while_measuring(qapp, config, theme_manager):
     from tests_gui.screens import main_window, start_session
 
     with main_window(qapp, config, theme_manager) as (window, port):
         start_session(qapp, window, port)
         tab = window.current_tab()
-        view = tab._plot_view
+        view = tab.plot.view
         tab.set_plot_floating(True)
-        _feed(tab._plot_engine)
+        _feed(tab.plot.engine)
         view._redraw(force=True)
         wait_until(qapp, lambda: view._graphics.isVisible())
         own = tab.findChild(PlotWindow)
-        height = own.height()
+        size = own.size()
+        chart = view._graphics.height()
         table = view._measure_table
 
         view.set_measuring(True)
-        wait_until(qapp, lambda: table.isVisible() and own.height() == height + view._table_height)
+        wait_until(qapp, lambda: table.isVisible() and view._graphics.height() < chart)
+        assert own.size() == size
+
         view.set_measuring(False)
-        wait_until(qapp, lambda: not table.isVisible() and own.height() == height)
+        wait_until(qapp, lambda: not table.isVisible() and view._graphics.height() == chart)
+        assert own.size() == size
         tab.set_plot_floating(False)
+
+
+def test_measuring_never_lets_windows_resize_the_plot_window_to_its_content(
+    qapp, config, theme_manager,
+):
+    """On Windows, Qt corrects a window whose height depends on its width
+    to the preferred height of its content at every move and resize
+    (``QWidgetWindowPrivate::closestAcceptableGeometry`` asks the window's
+    ``hasHeightForWidth``, then ``QLayout.closestAcceptableSize``). The
+    measuring table makes the layout depend on its width; the window
+    must not say so."""
+    from PySide6.QtCore import QSize
+    from PySide6.QtWidgets import QLayout
+
+    from tests_gui.screens import main_window, start_session
+
+    with main_window(qapp, config, theme_manager) as (window, port):
+        start_session(qapp, window, port)
+        tab = window.current_tab()
+        view = tab.plot.view
+        tab.set_plot_floating(True)
+        _feed(tab.plot.engine)
+        view._redraw(force=True)
+        wait_until(qapp, lambda: view._graphics.isVisible())
+        own = tab.findChild(PlotWindow)
+        own.resize(own.minimumWidth() + 200, own.minimumHeight())
+        wait_until(qapp, lambda: own.height() == own.minimumHeight())
+
+        view.set_measuring(True)
+        wait_until(qapp, lambda: view._measure_table.isVisible())
+        asked = own.size()
+        demanded = QLayout.closestAcceptableSize(own, QSize(asked.width(), asked.height()))
+
+        # The content would ask for more than the window has...
+        assert own.layout().hasHeightForWidth()
+        assert demanded.height() > asked.height()
+        # ...and the window never lets Qt act on it.
+        assert own.hasHeightForWidth() is False
+        assert own.size() == asked
+        tab.set_plot_floating(False)
+
+
+def test_qt_itself_sees_that_the_plot_window_has_no_height_for_width(qapp):
+    from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+    plot_window = PlotWindow("COM3")
+    plot_window.setWindowFlag(Qt.WindowType.Window, False)
+    wrapped = QLabel("a long line of text that wraps " * 10)
+    wrapped.setWordWrap(True)
+    plot_window.layout().insertWidget(0, wrapped)
+    host = QWidget()
+    host_layout = QVBoxLayout(host)
+    host_layout.addWidget(plot_window)
+
+    assert plot_window.layout().hasHeightForWidth()
+    # Asked through Qt's own layout code, which calls the window's method.
+    assert host_layout.itemAt(0).hasHeightForWidth() is False
+    host.deleteLater()
+
+
+def test_a_popped_out_plot_opens_at_the_size_it_was_left(qapp, config, theme_manager):
+    from tests_gui.screens import main_window, start_session
+
+    with main_window(qapp, config, theme_manager) as (window, port):
+        start_session(qapp, window, port)
+        tab = window.current_tab()
+        view = tab.plot.view
+        tab.set_plot_floating(True)
+        own = tab.findChild(PlotWindow)
+        wait_until(qapp, lambda: own.isVisible())
+        own.resize(own.minimumWidth() + 40, own.minimumHeight() + 30)
+        wait_until(qapp, lambda: own.height() == own.minimumHeight() + 30)
+        left = own.size()
+
+        tab.toggle_plot()
+        wait_until(qapp, lambda: not own.isVisible())
+        tab.toggle_plot()
+        wait_until(qapp, lambda: own.isVisible())
+        # Values arrive, the panels are built, and the note appears as
+        # the window is shown: it takes its room from the chart.
+        _feed(tab.plot.engine)
+        view._redraw(force=True)
+        wait_until(qapp, lambda: view._graphics.isVisible())
+        view.height_wanted.emit(tokens.METRICS.status_height)
+        for _ in range(10):
+            qapp.processEvents()
+
+        assert own.size() == left
+        tab.set_plot_floating(False)
+
+
+class TestSaving:
+    @pytest.fixture
+    def port(self) -> LoopbackPort:
+        return LoopbackPort()
+
+    @pytest.fixture
+    def tab(self, qapp, config: ConfigManager, theme_manager, port) -> DeviceTab:
+        """A connected tab whose plot, under the console, has found two values."""
+        theme_manager.apply_theme(ThemeID.LIGHT)
+        config.plot_own_window = False
+        device_tab = DeviceTab(theme_manager, config, transport_factory=port.factory)
+        device_tab.resize(1100, 700)
+        device_tab.show()
+        device_tab.findChild(ConnectPage).connect_requested.emit("PORT0", 115200)
+        wait_until(qapp, lambda: device_tab.is_connected)
+        device_tab.toggle_plot()
+        port.feed(b"".join(b"temp: %d, rpm: %d\n" % (n, n * 2) for n in range(60)))
+        wait_until(qapp, lambda: len(device_tab.plot.engine.columns) == 2)
+        view = device_tab.plot.view
+        wait_until(qapp, lambda: bool(view._panels) and view._graphics.isVisible())
+        yield device_tab
+        device_tab.ordered_shutdown()
+
+    @staticmethod
+    def _choose(monkeypatch, path) -> list[str]:
+        suggested: list[str] = []
+
+        def ask(parent, title, start, filters):
+            suggested.append(start)
+            return str(path), ""
+
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", ask)
+        return suggested
+
+    @pytest.mark.parametrize(("kind", "start"), [
+        (PlotExport.PNG, b"\x89PNG"), (PlotExport.SVG, b"<?xml"),
+    ])
+    def test_the_chart_is_saved_as_a_picture(self, qapp, tab, monkeypatch, tmp_path, kind, start):
+        path = tmp_path / f"chart.{kind.name.lower()}"
+        suggested = self._choose(monkeypatch, path)
+        noted: list[object] = []
+        tab.usage_noted.connect(noted.append)
+
+        tab.plot.view.export_requested.emit(kind)
+
+        assert Feature.PLOT_EXPORT in noted
+        assert path.read_bytes().startswith(start)
+        assert suggested[0].endswith(f".{kind.name.lower()}")
+        assert Toast.of(tab.plot.view).message == f"Saved the plot: {path.name}"
+
+    def test_the_values_of_the_whole_session_are_saved(self, qapp, tab, monkeypatch, tmp_path):
+        path = tmp_path / "values.csv"
+        self._choose(monkeypatch, path)
+
+        tab.plot.view.export_requested.emit(PlotExport.VALUES_ALL)
+        wait_until(qapp, lambda: Toast.of(tab.plot.view).message.startswith("Saved"))
+
+        rows = [line for line in path.read_text().splitlines() if not line.startswith("#")]
+        assert rows[0] == "Timestamp,Seconds,temp,rpm"
+        assert [row.split(",")[2:] for row in rows[1:]] == [
+            [f"{float(n)}", f"{float(n * 2)}"] for n in range(60)
+        ]
+        assert Toast.of(tab.plot.view).message == "Saved 60 rows of plot values: values.csv"
+
+    def test_a_picture_that_cannot_be_written_is_reported(self, qapp, tab, monkeypatch, tmp_path):
+        folder = tmp_path / "taken.png"
+        folder.mkdir()
+        self._choose(monkeypatch, folder)
+
+        tab.plot.view.export_requested.emit(PlotExport.PNG)
+
+        banner = tab.findChild(BannerArea).banner("export")
+        assert banner.title_label.text() == "The plot could not be saved"

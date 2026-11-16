@@ -46,19 +46,22 @@ from PySide6.QtWidgets import (
 from app.config import ConfigManager
 from app.constants import (
     DEFAULT_FONT_SIZE,
+    FIELD_SEPARATOR,
     FONT_SIZE_MAX,
     FONT_SIZE_MIN,
     FONT_SIZE_STEP,
     PORT_TAB_NAME_MAX,
     SAVED_COMMAND_SHORTCUTS,
+    TIMESTAMP_MODE_NAMES,
     UPDATE_SNOOZE_HOURS,
     USAGE_QUESTION_MAX_SHOWINGS,
     DisplayMode,
-    TimestampMode,
 )
 from core.device_pipeline import TransportFactory
+from core.port_identity import PortLister, read_identities
 from core.transport import open_serial_transport
 from ui import shortcuts
+from ui.alert_notifier import AlertNotifier
 from ui.device_tab import NEW_TAB_TITLE, DeviceTab
 from ui.dialogs.messages import confirm, tell
 from ui.formatting import format_count
@@ -85,6 +88,8 @@ logger = logging.getLogger(__name__)
 
 #: The key of the bar that asks about usage statistics.
 _BANNER_USAGE = "usage"
+#: What a tab's tooltip adds while it has an alert not yet seen.
+_NEW_ALERT = "New alert"
 
 
 class TabBar(QTabBar):
@@ -240,11 +245,19 @@ class MainWindow(QMainWindow):
         transport_factory: TransportFactory = open_serial_transport,
         updates: UpdateManager | None = None,
         usage: UsageStatistics | None = None,
+        read_ports: PortLister = read_identities,
     ) -> None:
         super().__init__(parent)
         self._config = config
         self._theme_manager = theme_manager
         self._transport_factory = transport_factory
+        self._read_ports = read_ports
+        # Tabs that alerted while another was in front, not yet opened.
+        self._alerted: set[DeviceTab] = set()
+        # The sound and desktop notification of every tab's alerts.
+        self._alert_notifier = AlertNotifier(config, self)
+        self._alert_notifier.show_requested.connect(self._show_alerting_tab)
+        self._alert_notifier.notified.connect(lambda: self._usage.note_feature(Feature.NOTIFICATION))
         self._updates = updates if updates is not None else UpdateManager(config, self)
         self._updates.update_available.connect(self._on_update_available)
         self._updates.up_to_date.connect(
@@ -300,9 +313,21 @@ class MainWindow(QMainWindow):
     def current_tab(self) -> DeviceTab | None:
         return self._tabs.currentWidget()
 
+    def _show_alerting_tab(self, tab: DeviceTab | None) -> None:
+        """Bring the window forward, at ``tab`` if it is still open."""
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if tab is not None and self._tabs.indexOf(tab) >= 0:
+            self._tabs.setCurrentWidget(tab)
+
     def new_tab(self) -> DeviceTab:
         """Open a tab on its first screen and bring it to the front."""
-        tab = DeviceTab(self._theme_manager, self._config, self, self._transport_factory)
+        tab = DeviceTab(
+            self._theme_manager, self._config, self, self._transport_factory, self._read_ports,
+            self._alert_notifier,
+        )
         for signal in (
             tab.title_changed,
             tab.connection_changed,
@@ -312,8 +337,11 @@ class MainWindow(QMainWindow):
             tab.following_changed,
             tab.line_ending_changed,
             tab.plot_visibility_changed,
+            tab.reconnect_changed,
+            tab.alerts_changed,
         ):
             signal.connect(lambda *_args, t=tab: self._on_tab_state_changed(t))
+        tab.alerted.connect(lambda t=tab: self._mark_alerted(t))
         tab.usage_noted.connect(self._note_usage)
         tab.line_rate_measured.connect(self._usage.note_line_rate)
         tab.connection_changed.connect(
@@ -336,6 +364,7 @@ class MainWindow(QMainWindow):
             return
         self._tabs.bar.finish_rename(keep=False)
         tab.ordered_shutdown()
+        self._alerted.discard(tab)
         self._tabs.removeTab(index)
         tab.deleteLater()
         if self._tabs.count() == 0:
@@ -379,9 +408,18 @@ class MainWindow(QMainWindow):
         index = self._tabs.indexOf(tab)
         if index < 0:
             return
-        self._tabs.setTabIcon(index, state_icon(tab.link_state, self.devicePixelRatioF()))
+        alert = tab in self._alerted
+        self._tabs.setTabIcon(index, state_icon(tab.link_state, self.devicePixelRatioF(), alert))
         self._tabs.setTabText(index, tab.title)
-        self._tabs.setTabToolTip(index, plain_tooltip(tab.title))
+        tip = f"{tab.title}{FIELD_SEPARATOR}{_NEW_ALERT}" if alert else tab.title
+        self._tabs.setTabToolTip(index, plain_tooltip(tip))
+
+    def _mark_alerted(self, tab: DeviceTab) -> None:
+        """Mark a tab that alerted while another was in front, until it is opened."""
+        if tab is self.current_tab() or self._tabs.indexOf(tab) < 0:
+            return
+        self._alerted.add(tab)
+        self._show_tab_state(tab)
 
     def _refresh_tab_icons(self) -> None:
         for tab in self.tabs():
@@ -394,6 +432,10 @@ class MainWindow(QMainWindow):
 
     def _on_current_tab_changed(self, _index: int) -> None:
         self._tabs.bar.finish_rename(keep=True)
+        tab = self.current_tab()
+        if tab in self._alerted:
+            self._alerted.discard(tab)
+            self._show_tab_state(tab)
         self._sync_with_current_tab()
 
     def event(self, event: QEvent) -> bool:
@@ -516,7 +558,7 @@ class MainWindow(QMainWindow):
 
         self._timestamp_actions = self._add_choices(
             menu.addMenu("Timestamps"),
-            [("Time of day", TimestampMode.ABSOLUTE), ("Since previous line", TimestampMode.RELATIVE)],
+            [(name, mode) for mode, name in TIMESTAMP_MODE_NAMES.items()],
             lambda mode: self._for_tab(DeviceTab.set_timestamp_mode, mode)(),
         )
         self._display_menu = menu.addMenu("Display")
@@ -568,6 +610,11 @@ class MainWindow(QMainWindow):
         self._saved_menu.aboutToShow.connect(self._fill_saved_menu)
         self._fill_saved_menu()
         menu.addSeparator()
+        self._act_reconnect = add(menu, "Reconnect lost board", self._toggle_reconnect, checkable=True)
+        self._act_alerts = add(menu, "Alerts", self._toggle_alerts, checkable=True)
+        self._act_report = add(
+            menu, "Session report...", self._for_tab(DeviceTab.open_session_report),
+        )
         add(menu, "Rename tab", self.rename_current_tab, "rename_tab")
 
     def _fill_saved_menu(self) -> None:
@@ -628,7 +675,12 @@ class MainWindow(QMainWindow):
         for action in self._line_ending_actions.values():
             action.setEnabled(session)
         self._display_menu.setEnabled(connected)
-        self._act_plot.setEnabled(connected)
+        plot_on = tab.plot is not None
+        for action in (self._act_plot, self._act_configure_plot):
+            action.setVisible(plot_on)
+        self._act_plot.setEnabled(connected and plot_on)
+        self._act_report.setVisible(tab.report is not None)
+        self._act_report.setEnabled(session)
 
         self._act_connect.setEnabled(not connected)
         self._act_disconnect.setEnabled(connected)
@@ -638,6 +690,8 @@ class MainWindow(QMainWindow):
         self._display_actions[tab.session.display_mode].setChecked(True)
         self._line_ending_actions[tab.line_ending].setChecked(True)
         self._act_follow.setChecked(tab.following)
+        self._act_reconnect.setChecked(tab.reconnect_enabled)
+        self._act_alerts.setChecked(tab.alerts_enabled)
         self._act_plot.setChecked(tab.is_plot_visible())
 
         title = tab.title
@@ -707,6 +761,16 @@ class MainWindow(QMainWindow):
         if tab is not None:
             tab.set_following(self._act_follow.isChecked())
 
+    def _toggle_alerts(self) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.set_alerts(self._act_alerts.isChecked())
+
+    def _toggle_reconnect(self) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            tab.set_reconnect(self._act_reconnect.isChecked())
+
     def _toggle_hide_blank(self) -> None:
         self._config.hide_blank_lines = self._act_hide_blank.isChecked()
         self._apply_preferences_to_tabs()
@@ -724,6 +788,7 @@ class MainWindow(QMainWindow):
     def _apply_preferences_to_tabs(self) -> None:
         for tab in self.tabs():
             tab.apply_preferences()
+        self._sync_with_current_tab()
 
     def _open_preferences(self) -> None:
         from ui.dialogs.preferences_dialog import PreferencesDialog
@@ -743,6 +808,7 @@ class MainWindow(QMainWindow):
         self._theme_actions[self._theme_manager.preference].setChecked(True)
         self._act_hide_blank.setChecked(self._config.hide_blank_lines)
         self._apply_preferences_to_tabs()
+        self._alert_notifier.apply_preferences()
         if self._config.usage_statistics != sharing:
             self._usage.apply_setting()
         if saved:
@@ -824,7 +890,7 @@ class MainWindow(QMainWindow):
             return
         config.usage_question_shown += 1
         config.save()
-        banner = self._window_banners.show_banner(
+        self._window_banners.show_banner(
             _BANNER_USAGE, banners.INFO,
             f"Help improve {APP_NAME}?",
             "Share usage statistics, which you can switch off and delete at any time. Nothing your devices send is ever included.",
@@ -833,8 +899,8 @@ class MainWindow(QMainWindow):
                 BannerAction("Share", lambda: self._answer_usage_question(share=True)),
                 BannerAction("No thanks", lambda: self._answer_usage_question(share=False)),
             ),
+            on_dismiss=lambda: self._answer_usage_question(share=False),
         )
-        banner.dismissed.connect(lambda: self._answer_usage_question(share=False))
 
     def _answer_usage_question(self, *, share: bool) -> None:
         self._config.usage_question_answered = True
@@ -977,7 +1043,6 @@ class MainWindow(QMainWindow):
             self._config.window_x = geo.x()
             self._config.window_y = geo.y()
         self._config.maximized = self.isMaximized()
-
 
     # ── Closing ──────────────────────────────────────────────────────────
 

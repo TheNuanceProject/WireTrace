@@ -8,6 +8,7 @@ page. Values are read from and written to ``ConfigManager``.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 from PySide6.QtCore import QSize, Qt, QUrl
@@ -30,11 +31,16 @@ from PySide6.QtWidgets import (
 
 from app.config import ConfigManager
 from app.constants import (
+    ALERT_PAUSE_SECONDS_MAX,
+    ALERT_PAUSE_SECONDS_MIN,
+    ALERT_SILENCE_SECONDS_MAX,
+    ALERT_SILENCE_SECONDS_MIN,
     BAUD_RATES,
     FONT_SIZE_MAX,
     FONT_SIZE_MIN,
     GUI_UPDATE_INTERVAL_MS_MAX,
     GUI_UPDATE_INTERVAL_MS_MIN,
+    HIGHLIGHT_RULES_MAX,
     LOG_BUFFER_MAX_ENTRIES_MAX,
     LOG_BUFFER_MAX_ENTRIES_MIN,
     LOG_FLUSH_INTERVAL_MS_MAX,
@@ -43,11 +49,22 @@ from app.constants import (
     LOG_SPLIT_MAX_MB,
     MAX_CONSOLE_LINES_MAX,
     MAX_CONSOLE_LINES_MIN,
+    RECONNECT_LIMIT_MINUTES_MAX,
+    TIMESTAMP_MODE_NAMES,
+    TIMESTAMP_MODE_WORDS,
     UPDATE_CHECK_INTERVAL_HOURS,
     ExportFormat,
-    TimestampMode,
+    timestamp_mode_of,
 )
+from app.modules import ALERTS, HIGHLIGHTS, MODULES, PLOT, ModuleSettings
 from app.plot_config import PlotProfileStore
+from core.highlight_rules import HighlightStore
+from ui.alert_notifier import (
+    NOTIFICATION_BRINGS_SOUND,
+    WINDOWS_ALERT_SOUND_NAME,
+    notifications_unavailable,
+    play_alert_sound,
+)
 from ui.dialogs.common import (
     ChoiceRow,
     action_button,
@@ -55,6 +72,7 @@ from ui.dialogs.common import (
     heading,
     note,
     rule,
+    setting_row,
     tighten,
 )
 from ui.dialogs.messages import confirm
@@ -62,6 +80,7 @@ from ui.themes import tokens
 from ui.themes.theme_manager import ThemeManager, normalise_preference
 from ui.widgets.command_bar import LINE_ENDING_NAMES
 from ui.widgets.dot_grid import DotGridDialog
+from ui.widgets.highlight_editor import HighlightEditor
 from ui.widgets.least_size import keep_least_size
 from ui.widgets.styling import set_primary
 from ui.widgets.toast import Toast
@@ -73,19 +92,10 @@ _UPDATES_AND_PRIVACY = "Updates and privacy"
 
 #: The pages, in the order of the list. Advanced comes after a divider.
 PAGES: tuple[str, ...] = (
-    "Appearance", "Console", "Connection", "Logging", "Plot", _UPDATES_AND_PRIVACY, "Advanced",
+    "Appearance", "Console", "Connection", "Logging", "Features", "Plot", "Alerts",
+    "Highlights", _UPDATES_AND_PRIVACY, "Advanced",
 )
 _PAGE_AFTER_DIVIDER = "Advanced"
-
-#: The stored word for each timestamp mode, and its name in the list.
-_TIMESTAMP_CHOICES: tuple[tuple[str, TimestampMode], ...] = (
-    ("Time of day", TimestampMode.ABSOLUTE),
-    ("Since previous line", TimestampMode.RELATIVE),
-)
-_TIMESTAMP_STORED: dict[TimestampMode, str] = {
-    TimestampMode.ABSOLUTE: "absolute",
-    TimestampMode.RELATIVE: "relative",
-}
 
 
 class PreferencesDialog(DotGridDialog):
@@ -130,7 +140,10 @@ class PreferencesDialog(DotGridDialog):
             "Console": self._build_console,
             "Connection": self._build_connection,
             "Logging": self._build_logging,
+            "Features": self._build_features,
             "Plot": self._build_plot,
+            "Alerts": self._build_alerts,
+            "Highlights": self._build_highlights,
             _UPDATES_AND_PRIVACY: self._build_updates_and_privacy,
             "Advanced": self._build_advanced,
         }
@@ -208,23 +221,7 @@ class PreferencesDialog(DotGridDialog):
 
     def _add_row(self, page: QVBoxLayout, label: str, hint: str, field: QWidget) -> None:
         """Add a setting: its name and hint on the left, its field on the right."""
-        metrics = tokens.METRICS
-        text = QVBoxLayout()
-        text.setContentsMargins(0, 0, 0, 0)
-        text.setSpacing(metrics.space_half)
-        text.addWidget(heading(label))
-        text.addWidget(note(hint, small=True))
-        text_column = QWidget()
-        text_column.setLayout(text)
-        text_column.setFixedWidth(metrics.form_label_width)
-
-        row = QHBoxLayout()
-        row.setSpacing(metrics.space_6)
-        row.addWidget(text_column, 0, Qt.AlignmentFlag.AlignTop)
-        row.addWidget(field, 0, Qt.AlignmentFlag.AlignTop)
-        row.addStretch(1)
-        page.addLayout(row)
-        field.setAccessibleName(label)
+        page.addLayout(setting_row(label, hint, field))
         self._hints[label] = hint
 
     @staticmethod
@@ -268,7 +265,7 @@ class PreferencesDialog(DotGridDialog):
         self._add_row(page, "Text size", "Also in the View menu.", self._font_size)
 
         self._timestamps = self._combo()
-        for name, mode in _TIMESTAMP_CHOICES:
+        for mode, name in TIMESTAMP_MODE_NAMES.items():
             self._timestamps.addItem(name, mode)
         self._add_row(
             page, "Timestamps", "For new tabs. Each tab can switch at any time.",
@@ -303,6 +300,30 @@ class PreferencesDialog(DotGridDialog):
             "A port used before is offered what it last used.",
             self._baud,
         )
+
+        self._reconnect = QCheckBox("Wait for a lost board to return")
+        self._add_row(
+            page, "Reconnect",
+            "The session and its log continue once the same board is back. "
+            "Another board is never taken in its place.",
+            self._reconnect,
+        )
+        self._reconnect_limit = self._number(0, RECONNECT_LIMIT_MINUTES_MAX, "min")
+        self._reconnect_limit.setSpecialValueText("Never")
+        self._add_row(
+            page, "Stop waiting after",
+            "Never keeps waiting until you stop it or disconnect.",
+            self._reconnect_limit,
+        )
+        self._reconnect_by_name = QCheckBox("Reconnect by port name")
+        self._add_row(
+            page, "Ports without USB identity",
+            "A built-in COM port, a PCI card or a Bluetooth port has only its name "
+            "to tell it apart.",
+            self._reconnect_by_name,
+        )
+        for row in (self._reconnect_limit, self._reconnect_by_name):
+            self._reconnect.toggled.connect(row.setEnabled)
 
     def _build_logging(self, page: QVBoxLayout) -> None:
         metrics = tokens.METRICS
@@ -350,7 +371,117 @@ class PreferencesDialog(DotGridDialog):
             self._line_ending,
         )
 
+    def _build_features(self, page: QVBoxLayout) -> None:
+        page.addWidget(note(
+            "Switch off what you do not use. A feature that is off is not loaded, "
+            "takes no memory and adds nothing to the window. The change applies to "
+            "every tab at once.",
+        ))
+        self._module_switches: dict[str, QCheckBox] = {}
+        for spec in MODULES:
+            switch = QCheckBox("On")
+            switch.toggled.connect(self._show_module_pages)
+            self._add_row(page, spec.title, spec.summary, switch)
+            self._module_switches[spec.id] = switch
+        self._module_switches[ALERTS.id].clicked.connect(
+            lambda on: self._preview_alert_sound(on and self._alert_sound.isChecked())
+        )
+
+    def _show_module_pages(self) -> None:
+        """Show the page of a module only while it is switched on."""
+        for spec, page in ((PLOT, "Plot"), (ALERTS, "Alerts"), (HIGHLIGHTS, "Highlights")):
+            on = self._module_switches[spec.id].isChecked()
+            self._sidebar.setRowHidden(self._page_rows[page], not on)
+
+    @staticmethod
+    def _preview_alert_sound(play: bool) -> None:
+        """Play the alert sound once, as an alert will, when the user turns it on."""
+        if play:
+            play_alert_sound()
+
+    def _build_alerts(self, page: QVBoxLayout) -> None:
+        page.addWidget(note(
+            "An alert shows a banner in the tab and flashes the window while you are "
+            "working in another.",
+        ))
+        self._alert_errors = QCheckBox("Alert on new error lines")
+        self._add_row(
+            page, "Error lines", "Lines at the Error or Critical level. While they keep "
+            "arriving, a reminder comes every time between alerts until you dismiss the "
+            "banner.", self._alert_errors,
+        )
+        self._alert_lost = QCheckBox("Alert when the connection is lost")
+        self._add_row(
+            page, "Connection lost", "The board was unplugged or the link failed.",
+            self._alert_lost,
+        )
+        self._alert_quiet = QCheckBox("Alert after no line for")
+        self._alert_quiet_seconds = self._number(
+            ALERT_SILENCE_SECONDS_MIN, ALERT_SILENCE_SECONDS_MAX, "s",
+        )
+        self._alert_quiet.toggled.connect(self._alert_quiet_seconds.setEnabled)
+        quiet = QWidget()
+        quiet_layout = QHBoxLayout(quiet)
+        quiet_layout.setContentsMargins(0, 0, 0, 0)
+        quiet_layout.setSpacing(tokens.METRICS.space_2)
+        quiet_layout.addWidget(self._alert_quiet)
+        quiet_layout.addWidget(self._alert_quiet_seconds)
+        self._add_row(
+            page, "Quiet board", "While connected. The banner goes once lines arrive again.",
+            quiet,
+        )
+        self._alert_sound = QCheckBox(
+            f"Play the {WINDOWS_ALERT_SOUND_NAME} sound" if sys.platform == "win32"
+            else "Play the system's alert sound"
+        )
+        self._alert_sound.clicked.connect(self._preview_alert_sound)
+        self._add_row(
+            page, "Sound", "As your system's sound settings have it; silent if they are. "
+            "Choosing it plays it once.",
+            self._alert_sound,
+        )
+        self._alert_notification = QCheckBox("Show a desktop notification")
+        unavailable = notifications_unavailable()
+        self._alert_notification.setEnabled(not unavailable)
+        self._add_row(
+            page, "Desktop notification",
+            unavailable or (
+                "While you are working in another application. It names the tab and what "
+                "happened, never the text of a line"
+                + (
+                    f", and plays the {WINDOWS_ALERT_SOUND_NAME} sound itself."
+                    if NOTIFICATION_BRINGS_SOUND else "."
+                )
+            ),
+            self._alert_notification,
+        )
+        self._alert_pause_seconds = self._number(
+            ALERT_PAUSE_SECONDS_MIN, ALERT_PAUSE_SECONDS_MAX, "s",
+        )
+        self._add_row(
+            page, "Time between alerts",
+            "After a sound or notification, the next waits at least this long. Alerts "
+            "meanwhile then come together as one.",
+            self._alert_pause_seconds,
+        )
+
+    def _build_highlights(self, page: QVBoxLayout) -> None:
+        page.addWidget(note(
+            "A line that holds a rule's text, whatever its case, is drawn in the rule's "
+            "colour, with a mark beside it. The first rule a line matches decides. "
+            f"Up to {HIGHLIGHT_RULES_MAX} rules; on screen only, logs stay as received.",
+        ))
+        self._highlights = HighlightEditor()
+        page.addWidget(self._highlights)
+
     def _build_plot(self, page: QVBoxLayout) -> None:
+        self._plot_own_window = QCheckBox("Show the plot in its own window")
+        self._add_row(
+            page, "Where it opens",
+            "Off: under the console. Pop out and Dock move an open plot either way.",
+            self._plot_own_window,
+        )
+
         self._plot_profile = self._combo()
         self._add_row(
             page, "Default profile", "Used by a port that has no profile of its own yet.",
@@ -458,11 +589,7 @@ class PreferencesDialog(DotGridDialog):
             self._font_family.addItem(config.font_family)
         self._font_family.setCurrentText(config.font_family)
         self._font_size.setValue(config.font_size)
-        stored_mode = next(
-            (mode for mode, word in _TIMESTAMP_STORED.items() if word == config.timestamp_mode),
-            TimestampMode.ABSOLUTE,
-        )
-        self._select(self._timestamps, stored_mode)
+        self._select(self._timestamps, timestamp_mode_of(config.timestamp_mode))
         self._severity_colours.setChecked(config.color_mode)
         self._follow.setChecked(config.auto_scroll)
         self._hide_blank.setChecked(config.hide_blank_lines)
@@ -470,12 +597,32 @@ class PreferencesDialog(DotGridDialog):
         if self._baud.findData(config.default_baud_rate) < 0:
             self._baud.addItem(str(config.default_baud_rate), config.default_baud_rate)
         self._select(self._baud, config.default_baud_rate)
+        self._reconnect.setChecked(config.reconnect)
+        self._reconnect_limit.setValue(config.reconnect_limit_minutes)
+        self._reconnect_by_name.setChecked(config.reconnect_by_port_name)
+        for row in (self._reconnect_limit, self._reconnect_by_name):
+            row.setEnabled(config.reconnect)
 
         self._log_folder.setText(config.default_log_directory)
         self._log_format.set_value(config.default_log_format)
         self._split.setValue(config.log_split_size_mb)
         self._line_ending.set_value(config.log_line_ending)
 
+        modules = ModuleSettings(config)
+        for spec in MODULES:
+            self._module_switches[spec.id].setChecked(modules.is_enabled(spec))
+        self._show_module_pages()
+
+        self._plot_own_window.setChecked(config.plot_own_window)
+        self._alert_errors.setChecked(config.alert_error_lines)
+        self._alert_lost.setChecked(config.alert_connection_lost)
+        self._alert_quiet.setChecked(config.alert_silence)
+        self._alert_quiet_seconds.setValue(config.alert_silence_seconds)
+        self._alert_quiet_seconds.setEnabled(config.alert_silence)
+        self._alert_sound.setChecked(config.alert_sound)
+        self._alert_notification.setChecked(config.alert_notification)
+        self._alert_pause_seconds.setValue(config.alert_pause_seconds)
+        self._highlights.set_rules(HighlightStore(config).rules())
         self._load_plot_profiles()
         self._check_updates.setChecked(config.check_updates_on_startup)
         self._usage_statistics.setChecked(config.usage_statistics)
@@ -502,18 +649,35 @@ class PreferencesDialog(DotGridDialog):
 
         config.font_family = self._font_family.currentText()
         config.font_size = self._font_size.value()
-        config.timestamp_mode = _TIMESTAMP_STORED[self._timestamps.currentData()]
+        config.timestamp_mode = TIMESTAMP_MODE_WORDS[self._timestamps.currentData()]
         config.color_mode = self._severity_colours.isChecked()
         config.auto_scroll = self._follow.isChecked()
         config.hide_blank_lines = self._hide_blank.isChecked()
 
         config.default_baud_rate = self._baud.currentData()
+        config.reconnect = self._reconnect.isChecked()
+        config.reconnect_limit_minutes = self._reconnect_limit.value()
+        config.reconnect_by_port_name = self._reconnect_by_name.isChecked()
 
         config.default_log_directory = self._log_folder.text().strip()
         config.default_log_format = self._log_format.value
         config.log_split_size_mb = self._split.value()
         config.log_line_ending = self._line_ending.value
 
+        modules = ModuleSettings(config)
+        for spec in MODULES:
+            modules.set_enabled(spec, self._module_switches[spec.id].isChecked())
+
+        config.plot_own_window = self._plot_own_window.isChecked()
+        config.alert_error_lines = self._alert_errors.isChecked()
+        config.alert_connection_lost = self._alert_lost.isChecked()
+        config.alert_silence = self._alert_quiet.isChecked()
+        config.alert_silence_seconds = self._alert_quiet_seconds.value()
+        config.alert_sound = self._alert_sound.isChecked()
+        if self._alert_notification.isEnabled():
+            config.alert_notification = self._alert_notification.isChecked()
+        config.alert_pause_seconds = self._alert_pause_seconds.value()
+        HighlightStore(config).set_rules(self._highlights.rules())
         if self._plot_profile.currentData():
             self._plot_store.set_default(self._plot_profile.currentData())
         config.check_updates_on_startup = self._check_updates.isChecked()
@@ -540,9 +704,9 @@ class PreferencesDialog(DotGridDialog):
         if not confirm(
             self, "Restore defaults", "Return every setting to its default?",
             detail=(
-                "This happens at once and cannot be undone. Plot profiles, saved "
-                "commands, what each port was last used with and the update check "
-                "setting are kept."
+                "This happens at once and cannot be undone. Plot profiles, highlight "
+                "rules, saved commands, what each port was last used with and the "
+                "update check setting are kept."
             ),
             proceed="Restore defaults",
         ):

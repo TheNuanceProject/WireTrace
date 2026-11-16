@@ -90,7 +90,7 @@ def test_text_outside_ascii_survives(commands: SavedCommands) -> None:
     assert commands.all() == ["größe 5 Ω"]
 
 
-@pytest.mark.parametrize("stored", ["not json", '{"a": 1}', '"text"', "["])
+@pytest.mark.parametrize("stored", ["not json", '{"a": 1}', '"text"', "[", "[" * 100_000])
 def test_unreadable_stored_data_is_ignored(config: FakeConfig, stored: str) -> None:
     config.set(SECTION, KEY, stored)
     commands = SavedCommands(config)

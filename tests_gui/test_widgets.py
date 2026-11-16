@@ -27,6 +27,7 @@ from app.constants import (
 )
 from app.saved_commands import SavedCommands
 from core.log_writer import LogProgress
+from core.serial_settings import InputLines, LineSettings, LineStates, Parity
 from core.transport import PortInfo
 from tests_gui.support import pixel
 from ui.dialogs.saved_commands_dialog import SavedCommandsDialog
@@ -130,17 +131,18 @@ class TestTabToolbar:
         def enabled() -> dict[str, bool]:
             return {
                 button.text(): button.isEnabled()
-                for button in toolbar.findChildren(QPushButton) if button.text()
+                for button in toolbar.findChildren(QPushButton)
+                if button.text() and not button.isHidden()
             }
 
         assert enabled() == {
-            "Connect": True, "Start log": False, "Pause": False, "Clear": False,
+            "8N1": True, "Connect": True, "Start log": False, "Pause": False, "Clear": False,
             "Export": False, "Plot": False, "Text": False, "HEX": False,
         }
 
         toolbar.set_connected(True)
         assert enabled() == {
-            "Disconnect": True, "Start log": True, "Pause": False, "Clear": True,
+            "Lines": True, "Disconnect": True, "Start log": True, "Pause": False, "Clear": True,
             "Export": True, "Plot": True, "Text": True, "HEX": True,
         }
 
@@ -155,7 +157,7 @@ class TestTabToolbar:
 
         toolbar.set_connected(False)
         assert enabled() == {
-            "Connect": True, "Start log": False, "Pause": False, "Clear": True,
+            "8N1": True, "Connect": True, "Start log": False, "Pause": False, "Clear": True,
             "Export": True, "Plot": False, "Text": False, "HEX": False,
         }
 
@@ -183,7 +185,7 @@ class TestTabToolbar:
         qapp.processEvents()
         moved = toolbar.overflowed_labels()
 
-        assert moved and moved[0] == "Plot"
+        assert moved[:2] == ["Control lines", "Plot"]
         for button in toolbar.findChildren(QPushButton):
             if button.isVisible() and button.text():
                 assert button.width() >= button.sizeHint().width(), button.text()
@@ -200,9 +202,39 @@ class TestTabToolbar:
         toolbar.resize(toolbar.minimumSizeHint().width(), toolbar.height())
         qapp.processEvents()
 
-        toolbar._more_menu.actions()[0].trigger()
+        plot = next(action for action in toolbar._more_menu.actions() if action.text() == "Plot")
+        plot.trigger()
 
         assert toggled == [True]
+
+    def test_lines_menu_shows_the_states_of_the_open_port(self, toolbar):
+        toolbar.set_connected(True)
+        toolbar.set_line_states(LineStates(True, None, InputLines(cts=True, dsr=False)))
+
+        assert toolbar.line_menu_texts() == [
+            "DTR", "RTS (set by flow control)", "Send break",
+            "CTS: on", "DSR: off", "DCD: not reported", "RI: not reported",
+        ]
+
+    def test_lines_menu_sends_what_is_chosen(self, toolbar):
+        dtr: list[bool] = []
+        breaks: list[bool] = []
+        toolbar.dtr_toggled.connect(dtr.append)
+        toolbar.break_requested.connect(lambda: breaks.append(True))
+        toolbar.set_connected(True)
+        toolbar.set_line_states(LineStates(True, True, InputLines()))
+        actions = {action.text(): action for action in toolbar._lines_menu.actions()}
+
+        actions["DTR"].trigger()
+        actions["Send break"].trigger()
+
+        assert dtr == [False]
+        assert breaks == [True]
+
+    def test_port_settings_button_names_the_framing(self, toolbar):
+        toolbar.set_line_settings(LineSettings(7, Parity.EVEN))
+
+        assert _button(toolbar, "7E1").toolTip() == "Port settings: 7E1, no flow control"
 
     def test_display_mode_is_one_of_two(self, toolbar):
         chosen: list[DisplayMode] = []
@@ -285,16 +317,19 @@ class TestConsoleHeader:
                 assert left.right() < right.x(), width
             assert header.rect().contains(shown[-1]), width
 
-    def test_time_button_switches_between_the_two_modes(self, header):
+    def test_time_button_switches_through_the_three_modes(self, header):
         modes: list[TimestampMode] = []
         header.timestamp_mode_changed.connect(modes.append)
-        button = _button(header, "Time of day")
+        button = _button(header, "Date and time")
 
         button.click()
         assert button.text() == "Since previous line"
         button.click()
+        assert button.text() == "Time of day"
+        button.click()
 
-        assert modes == [TimestampMode.RELATIVE, TimestampMode.ABSOLUTE]
+        assert button.text() == "Date and time"
+        assert modes == [TimestampMode.RELATIVE, TimestampMode.ABSOLUTE, TimestampMode.DATE_TIME]
 
     def test_following_button_asks_and_shows_the_state_it_is_given(self, header):
         asked: list[bool] = []
@@ -513,6 +548,17 @@ class TestBanner:
         assert area.banner("a").title_label.text() == "Second"
         assert area.banner("a").property("level") == banners.ERROR
 
+    def test_long_words_wrap_to_the_width_given_and_never_widen_the_window(self, qapp, area):
+        area.show_banner("a", banners.WARNING, "Title", "x" * 5_000)
+        area.show_banner("b", banners.WARNING, "A long line " * 400)
+        area.resize(400, 300)
+        area.show()
+        qapp.processEvents()
+
+        assert area.minimumSizeHint().width() < 400
+        title = area.banner("b").title_label
+        assert title.height() > title.fontMetrics().height() * 2
+
     def test_action_runs_and_close_dismisses(self, qapp, area):
         ran: list[str] = []
         banner = area.show_banner(
@@ -525,6 +571,42 @@ class TestBanner:
         assert area.keys() == ["a"]
 
         banner.close_button.click()
+        assert area.keys() == []
+
+    def test_a_repeated_banner_is_updated_in_place_with_its_new_actions(self, area):
+        ran: list[str] = []
+        first = area.show_banner(
+            "a", banners.WARNING, "First", "One",
+            (BannerAction("Retry", lambda: ran.append("first")),),
+        )
+
+        second = area.show_banner(
+            "a", banners.ERROR, "Second", "",
+            (BannerAction("Retry", lambda: ran.append("second")),),
+        )
+        second.action_buttons[0].click()
+
+        assert second is first
+        assert second.detail_label.isHidden()
+        assert second.property("level") == banners.ERROR
+        assert ran == ["second"]
+
+    def test_a_banner_with_other_buttons_is_built_again(self, area):
+        first = area.show_banner("a", banners.WARNING, "Title", "", (BannerAction("Retry", print),))
+
+        second = area.show_banner("a", banners.WARNING, "Title", "", (BannerAction("Open", print),))
+
+        assert second is not first
+        assert [button.text() for button in second.action_buttons] == ["Open"]
+
+    def test_closing_runs_what_was_asked_for_once(self, area):
+        closed: list[str] = []
+        area.show_banner("a", banners.INFO, "Title", on_dismiss=lambda: closed.append("old"))
+        banner = area.show_banner("a", banners.INFO, "Title", on_dismiss=lambda: closed.append("new"))
+
+        banner.close_button.click()
+
+        assert closed == ["new"]
         assert area.keys() == []
 
     def test_banner_that_must_stay_has_no_close_button(self, area):
@@ -668,7 +750,7 @@ class TestStatusBar:
         bar.set_connecting("PORT0")
         assert bar.texts()[:2] == ["Connecting to PORT0", ""]
 
-        bar.set_connected("PORT0", 115200)
+        bar.set_connected("PORT0", 115200, "8N1")
         bar.set_data_rate(1200)
         bar.set_total_lines(84210)
         assert bar.texts()[:4] == ["PORT0", "115200 8N1", "1,200 lines/s", "84,210 lines"]
@@ -676,8 +758,17 @@ class TestStatusBar:
         bar.set_disconnected("PORT0", "lost at 10:00:00")
         assert bar.texts()[:3] == ["Disconnected", "PORT0, lost at 10:00:00", "0 lines/s"]
 
+    def test_input_lines_are_shown_only_while_connected(self, bar):
+        assert bar.input_line_states() == {}
+
+        bar.set_line_states(LineStates(True, True, InputLines(cts=True, dsr=False, dcd=None)))
+
+        assert bar.input_line_states() == {"CTS": True, "DSR": False, "DCD": False, "RI": False}
+        bar.set_line_states(None)
+        assert bar.input_line_states() == {}
+
     def test_log_shows_file_time_part_and_size(self, bar):
-        bar.set_connected("PORT0", 115200)
+        bar.set_connected("PORT0", 115200, "8N1")
         bar.set_logging(
             "Bench_PORT0.txt", 3725, LogProgress(2, 1536 * 1024, 10 * 1024 * 1024), paused=False,
         )
@@ -693,7 +784,7 @@ class TestStatusBar:
 
     def test_dot_shows_logging_then_returns_to_the_connection(self, qapp, bar):
         dot = bar.findChild(StatusDot)
-        bar.set_connected("PORT0", 115200)
+        bar.set_connected("PORT0", 115200, "8N1")
         qapp.processEvents()
         centre = dot.width() / 2
         assert pixel(dot, centre, centre).name().upper() == tokens.palette().connected
@@ -760,12 +851,11 @@ class TestConnectPage:
     @pytest.mark.parametrize(
         ("platform", "mentioned"), [("linux", True), ("win32", False), ("darwin", False)],
     )
-    def test_linux_note_is_shown_on_linux_only(self, qapp, monkeypatch, platform, mentioned):
-        monkeypatch.setattr(connect_page_module.sys, "platform", platform)
+    def test_linux_note_is_shown_on_linux_only(self, platform, mentioned):
+        assert ("On Linux" in connect_page_module.no_ports_help(platform)) is mentioned
 
-        help_text = ConnectPage().texts()[2]
-
-        assert ("On Linux" in help_text) is mentioned
+    def test_the_empty_list_says_what_to_check_on_this_system(self, qapp):
+        assert ConnectPage().texts()[2] == connect_page_module.no_ports_help()
 
     def test_ports_are_listed_and_the_first_is_chosen(self, qapp, page):
         chosen: list[str] = []

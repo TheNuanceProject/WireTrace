@@ -27,14 +27,23 @@ Activation:
   late shows data at once instead of waiting for a fresh sample.
 
 Time semantics:
-  - X is the time a line arrived, in seconds since the first line the
-    engine plotted. The arrival time is supplied by the caller (the
-    reader stamps every line), so the plot, the console, and the log
-    agree.
+  - X is the time a line arrived, in seconds since the first line of
+    the session the engine was given (or since the first line after
+    Clear). The arrival time is supplied by the caller (the reader
+    stamps every line), so the plot, the console, the log and the
+    session recording agree. Changing how values are found keeps the
+    same start, so older values read back from the recording line up.
   - ``latest_x`` is the X of the most recently appended sample. It does
     not advance when data stops flowing. The view anchors its scrolling
     window to ``latest_x``, not to a live clock, so the trace stays put
     when data stops.
+
+Generations:
+  ``generation`` changes whenever the samples held stop following on
+  from those before: a new session, Clear, a new configuration, or
+  detection starting again. Older values read from the recording
+  belong to one generation; ``history_parser`` gives the reader a
+  parser of its own that finds the same values the same way.
 
 Late-bind:
   PlotView is constructed lazily on first toggle. By the time it
@@ -51,6 +60,7 @@ This module does not touch the GUI, the disk, the serial port or any other I/O.
 
 from __future__ import annotations
 
+import copy
 import enum
 import logging
 from collections import deque
@@ -135,8 +145,9 @@ class PlotEngine(QObject):
         self._head: dict[str, int] = {}   # next-write index
         self._count: dict[str, int] = {}  # samples written so far
 
-        # Session timing: the first plotted line establishes t=0.
-        self._session_start: datetime | None = None
+        # The first line of the session (or after Clear) is at x = 0.
+        self._origin: datetime | None = None
+        self._generation = 0
         # Most recent sample's X. Stays put when no data flows; this
         # is what the view uses to anchor its window.
         self._latest_x: float = 0.0
@@ -203,9 +214,39 @@ class PlotEngine(QObject):
 
     def time_of(self, x: float) -> datetime | None:
         """When the line plotted at ``x`` was received; None before any was."""
-        if self._session_start is None:
+        if self._origin is None:
             return None
-        return self._session_start + timedelta(seconds=x)
+        return self._origin + timedelta(seconds=x)
+
+    @property
+    def origin(self) -> datetime | None:
+        """When the line at x = 0 was received; None before the first line."""
+        return self._origin
+
+    @property
+    def generation(self) -> int:
+        """Changes whenever the samples held stop following on from earlier ones."""
+        return self._generation
+
+    def history_parser(self) -> object | None:
+        """A parser of its own that finds the values the way the engine
+        does now, for reading older lines on another thread; None while
+        the values are not known."""
+        if not self._detection_complete:
+            return None
+        if self._mode is PlotMode.MANUAL:
+            return RegexParser(self._regex_parser.pattern) if self._regex_parser else None
+        return copy.deepcopy(self._pipeline)
+
+    def oldest_held(self, col: str) -> tuple[float, int] | None:
+        """The time of ``col``'s oldest sample in memory, and how many
+        samples in memory share that time; None when none is held."""
+        count = self._count.get(col, 0)
+        if not count:
+            return None
+        x, _ = self.snapshot(col)
+        oldest = float(x[0])
+        return oldest, int(np.count_nonzero(x == oldest))
 
     @property
     def has_any_data(self) -> bool:
@@ -233,15 +274,17 @@ class PlotEngine(QObject):
         return [line for line, _ in self._recent]
 
     def set_auto_config(self) -> None:
-        """Switch to AUTO mode and reset.
+        """Switch to AUTO mode and look for values again.
 
         The pipeline is recreated so any previously-selected parser
-        state (delimiter, column names) is discarded. Subsequent
-        ``process`` calls run detection from scratch.
+        state (delimiter, column names) is discarded, and the recent
+        lines are forgotten. Subsequent ``process`` calls run detection
+        from scratch. The session's start stays where it is.
         """
         self._mode = PlotMode.AUTO
         self._regex_parser = None
-        self.reset()
+        self._recent.clear()
+        self._reset_runtime_state()
 
     def set_manual_config(self, pattern: str) -> None:
         """Switch to MANUAL mode with the given regex pattern.
@@ -277,6 +320,7 @@ class PlotEngine(QObject):
           discard the pattern, switch to auto via ``set_auto_config()``.
         """
         self._recent.clear()
+        self._origin = None
         self._reset_runtime_state()
 
     def _reset_runtime_state(self) -> None:
@@ -292,8 +336,8 @@ class PlotEngine(QObject):
         self._y.clear()
         self._head.clear()
         self._count.clear()
-        self._session_start = None
         self._latest_x = 0.0
+        self._generation += 1
 
         if self._mode == PlotMode.MANUAL and self._regex_parser is not None:
             # Columns come from the pattern, so they are known at once.
@@ -319,9 +363,10 @@ class PlotEngine(QObject):
         for col in self._columns:
             self._head[col] = 0
             self._count[col] = 0
-        # Reset session start so the cleared plot starts X at 0 again.
-        self._session_start = None
+        # The cleared plot starts X at 0 again, with the next line.
+        self._origin = None
         self._latest_x = 0.0
+        self._generation += 1
 
     def snapshot(
         self, col: str,
@@ -355,6 +400,8 @@ class PlotEngine(QObject):
         swallowed: a malformed line never propagates to crash the tab.
         """
         line = line[:PLOT_MAX_LINE_CHARACTERS]
+        if self._origin is None:
+            self._origin = timestamp
         self._recent.append((line, timestamp))
         if not self._active or self._detection_failed_emitted or self._stalled:
             return
@@ -369,10 +416,9 @@ class PlotEngine(QObject):
             logger.exception("Plot engine swallowed exception on line: %r", line)
 
     def _process_one(self, line: str, timestamp: datetime) -> None:
-        if self._session_start is None:
-            self._session_start = timestamp
-
-        ts = (timestamp - self._session_start).total_seconds()
+        if self._origin is None:
+            self._origin = timestamp
+        ts = (timestamp - self._origin).total_seconds()
         self._lines_seen += 1
 
         # Manual mode: extract directly, with no buffering or detection.

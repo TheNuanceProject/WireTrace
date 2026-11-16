@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The privacy statement: what WireTrace sends, and when.
 
-It is shown by the Windows installer before anything is installed, and
-in the application, as the statement itself and not a summary of it. It
-is written here, beside the code that makes the update check
+It is shown by the Windows installer before anything is installed, as
+the statement itself and not a summary of it. In the application, What
+is sent (in Preferences, and on the banner that asks about usage
+statistics) opens the website's privacy policy, which says the same at
+greater length, with the rights of users and how to use them. It is
+written here, beside the code that makes the update check
 (``updater/update_manager.py``) and sends usage statistics
 (``updater/usage.py``), so that a change to what is sent and a change to
 what is said about it are made in one place. Tests hold the statement to
-the fields the code sends. The website's privacy policy says the same at
-greater length, with the rights of users and how to use them.
+the fields the code sends.
 
 The installer shows it as plain text, so it is plain ASCII.
 
@@ -59,8 +61,7 @@ PRIVACY_STATEMENT = (
     "\n"
     "Like any request over the internet, it reaches the server from a "
     "network address. The server derives from that address the country and "
-    "an approximate area of about one degree of latitude and longitude "
-    "(roughly 100 km). It uses the address itself for no more than one "
+    "an approximate city. It uses the address itself for no more than one "
     "minute, to limit abuse, and never stores it. Only daily totals are "
     "kept; no record of a single request is kept. The answer itself, the "
     "description of the latest version, is a file on the website, which "

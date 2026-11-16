@@ -322,7 +322,7 @@ class PlotProfileStore:
                                 "Skipping malformed plot profile %r: %s",
                                 entry, exc,
                             )
-            except json.JSONDecodeError as exc:
+            except (ValueError, RecursionError) as exc:
                 logger.warning(
                     "Plot profile JSON failed to parse; using defaults: %s", exc,
                 )

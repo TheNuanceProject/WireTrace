@@ -1,24 +1,19 @@
-WireTrace v2.0.0
+WireTrace v2.1.0
 
-A rebuilt WireTrace. The path from the serial port to the disk is new, and so is the interface.
-
-Changed
-- The log is written straight from the port to the disk and never waits for the window. On disconnect, an unplugged device or closing, everything waiting is written before the result is reported.
-- Every session is recorded from the moment of connection, the most recent 1 GB of each tab, so it can be exported without a log running and after the device has gone.
-- If the disk cannot keep up or fails, WireTrace says how many lines were not written and marks the place in the file.
-- A new interface: a list of ports that updates by itself, a toolbar in every tab, level filters with counts, and Light, Dark and System themes.
-- One design with thenuanceproject.com: the same colours, sizes and type, with the Poppins font included, so WireTrace looks the same on every computer and no text is cut off.
-- Updates are verified by signature, and checked every 12 hours while WireTrace is open.
-- Licence: GNU General Public License, version 3 or later. Versions 1.0.0 to 1.2.0 remain under the MIT License.
+Leave your boards running. When one is unplugged or resets its USB connection, WireTrace waits for the same board and carries on with the same session and the same log.
 
 Added
-- Maximum log file size, a remembered log folder, saved commands, a HEX view, and firmware log levels (ESP-IDF, Zephyr).
-- The plot: point at it to read the values at any moment, measure between two cursors, and group values into panels by scale.
-- Usage statistics, off unless you switch them on.
+- Reconnect: when WireTrace cannot be sure the board that came back is the same one, it asks. On by default; switched per tab in the Device menu.
+- Line settings: data bits, parity, stop bits and flow control per port. While connected, set DTR and RTS and send a break; the status bar shows CTS, DSR, DCD and RI.
+- The plot in a window of its own, back to the start of the session, saved as PNG or SVG, with its values as CSV.
+- Restart detection for ESP32 and Zephyr boards, and a session report with exact counts of lines, errors, warnings, lost connections and restarts.
+- Alerts on new error lines, a lost connection or a quiet board, with the system's sound and, if chosen, a desktop notification. Off by default.
+- The console shows each line's date and time by default, as the log writes it.
+- Highlight rules, and ANSI colours from the device on screen. Logs stay plain text.
+- A Features page in Preferences: switch off what you do not use.
 
-When updating from 1.x
-- Ctrl+S opens Export session (it was Quick Save), and the live plot is Ctrl+P.
-- Log files end lines with LF on every system. A preference restores CR LF.
-- On the first start, the theme is set to System and the console font and its size to the new defaults, once. The console text size is now in pixels. Every other setting is kept.
+Fixed
+- On Windows, an unplugged CH340 adapter could leave the session open, repeating "Access is denied". An error that leaves a port unusable now ends the connection at once.
+- No part of a window appears on its own for a moment as it opens.
 
 Every change: CHANGELOG.md in the repository. Privacy: https://thenuanceproject.com/privacy/

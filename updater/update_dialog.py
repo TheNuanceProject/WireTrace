@@ -136,7 +136,6 @@ class UpdateDialog(DotGridDialog):
         self._main = action_button("", primary=True)
         self._main.setDefault(True)
         self._main.clicked.connect(self._on_main)
-        self._show_offer()
 
         leading = QWidget()
         row = QHBoxLayout(leading)
@@ -145,6 +144,9 @@ class UpdateDialog(DotGridDialog):
             row.addWidget(button)
         layout.addStretch(1)
         layout.addLayout(button_row(self._main, leading=leading))
+        # Only once every button is placed: one shown before would be a
+        # window of its own for a moment.
+        self._show_offer()
 
     # ── States ───────────────────────────────────────────────────────────
 

@@ -7,8 +7,9 @@ import json
 
 import pytest
 
-from app.constants import PORT_MEMORY_LIMIT, PORT_TAB_NAME_MAX, LineEnding
+from app.constants import PORT_MEMORY_LIMIT, PORT_PLOT_WINDOW_MAX, PORT_TAB_NAME_MAX, LineEnding
 from app.port_memory import KEY, SECTION, PortMemory, PortSettings
+from core.serial_settings import FlowControl, LineSettings, Parity, StopBits
 
 _NAMES = {LineEnding.NONE: "None", LineEnding.LF: "LF", LineEnding.CR: "CR", LineEnding.CRLF: "CR LF"}
 
@@ -118,7 +119,7 @@ def test_the_least_recently_used_port_is_forgotten_first(memory: PortMemory) -> 
     assert memory.get("NEW") is not None
 
 
-@pytest.mark.parametrize("stored", ["not json", "[1, 2]", '"text"', "{"])
+@pytest.mark.parametrize("stored", ["not json", "[1, 2]", '"text"', "{", "[" * 100_000])
 def test_unreadable_stored_data_is_ignored(config: FakeConfig, stored: str) -> None:
     config.set(SECTION, KEY, stored)
     memory = PortMemory(config)
@@ -141,3 +142,57 @@ def test_damaged_entries_are_dropped_and_the_rest_kept(config: FakeConfig) -> No
     assert memory.get("BAD") is None
     assert memory.get("") is None
     assert memory.get("PARTLY") == PortSettings(line_ending="LF")
+
+
+def test_line_settings_are_remembered_with_the_port(memory: PortMemory) -> None:
+    line = LineSettings(7, Parity.EVEN, StopBits.TWO, FlowControl.HARDWARE, dtr_on_open=False)
+    memory.remember("PORT0", baud_rate=9600, line=line)
+
+    settings = memory.get("PORT0")
+
+    assert settings is not None
+    assert settings.line == line
+    assert settings.baud_rate == 9600
+
+
+def test_a_port_remembered_before_line_settings_existed_gets_the_usual_ones(
+    config: FakeConfig, memory: PortMemory,
+) -> None:
+    config.set(SECTION, KEY, json.dumps({"PORT0": {"baud_rate": 9600}}))
+
+    settings = memory.get("PORT0")
+
+    assert settings is not None
+    assert settings.line == LineSettings()
+
+
+def test_unreadable_line_settings_fall_back_to_the_usual_ones(
+    config: FakeConfig, memory: PortMemory,
+) -> None:
+    config.set(SECTION, KEY, json.dumps({"PORT0": {"baud_rate": 9600, "line": {"data_bits": 3}}}))
+
+    assert memory.get("PORT0").line == LineSettings()
+
+
+def test_unusual_framing_is_named_in_the_note(memory: PortMemory) -> None:
+    memory.remember("PORT0", baud_rate=9600, line=LineSettings(7, Parity.EVEN))
+    memory.remember("PORT1", baud_rate=9600, line=LineSettings(dtr_on_open=False))
+
+    assert memory.note("PORT0", _NAMES) == "Last used at 9600, 7E1, no flow control"
+    assert memory.note("PORT1", _NAMES) == "Last used at 9600"
+
+
+def test_where_the_plot_window_was_is_remembered(memory: PortMemory) -> None:
+    memory.remember("COM7", baud_rate=9600)
+    memory.remember("COM7", plot_window="AdnQywADAAA=")
+
+    settings = memory.get("COM7")
+    assert settings.plot_window == "AdnQywADAAA="
+    assert settings.baud_rate == 9600
+
+
+@pytest.mark.parametrize("stored", [42, "not base64!", "A" * (PORT_PLOT_WINDOW_MAX + 4)])
+def test_a_plot_window_place_that_is_not_one_is_dropped(memory: PortMemory, stored) -> None:
+    memory.remember("COM7", baud_rate=9600, plot_window=stored)
+
+    assert memory.get("COM7").plot_window == ""

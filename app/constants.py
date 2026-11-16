@@ -24,6 +24,11 @@ from enum import Enum, auto
 from ui.themes.design_tokens import FONT_FAMILIES as _FONT_FAMILIES
 from ui.themes.design_tokens import TYPE_STYLES as _TYPE_STYLES
 
+# Milliseconds in a second, a minute and an hour.
+MS_PER_SECOND = 1000
+MS_PER_MINUTE = 60 * MS_PER_SECOND
+MS_PER_HOUR = 60 * MS_PER_MINUTE
+
 # ── Serial Communication ─────────────────────────────────────────────────────
 
 # Baud rates offered in the drop-down lists, in this order.
@@ -41,6 +46,18 @@ BAUD_RATE_MAX = 4_000_000
 # poll runs alongside Qt's readyRead signal because that signal is
 # unreliable on Windows with several common USB-to-serial chipsets.
 SERIAL_POLL_INTERVAL_MS = 20
+
+# Interval at which the input lines of an open port (CTS, DSR, DCD, RI)
+# are read; a change is reported, an unchanged reading is not.
+CONTROL_LINE_POLL_INTERVAL_MS = 200
+
+# How long a break is held when the user sends one.
+BREAK_DURATION_MS = 250
+
+# A read error leaves it in doubt whether the device is still there; the
+# system's port list says. A driver may repeat the error at every poll,
+# so the list is read again no more often than this.
+SERIAL_LISTED_RECHECK_MS = 500
 
 # Lines that are read together are stamped as having arrived evenly
 # since the previous read, provided that read was no longer ago than
@@ -175,6 +192,26 @@ PLOT_RING_BUFFER_SIZE = 10_000
 # Recent lines kept. They are what the Configure plot dialog shows and
 # what a plot that is opened late starts from.
 PLOT_RECENT_LINES_BUFFER_SIZE = 200
+# Older time is drawn from an overview of each value: time cut into this
+# many slices, each keeping its least and greatest sample (48 bytes a
+# slice, about 0.8 MB a value). Slices start this long and double in
+# length whenever the session outgrows them.
+PLOT_OVERVIEW_SLICES = 16_384
+PLOT_OVERVIEW_FIRST_SLICE_SECONDS = 0.001
+# The overview is read from the session recording on a thread of its
+# own: it looks for new records this often, and hands over what it has
+# read at least this often or after this many lines.
+PLOT_HISTORY_POLL_MS = 250
+PLOT_HISTORY_HANDOVER_MS = 100
+PLOT_HISTORY_HANDOVER_LINES = 20_000
+# Older time held still on screen is read again in full, once the view
+# has rested this long. It is drawn sample by sample when it holds no
+# more than this many samples for each pixel of the chart's width, and
+# by its least and greatest sample per pixel otherwise. A range of more
+# lines than the last figure is not read in full.
+PLOT_HISTORY_DETAIL_DELAY_MS = 200
+PLOT_HISTORY_SAMPLES_PER_PIXEL = 2
+PLOT_HISTORY_DETAIL_MAX_LINES = 2_000_000
 # Panels by scale: a value shares a panel with smaller ones while it is
 # at most this many times the smallest of them. No more than this many
 # panels are shown, so each stays tall enough to read.
@@ -188,6 +225,66 @@ PLOT_MAX_SERIES = 32
 # (last, min, max, avg) are worked out again.
 PLOT_REDRAW_INTERVAL_MS = 33
 PLOT_STATS_INTERVAL_MS = 250
+# The plot's charting library is loaded on a thread of its own this long
+# after a tab with the plot switched on is built, so the first Plot opens
+# at once (``ui/features/plot_preload.py``).
+PLOT_PRELOAD_DELAY_MS = 1_000
+
+# Highlight rules: how many can be set, the longest text a rule looks
+# for, and how many highlight colours the design language gives.
+HIGHLIGHT_RULES_MAX = 16
+HIGHLIGHT_TEXT_MAX = 200
+HIGHLIGHT_COLOURS = 6
+#: The names of the highlight colours, in the design language's order.
+HIGHLIGHT_COLOUR_NAMES = ("Red", "Amber", "Green", "Teal", "Blue", "Purple")
+
+# Reconnect: how often a tab waiting for its lost board reads the list of
+# ports, and the longest wait that can be set, in minutes (0: no limit).
+RECONNECT_POLL_INTERVAL_MS = 500
+# A found port that cannot be opened yet is tried again after a pause
+# that doubles from the first value up to the second, so a port another
+# program holds, or one the system is still setting up, is never retried
+# in a tight loop.
+RECONNECT_RETRY_FIRST_MS = 500
+RECONNECT_RETRY_MAX_MS = 5_000
+# A port is opened once the identity of its board has been read, so a
+# board that drops as soon as it is opened is still known; should the
+# list take longer than this to read, the port is opened anyway.
+RECONNECT_RECORD_WAIT_MS = 2_000
+# A tab that closes waits this long for a list of ports being read; one
+# that takes longer is left to its thread, which reports nothing more.
+RECONNECT_STOP_WAIT_MS = 2_000
+RECONNECT_LIMIT_MINUTES_MAX = 10_080
+
+# Alerts: how often a tab checks whether to alert; and how long a board
+# may stay quiet before it alerts, first offered and the range it may be
+# set in.
+ALERT_CHECK_INTERVAL_MS = 500
+ALERT_SILENCE_SECONDS_DEFAULT = 30
+ALERT_SILENCE_SECONDS_MIN = 1
+ALERT_SILENCE_SECONDS_MAX = 86_400
+# The sound and the desktop notification of alerts, shared by every tab
+# (``ui/alert_notifier.py``): alerts this close together go out as one;
+# after that, nothing more sounds or notifies for the time between
+# alerts, first offered and the range it may be set in.
+ALERT_GATHER_MS = 250
+ALERT_PAUSE_SECONDS_DEFAULT = 30
+ALERT_PAUSE_SECONDS_MIN = 5
+ALERT_PAUSE_SECONDS_MAX = 3_600
+# A notification of several alerts lists this many, then how many more;
+# it stays on screen this long, where the system lets the application say.
+ALERT_NOTIFICATION_LINES = 4
+ALERT_NOTIFICATION_MS = 10_000
+# The latest error line, as an alert banner quotes it, is shortened to
+# this many characters; the console shows it whole.
+ALERT_QUOTE_CHARS_MAX = 160
+
+# Restarts of the board listed in a session's report, the latest kept;
+# all of them are counted.
+SESSION_RESTARTS_KEPT = 1_000
+# Losses of the connection a session keeps the times of, the latest
+# kept; all of them are counted, with the time the board was away.
+SESSION_DISCONNECTS_KEPT = 10_000
 
 # How often the main thread checks whether garbage is due for collection.
 # See app/main_thread_gc.py.
@@ -203,6 +300,8 @@ PLOT_WINDOW_CHOICES: tuple[tuple[str, float | None], ...] = (
     ("All", None),
 )
 PLOT_DEFAULT_WINDOW_SECONDS = 60.0
+# The least recent time the wheel can zoom a live plot in to.
+PLOT_LIVE_SPAN_MIN_SECONDS = 0.1
 
 # ── UI / Display ─────────────────────────────────────────────────────────
 
@@ -225,6 +324,10 @@ GUI_UPDATE_INTERVAL_MS_MAX = 500
 # slow machine.
 DISPLAY_CHUNK_LINES = 100
 DISPLAY_TICK_BUDGET_FRACTION = 0.5
+# The share of each tick the modules that read lines may spend on them,
+# all together. With the console's share, enough of every tick is left
+# for input and painting.
+MODULE_TICK_BUDGET_FRACTION = 0.2
 
 # When lines arrive faster than this machine can draw them, the console
 # skips ahead so that it is never further behind the device than this.
@@ -251,6 +354,12 @@ CONSOLE_MAX_CHARACTERS = 128 * 1024 * 1024
 # waiting to be written. Past it, lines are skipped or dropped and
 # counted, exactly as when the count of lines is exceeded.
 DISPLAY_MAX_CHARACTERS = 32 * 1024 * 1024
+
+# The records a module may have waiting for it, by count and by the
+# characters they hold, whichever is reached first. A module that falls
+# further behind skips the oldest for itself only and is told how many.
+CONSUMER_MAX_LINES = 100_000
+CONSUMER_MAX_CHARACTERS = 16 * 1024 * 1024
 LOG_PENDING_MAX_CHARACTERS = 64 * 1024 * 1024
 
 # The most characters of a row the console shapes for drawing when the
@@ -278,6 +387,9 @@ CONSOLE_SEARCH_MATCH_LIMIT = 100_000
 # used is forgotten beyond this. A tab name is cut at the second limit.
 PORT_MEMORY_LIMIT = 64
 PORT_TAB_NAME_MAX = 64
+# Where a port's plot window was, as Qt saves a window's geometry, in
+# base64; anything longer is not one and is ignored.
+PORT_PLOT_WINDOW_MAX = 1024
 
 # The console menu quotes the selected text up to this many characters.
 MENU_SELECTION_PREVIEW_CHARS = 24
@@ -385,7 +497,34 @@ DEFAULT_LINE_ENDING = LineEnding.LF
 class TimestampMode(Enum):
     """Timestamp display mode in console."""
     ABSOLUTE = auto()   # HH:MM:SS.mmm, the time of day
+    DATE_TIME = auto()  # YYYY-MM-DD HH:MM:SS.mmm, as the log writes it
     RELATIVE = auto()   # +X.XXX s, the time since the previous line
+
+
+#: Each timestamp mode's name, in the order it is offered and switched
+#: through, and the word it is stored under in preferences.ini.
+TIMESTAMP_MODE_NAMES: dict[TimestampMode, str] = {
+    TimestampMode.ABSOLUTE: "Time of day",
+    TimestampMode.DATE_TIME: "Date and time",
+    TimestampMode.RELATIVE: "Since previous line",
+}
+TIMESTAMP_MODE_WORDS: dict[TimestampMode, str] = {
+    TimestampMode.ABSOLUTE: "absolute",
+    TimestampMode.DATE_TIME: "date_time",
+    TimestampMode.RELATIVE: "relative",
+}
+
+
+#: How the console shows the time until the user chooses otherwise.
+DEFAULT_TIMESTAMP_MODE = TimestampMode.DATE_TIME
+
+
+def timestamp_mode_of(word: str) -> TimestampMode:
+    """The timestamp mode stored as ``word``; the default for any other word."""
+    return next(
+        (mode for mode, stored in TIMESTAMP_MODE_WORDS.items() if stored == word),
+        DEFAULT_TIMESTAMP_MODE,
+    )
 
 
 class CSVMode(Enum):
@@ -410,7 +549,7 @@ THEME_FALLBACK = ThemeID.LIGHT
 #: a default that existing installations should also receive; the file
 #: is brought up to date once, the first time that release starts.
 #: A file with no version was written by WireTrace 1.x and counts as 1.
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 SETTINGS_VERSION_UNVERSIONED = 1
 
 #: Theme names found in a 1.x preferences file, mapped to the current names.
@@ -489,9 +628,22 @@ SEVERITY_KEYWORDS = {
 TAG_COMMAND = "COMMAND"
 TAG_DATA = "DATA"
 
-# Tag carried by lines WireTrace itself adds to the stream (skipped
-# lines, paused logging, write failures).
+# Tags carried by lines WireTrace itself adds to the stream: a problem
+# (lines skipped or not recorded, a write failure, a lost connection, a
+# restart of the board), or an event the user made or that went well
+# (a control line set, a break sent, the board back, logging paused or
+# writing again). The tag decides only how the console draws the line:
+# no filter hides a notice and no count includes one.
 TAG_NOTICE = "WARNING"
+TAG_NOTICE_EVENT = "INFO"
+# The levels counted as errors and as warnings, in the console, its
+# alerts and reports; and each level's name as the interface shows it.
+ERROR_LEVELS = frozenset({"ERROR", "CRITICAL"})
+WARNING_LEVELS = frozenset({"WARNING"})
+LEVEL_NAMES = {
+    "ERROR": "Error", "CRITICAL": "Critical", "WARNING": "Warning",
+    "INFO": "Info", "DEBUG": "Debug", "DATA": "Data",
+}
 
 # Level markers printed by firmware logging frameworks, mapped to tags.
 # These are exact, so they are recognised before the keyword search.

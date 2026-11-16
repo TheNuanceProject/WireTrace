@@ -123,6 +123,11 @@ class TestProfileStoreInitial:
         assert store.names() == [AUTO_PROFILE_NAME]
         assert store.default_name == AUTO_PROFILE_NAME
 
+    @pytest.mark.parametrize("stored", ["{not json", "[" * 100_000])
+    def test_unreadable_profiles_yield_auto_only(self, stored):
+        store = PlotProfileStore(FakeConfig({"Plot": {"profiles_json": stored}}))
+        assert store.names() == [AUTO_PROFILE_NAME]
+
     def test_loads_existing_profiles(self):
         cfg = FakeConfig({
             "Plot": {

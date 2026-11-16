@@ -93,7 +93,6 @@ class CommandBar(QFrame):
         self._saved_menu = QMenu(self)
         self._saved_menu.aboutToShow.connect(self._fill_saved_menu)
         self._saved.setMenu(self._saved_menu)
-        self._saved.setVisible(saved_commands is not None)
 
         self._send = Button("Send")
         self._send.setToolTip("Send the command (Enter)")
@@ -108,6 +107,9 @@ class CommandBar(QFrame):
         layout.addWidget(self._saved)
         layout.addWidget(self._ending)
         layout.addWidget(self._send)
+        # Only once it is placed in the bar: shown before, it would be a
+        # window of its own for a moment.
+        self._saved.setVisible(saved_commands is not None)
 
     # ── Public API ───────────────────────────────────────────────────────
 

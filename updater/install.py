@@ -261,7 +261,7 @@ def launch_update(installer: Path, release: PlatformRelease) -> None:
         raise UpdateApplyError(str(exc)) from exc
 
 
-def hold_installer_mutex() -> bool:
+def hold_installer_mutex(platform: str = sys.platform) -> bool:
     """Tell the Windows installer that the application is running.
 
     The installer waits for a named mutex to be free before it replaces
@@ -272,7 +272,7 @@ def hold_installer_mutex() -> bool:
         True if the mutex is held.
     """
     global _installer_mutex
-    if sys.platform != "win32":
+    if platform != "win32":
         return False
     if _installer_mutex is None:
         import ctypes

@@ -4,6 +4,8 @@ files, and a loopback port in place of the hardware."""
 
 from __future__ import annotations
 
+import math
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,7 @@ import ui.device_tab as device_tab_module
 from app.config import ConfigManager
 from app.constants import (
     NAME_SEPARATOR,
+    RECONNECT_POLL_INTERVAL_MS,
     DisplayMode,
     ExportFormat,
     LineEnding,
@@ -29,28 +32,41 @@ from app.constants import (
     TimestampMode,
 )
 from app.port_memory import PortMemory, PortSettings
+from core.port_identity import PortIdentity
+from core.serial_settings import FlowControl, InputLines, LineSettings, Parity, StopBits
 from core.transport import PortInfo
 from tests_gui.support import LoopbackPort, line_text, log_body, wait_until
 from ui.device_tab import NEW_TAB_TITLE, DeviceTab
 from ui.dialogs.export_dialog import ExportDialog
 from ui.dialogs.new_log_dialog import NewLogDialog
+from ui.dialogs.port_settings_dialog import PortSettingsDialog
 from ui.themes.theme_manager import ThemeManager
 from ui.widgets.banner import BannerArea
 from ui.widgets.command_bar import CommandBar
 from ui.widgets.connect_page import ConnectPage
 from ui.widgets.console_header import LEVEL_CHOICES, ConsoleHeader
 from ui.widgets.console_view import ConsoleView
+from ui.widgets.plot_view import PlotView
 from ui.widgets.search_bar import SearchBar
 from ui.widgets.status_bar import DeviceStatusBar
 from ui.widgets.status_dot import LinkState
 from ui.widgets.tab_toolbar import TabToolbar
 from ui.widgets.toast import Toast
+from updater.usage import Feature
 
 _PORT = "PORT0"
 _BAUD = 115200
 _BURST_LINES = 5_000
 _DESCRIPTION = "Bench adapter"
 _NOTICE = "[WireTrace] "
+_OTHER_PORT = "PORT1"
+#: A port with no USB identity, found again by its name.
+_NAMED = PortIdentity(_PORT)
+#: Long enough for several looks at the port list.
+_POLLS_WAITED = RECONNECT_POLL_INTERVAL_MS * 4 / 1000
+_SHORT_MINUTE_MS = 200
+#: Enough lines for the plot to find the values.
+_PLOT_LINES = 60
 
 
 def _port_info(device: str = _PORT, description: str = _DESCRIPTION) -> PortInfo:
@@ -70,7 +86,9 @@ def tab(
     port: LoopbackPort,
 ) -> DeviceTab:
     theme_manager.apply_theme(ThemeID.LIGHT)
-    device_tab = DeviceTab(theme_manager, config, transport_factory=port.factory)
+    device_tab = DeviceTab(
+        theme_manager, config, transport_factory=port.factory, read_ports=port.identities,
+    )
     device_tab.show()
     qapp.processEvents()
     yield device_tab
@@ -132,6 +150,29 @@ def _banners(tab: DeviceTab) -> BannerArea:
 
 def _status(tab: DeviceTab) -> list[str]:
     return tab.findChild(DeviceStatusBar).texts()
+
+
+def _reconnect_off(config: ConfigManager, tab: DeviceTab) -> None:
+    config.reconnect = False
+    tab.apply_preferences()
+
+
+def _run_for(qapp: QApplication, seconds: float) -> None:
+    """Run the event loop for ``seconds``: for what must not happen."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.002)
+
+
+def _can_send(tab: DeviceTab) -> bool:
+    bar = tab.findChild(CommandBar)
+    return all(field.isEnabled() for field in bar.findChildren(QLineEdit))
+
+
+def _usb(name: str, location: str) -> PortIdentity:
+    """A port of a CH340 adapter, which has no serial number."""
+    return PortIdentity(name, 0x1A86, 0x7523, None, location)
 
 
 def _request_connection(tab: DeviceTab) -> None:
@@ -265,7 +306,7 @@ class TestConnection:
         assert tab.is_connected is False
         assert tab.has_session is False
         assert banner.title_label.text() == f"Could not open {_PORT}"
-        assert banner.detail_label.text() == "Access denied"
+        assert banner.detail_label.text() == "Access denied."
         assert _status(tab)[0] == "No device connected"
 
     def test_a_successful_connection_removes_the_report_of_a_failed_one(self, qapp, tab, port):
@@ -317,10 +358,13 @@ class TestConnection:
 
         assert _console_texts(tab) == [f"line {n}" for n in range(200)]
 
-    def test_unplugged_device_is_reported_in_the_tab(self, qapp, tab, port, monkeypatch):
+    def test_unplugged_device_is_reported_in_the_tab_with_reconnect_off(
+        self, qapp, tab, port, config, monkeypatch,
+    ):
         monkeypatch.setattr(
             QMessageBox, "exec", lambda box: pytest.fail("a lost connection must not open a dialog"),
         )
+        _reconnect_off(config, tab)
         _connect(qapp, tab)
         port.feed(b"last words\n")
         _wait_for_lines(qapp, tab, 1)
@@ -336,7 +380,8 @@ class TestConnection:
         assert _console_texts(tab) == ["last words", f"{_NOTICE}Connection lost."]
         assert _status(tab)[1].startswith(f"{_PORT}, lost at ")
 
-    def test_connect_again_on_the_banner_reconnects(self, qapp, tab, port):
+    def test_connect_again_on_the_banner_reconnects(self, qapp, tab, port, config):
+        _reconnect_off(config, tab)
         _connect(qapp, tab)
         port.transport.drop()
         wait_until(qapp, lambda: not tab.is_connected)
@@ -369,6 +414,394 @@ class TestConnection:
         assert banner.detail_label.text() == "Framing error. The connection is still open."
         banner.close_button.click()
         assert _banners(tab).keys() == []
+
+
+class TestReconnect:
+    """A lost board is waited for, and taken back only when it is the same one."""
+
+    @staticmethod
+    def _connected_to(qapp, tab, port, identity: PortIdentity) -> None:
+        port.present = [identity]
+        _connect(qapp, tab)
+        wait_until(qapp, lambda: tab._watcher.board is not None)
+
+    @staticmethod
+    def _unplug(qapp, tab, port) -> None:
+        port.present = []
+        port.transport.drop()
+        wait_until(qapp, lambda: tab.is_waiting)
+
+    @staticmethod
+    def _unplug_leaving(qapp, tab, port, left: list[PortIdentity]) -> None:
+        port.present = list(left)
+        port.transport.drop()
+        wait_until(qapp, lambda: tab.is_waiting)
+
+    def test_a_lost_board_is_waited_for(self, qapp, tab, port):
+        states: list[LinkState] = []
+        tab.link_state_changed.connect(states.append)
+        self._connected_to(qapp, tab, port, _NAMED)
+        port.feed(b"before\n")
+        _wait_for_lines(qapp, tab, 1)
+
+        self._unplug(qapp, tab, port)
+
+        assert tab.is_connected
+        assert states[-1] is LinkState.WAITING
+        banner = _banners(tab).banner("waiting")
+        assert banner.title_label.text() == (
+            f"Connection to {_PORT} lost. Waiting for the same board to return."
+        )
+        assert banner.detail_label.text() == "The session continues once it is back."
+        assert [button.text() for button in banner.action_buttons] == ["Stop waiting"]
+        assert banner.close_button is None or not banner.close_button.isVisible()
+        assert _status(tab)[0] == "Waiting"
+        assert _status(tab)[1].startswith(f"for {_PORT} since ")
+        assert not _can_send(tab)
+        _wait_for_lines(qapp, tab, 2)
+        assert _console_texts(tab)[-1].startswith(f"{_NOTICE}Connection to {_PORT} lost: ")
+
+    def test_a_passing_error_is_cleared_once_the_connection_is_lost(self, qapp, tab, port):
+        self._connected_to(qapp, tab, port, _NAMED)
+        tab._on_serial_error("A device attached to the system is not functioning")
+        assert _banners(tab).banner("serial") is not None
+
+        self._unplug(qapp, tab, port)
+
+        assert _banners(tab).keys() == ["waiting"]
+
+    def test_the_board_back_on_its_port_continues_the_same_log(
+        self, qapp, tab, port, accept_dialogs,
+    ):
+        self._connected_to(qapp, tab, port, _NAMED)
+        _start_log(tab)
+        port.feed(b"before\n")
+        _wait_for_lines(qapp, tab, 1)
+        self._unplug(qapp, tab, port)
+
+        port.present = [_NAMED]
+        wait_until(qapp, lambda: not tab.is_waiting)
+        port.feed(b"after\n")
+        _wait_for_last_line(qapp, tab, "after")
+
+        assert tab.is_connected and tab.is_logging
+        assert tab.link_state is LinkState.LOGGING
+        assert _banners(tab).keys() == []
+        assert Toast.of(tab).message.startswith("Reconnected after ")
+        assert Toast.of(tab).message.endswith(" s, continuing the same log")
+        assert _status(tab)[0] == _PORT
+        assert _can_send(tab)
+        _stop_log(tab)
+        texts = [line_text(line) for line in log_body(str(_only_file(accept_dialogs, "*.txt")))]
+        assert texts[0] == "before"
+        assert texts[1].startswith(f"{_NOTICE}Connection to {_PORT} lost: ")
+        assert texts[2].startswith(f"{_NOTICE}Reconnected on {_PORT} after ")
+        assert texts[2].endswith(
+            "identified by port name; this port has no USB identity. Anything the board "
+            "sent while it was disconnected was not received."
+        )
+        assert texts[3] == "after"
+
+    def test_a_log_started_while_waiting_holds_what_comes_after_the_return(
+        self, qapp, tab, port, accept_dialogs,
+    ):
+        self._connected_to(qapp, tab, port, _NAMED)
+        self._unplug(qapp, tab, port)
+
+        _start_log(tab)
+        assert tab.is_logging
+        port.present = [_NAMED]
+        wait_until(qapp, lambda: not tab.is_waiting)
+        port.feed(b"after\n")
+        _wait_for_last_line(qapp, tab, "after")
+        _stop_log(tab)
+
+        texts = [line_text(line) for line in log_body(str(_only_file(accept_dialogs, "*.txt")))]
+        assert texts[0].startswith(f"{_NOTICE}Reconnected on {_PORT} after ")
+        assert texts[1:] == ["after"]
+
+    def test_a_port_without_usb_identity_is_not_taken_by_name_when_that_is_off(
+        self, qapp, tab, port, config,
+    ):
+        config.reconnect_by_port_name = False
+        tab.apply_preferences()
+        self._connected_to(qapp, tab, port, _NAMED)
+        self._unplug(qapp, tab, port)
+
+        port.present = [_NAMED]
+        _run_for(qapp, _POLLS_WAITED)
+
+        assert tab.is_waiting
+
+    def test_a_board_of_the_same_model_elsewhere_is_asked_about(self, qapp, tab, port):
+        self._connected_to(qapp, tab, port, _usb(_PORT, "1-1"))
+        self._unplug(qapp, tab, port)
+        titles: list[str] = []
+        tab.title_changed.connect(titles.append)
+
+        port.present = [_usb(_OTHER_PORT, "1-2")]
+        wait_until(qapp, lambda: _banners(tab).banner("reconnect-ask") is not None)
+        banner = _banners(tab).banner("reconnect-ask")
+        assert banner.title_label.text() == (
+            f"A board of the same model appeared on {_OTHER_PORT}. "
+            "Is it the board this tab was connected to?"
+        )
+        assert [button.text() for button in banner.action_buttons] == [
+            "Reconnect", "Not this board",
+        ]
+
+        banner.action_buttons[0].click()
+        wait_until(qapp, lambda: not tab.is_waiting)
+
+        assert tab.port_name == _OTHER_PORT
+        assert titles[-1] == _OTHER_PORT
+        assert _banners(tab).keys() == []
+        wait_until(qapp, lambda: any(
+            text.startswith(f"{_NOTICE}Reconnected on {_OTHER_PORT}")
+            and "confirmed as the same board by you" in text
+            for text in _console_texts(tab)
+        ))
+
+    def test_a_port_that_will_not_open_is_tried_again_after_a_growing_pause(self, qapp, tab, port):
+        import time
+
+        self._connected_to(qapp, tab, port, _NAMED)
+        self._unplug(qapp, tab, port)
+        port.refuse_with = "Access denied"
+        attempts = [0]
+        opening = tab._pipeline._worker._transport_factory
+
+        def counting(*args, **kwargs):
+            attempts[0] += 1
+            return opening(*args, **kwargs)
+
+        tab._pipeline._worker._transport_factory = counting
+        port.present = [_NAMED]
+        end = time.monotonic() + 2.0
+        while time.monotonic() < end:
+            qapp.processEvents()
+
+        # At once, then after 0.5 s and 1 s more: never a tight loop.
+        assert 1 <= attempts[0] <= 3
+        assert tab.is_waiting
+        port.refuse_with = ""
+
+    def test_a_confirmed_board_that_will_not_open_yet_is_not_asked_about_again(
+        self, qapp, tab, port,
+    ):
+        import time
+
+        self._connected_to(qapp, tab, port, _usb(_PORT, "1-1"))
+        self._unplug(qapp, tab, port)
+        other = _usb(_OTHER_PORT, "1-2")
+        port.present = [other]
+        wait_until(qapp, lambda: _banners(tab).banner("reconnect-ask") is not None)
+        port.refuse_with = "Access denied"
+
+        _banners(tab).banner("reconnect-ask").action_buttons[0].click()
+        end = time.monotonic() + 2.0
+        asked_again = False
+        while time.monotonic() < end:
+            qapp.processEvents()
+            asked_again = asked_again or _banners(tab).banner("reconnect-ask") is not None
+        port.refuse_with = ""
+        wait_until(qapp, lambda: not tab.is_waiting)
+
+        assert not asked_again
+        assert tab.port_name == _OTHER_PORT
+
+    def test_the_board_back_in_its_socket_replaces_a_question(self, qapp, tab, port):
+        mine = _usb(_PORT, "1-1")
+        self._connected_to(qapp, tab, port, mine)
+        self._unplug(qapp, tab, port)
+        port.present = [_usb(_OTHER_PORT, "1-2")]
+        wait_until(qapp, lambda: _banners(tab).banner("reconnect-ask") is not None)
+
+        port.present = [_usb(_OTHER_PORT, "1-2"), mine]
+        wait_until(qapp, lambda: not tab.is_waiting)
+
+        assert tab.port_name == _PORT
+        assert _banners(tab).banner("reconnect-ask") is None
+
+    def test_a_board_already_there_when_the_board_was_lost_is_never_asked_about(
+        self, qapp, tab, port,
+    ):
+        mine, beside = _usb(_PORT, "1-1"), _usb(_OTHER_PORT, "1-2")
+        self._connected_to(qapp, tab, port, mine)
+        port.present = [mine, beside]
+        self._unplug_leaving(qapp, tab, port, [beside])
+        _run_for(qapp, _POLLS_WAITED)
+
+        assert _banners(tab).banner("reconnect-ask") is None
+        port.present = [beside, mine]
+        wait_until(qapp, lambda: not tab.is_waiting)
+        assert tab.port_name == _PORT
+
+    def test_a_question_about_a_port_that_has_gone_is_withdrawn(self, qapp, tab, port):
+        self._connected_to(qapp, tab, port, _usb(_PORT, "1-1"))
+        self._unplug(qapp, tab, port)
+        port.present = [_usb(_OTHER_PORT, "1-2")]
+        wait_until(qapp, lambda: _banners(tab).banner("reconnect-ask") is not None)
+
+        port.present = []
+        wait_until(qapp, lambda: _banners(tab).banner("reconnect-ask") is None)
+
+        assert tab.is_waiting
+
+    def test_a_board_that_drops_as_soon_as_it_is_opened_is_still_known(self, qapp, tab, port):
+        import time
+
+        mine = _usb(_PORT, "1-1")
+        port.present = [mine]
+
+        def slow_read() -> list[PortIdentity]:
+            time.sleep(0.15)
+            return list(port.present)
+
+        tab._watcher._read = slow_read
+        # The board re-enumerates the moment its port is opened.
+        tab.connection_changed.connect(lambda on: on and port.present.clear())
+
+        _connect(qapp, tab)
+        wait_until(qapp, lambda: tab._watcher.board is not None)
+
+        assert tab._watcher.board.identity == mine
+
+    def test_after_a_return_on_another_port_its_description_is_shown(
+        self, qapp, tab, port, ports,
+    ):
+        self._connected_to(qapp, tab, port, _usb(_PORT, "1-1"))
+        self._unplug(qapp, tab, port)
+        ports.append(_port_info(_OTHER_PORT, "Second adapter"))
+        port.present = [_usb(_OTHER_PORT, "1-2")]
+        wait_until(qapp, lambda: _banners(tab).banner("reconnect-ask") is not None)
+
+        _banners(tab).banner("reconnect-ask").action_buttons[0].click()
+        wait_until(qapp, lambda: not tab.is_waiting)
+
+        assert tab._port_description == "Second adapter"
+        assert tab._toolbar._port.currentText() == f"{_OTHER_PORT}{NAME_SEPARATOR}Second adapter"
+        assert tab._watcher.board.identity == _usb(_OTHER_PORT, "1-2")
+
+    def test_a_board_declined_is_not_asked_about_again(self, qapp, tab, port):
+        self._connected_to(qapp, tab, port, _usb(_PORT, "1-1"))
+        self._unplug(qapp, tab, port)
+        port.present = [_usb(_OTHER_PORT, "1-2")]
+        wait_until(qapp, lambda: _banners(tab).banner("reconnect-ask") is not None)
+
+        _banners(tab).banner("reconnect-ask").action_buttons[1].click()
+        _run_for(qapp, _POLLS_WAITED)
+
+        assert tab.is_waiting
+        assert _banners(tab).banner("reconnect-ask") is None
+
+    def test_a_board_found_but_not_ready_is_tried_again(self, qapp, tab, port):
+        self._connected_to(qapp, tab, port, _NAMED)
+        self._unplug(qapp, tab, port)
+        port.refuse_with = "Access denied"
+
+        port.present = [_NAMED]
+        banner_detail = lambda: _banners(tab).banner("waiting").detail_label.text()  # noqa: E731
+        wait_until(qapp, lambda: banner_detail() == f"Found on {_PORT}, not yet ready: Access denied.")
+        port.refuse_with = ""
+        wait_until(qapp, lambda: not tab.is_waiting)
+
+        assert tab.is_connected
+
+    def test_stop_waiting_ends_the_session_as_lost(self, qapp, tab, port):
+        self._connected_to(qapp, tab, port, _NAMED)
+        self._unplug(qapp, tab, port)
+        since = _status(tab)[1].removeprefix(f"for {_PORT} since ")
+
+        _banners(tab).banner("waiting").action_buttons[0].click()
+        wait_until(qapp, lambda: not tab.is_connected)
+
+        assert not tab.is_waiting
+        assert tab.link_state is LinkState.IDLE
+        assert _banners(tab).keys() == ["lost"]
+        assert _banners(tab).banner("lost").title_label.text() == (
+            f"The connection to {_PORT} was lost at {since}"
+        )
+        assert _status(tab)[1] == f"{_PORT}, lost at {since}"
+        assert _console_texts(tab)[-1] == f"{_NOTICE}Stopped waiting for the board on {_PORT} to return."
+
+    def test_waiting_stops_once_the_time_set_has_passed(
+        self, qapp, tab, port, config, monkeypatch,
+    ):
+        monkeypatch.setattr(device_tab_module, "MS_PER_MINUTE", _SHORT_MINUTE_MS)
+        config.reconnect_limit_minutes = 1
+        tab.apply_preferences()
+        self._connected_to(qapp, tab, port, _NAMED)
+
+        self._unplug(qapp, tab, port)
+        wait_until(qapp, lambda: not tab.is_connected)
+
+        assert _banners(tab).keys() == ["lost"]
+
+    def test_switching_reconnect_off_while_waiting_stops_waiting(self, qapp, tab, port, config):
+        self._connected_to(qapp, tab, port, _NAMED)
+        self._unplug(qapp, tab, port)
+
+        _reconnect_off(config, tab)
+        wait_until(qapp, lambda: not tab.is_connected)
+
+        assert not tab.is_waiting
+
+    def test_disconnect_while_waiting_ends_the_session(self, qapp, tab, port):
+        self._connected_to(qapp, tab, port, _NAMED)
+        self._unplug(qapp, tab, port)
+
+        _disconnect(qapp, tab)
+
+        assert not tab.is_waiting
+        assert _toolbar(tab).button_texts()["connect"] == "Connect"
+
+    def test_the_plot_line_is_broken_where_the_board_was_away(self, qapp, tab, port):
+        self._connected_to(qapp, tab, port, _NAMED)
+        tab.toggle_plot()
+        view = tab.findChild(PlotView)
+
+        def drawn() -> list[float | None]:
+            trace = view._traces.get("temp")
+            y = None if trace is None else trace.getData()[1]
+            return [] if y is None else [None if math.isnan(v) else v for v in y.tolist()]
+
+        before = list(range(_PLOT_LINES))
+        port.feed(b"".join(b"temp: %d\n" % n for n in before))
+        wait_until(qapp, lambda: len(drawn()) == _PLOT_LINES)
+        self._unplug(qapp, tab, port)
+
+        port.present = [_NAMED]
+        wait_until(qapp, lambda: not tab.is_waiting)
+        port.feed(b"temp: -1\n")
+
+        wait_until(qapp, lambda: drawn() == [*before, None, -1])
+
+    def test_a_board_another_tab_holds_is_never_offered(
+        self, qapp, tab, port, config, theme_manager,
+    ):
+        other_port = LoopbackPort()
+        other = DeviceTab(
+            theme_manager, config, transport_factory=other_port.factory,
+            read_ports=port.identities,
+        )
+        try:
+            self._connected_to(qapp, tab, port, _usb(_PORT, "1-1"))
+            port.present = [_usb(_PORT, "1-1"), _usb(_OTHER_PORT, "1-2")]
+            other.findChild(ConnectPage).connect_requested.emit(_OTHER_PORT, _BAUD)
+            wait_until(qapp, lambda: other.is_connected)
+
+            port.present = [_usb(_OTHER_PORT, "1-2")]
+            port.transport.drop()
+            wait_until(qapp, lambda: tab.is_waiting)
+            _run_for(qapp, _POLLS_WAITED)
+
+            assert _banners(tab).banner("reconnect-ask") is None
+        finally:
+            other.ordered_shutdown()
+            other.close()
+            other.deleteLater()
+            qapp.processEvents()
 
 
 class TestLogging:
@@ -404,8 +837,9 @@ class TestLogging:
         assert [line_text(line) for line in log_body(str(log))] == expected
 
     def test_device_lost_while_the_new_log_dialog_is_open_starts_no_log(
-        self, qapp, tab, port, accept_dialogs, monkeypatch,
+        self, qapp, tab, port, config, accept_dialogs, monkeypatch,
     ):
+        _reconnect_off(config, tab)
         _connect(qapp, tab)
 
         def unplug_then_accept(dialog):
@@ -496,7 +930,6 @@ class TestLogging:
         ]
         assert written == expected
 
-
     def test_running_log_is_shown_in_the_status_bar_and_on_the_tab(
         self, qapp, tab, port, accept_dialogs, opened_folders,
     ):
@@ -579,7 +1012,6 @@ class TestLogging:
         tab.open_log_folder()
 
         assert opened_folders == [Path(accept_dialogs)]
-
 
     def test_the_folder_a_log_was_started_in_is_offered_for_the_next_one(
         self, qapp, tab, port, config, monkeypatch, tmp_path,
@@ -761,7 +1193,6 @@ class TestExport:
             ["21.5", "-40"], ["21.6", "-41"],
         ]
 
-
     def test_finished_export_offers_its_folder(
         self, qapp, tab, port, accept_dialogs, opened_folders,
     ):
@@ -776,7 +1207,6 @@ class TestExport:
         assert Toast.of(tab).message == f"Exported 2 lines: {exported.name}"
         Toast.of(tab).trigger_action()
         assert opened_folders == [Path(accept_dialogs)]
-
 
     def test_export_choices_are_remembered_and_offered_next_time(
         self, qapp, tab, port, config, monkeypatch, tmp_path,
@@ -878,7 +1308,7 @@ class TestCommands:
 
         banner = _banners(tab).banner("command")
         assert banner.title_label.text() == "The command was not sent"
-        assert banner.detail_label.text() == "Write timeout"
+        assert banner.detail_label.text() == "Write timeout."
 
         tab.findChild(CommandBar).command_sent.emit("AT")
         assert _banners(tab).keys() == []
@@ -1163,9 +1593,7 @@ class TestDisplay:
         _connect(qapp, tab)
         tab.toggle_plot()
         port.feed(b"".join(b"temp: %d, rpm: %d\n" % (n, n * 2) for n in range(50)))
-        _wait_for_lines(qapp, tab, 50)
-
-        assert sorted(tab._plot_engine.columns) == ["rpm", "temp"]
+        wait_until(qapp, lambda: sorted(tab.plot.engine.columns) == ["rpm", "temp"])
 
 
 class TestConsoleMenu:
@@ -1284,3 +1712,125 @@ class TestClosing:
         monkeypatch.setattr(type(tab), "is_exporting", property(lambda self: True))
         assert tab.confirm_close() is False
         assert asked == ["An export is still being written"]
+
+
+class TestPortSettings:
+    _LINE = LineSettings(7, Parity.EVEN, StopBits.ONE, FlowControl.NONE, dtr_on_open=False)
+
+    def test_a_port_is_opened_with_the_settings_it_last_used(self, qapp, tab, ports, port, config):
+        PortMemory(config).remember(_PORT, baud_rate=_BAUD, line=self._LINE)
+        ports.append(_port_info())
+        tab.refresh_ports()
+
+        assert tab.findChild(ConnectPage).port_settings_text == "7E1"
+        tab.connect_device()
+        wait_until(qapp, lambda: tab.is_connected)
+
+        assert port.transport.line == self._LINE
+        assert _status(tab)[1] == f"{_BAUD} 7E1"
+
+    def test_settings_saved_in_the_dialog_are_used_and_remembered(
+        self, qapp, tab, ports, port, config, monkeypatch,
+    ):
+        ports.append(_port_info())
+        tab.refresh_ports()
+        monkeypatch.setattr(PortSettingsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(
+            PortSettingsDialog, "settings", property(lambda self: TestPortSettings._LINE),
+        )
+
+        tab.edit_port_settings()
+        tab.connect_device()
+        wait_until(qapp, lambda: tab.is_connected)
+
+        assert port.transport.line == self._LINE
+        assert PortMemory(config).get(_PORT).line == self._LINE
+
+    def test_settings_cannot_change_while_connected(self, qapp, tab, port, monkeypatch):
+        _connect(qapp, tab)
+        opened: list[bool] = []
+        monkeypatch.setattr(PortSettingsDialog, "exec", lambda self: opened.append(True) or 0)
+
+        tab.edit_port_settings()
+
+        assert opened == []
+
+    def test_lines_from_the_toolbar_reach_the_port_and_the_status_bar(self, qapp, tab, port):
+        _connect(qapp, tab)
+        toolbar = _toolbar(tab)
+        bar = tab.findChild(DeviceStatusBar)
+
+        toolbar.dtr_toggled.emit(False)
+        wait_until(qapp, lambda: port.transport.dtr is False)
+        port.transport.inputs = InputLines(cts=True, dsr=True, dcd=False, ri=False)
+        wait_until(qapp, lambda: bar.input_line_states().get("CTS") is True)
+
+        assert bar.input_line_states() == {"CTS": True, "DSR": True, "DCD": False, "RI": False}
+        assert "DTR" in toolbar.line_menu_texts()
+        _wait_for_last_line(qapp, tab, "[WireTrace] DTR set off")
+
+    def test_input_lines_are_hidden_after_a_disconnect(self, qapp, tab, port):
+        _connect(qapp, tab)
+        _disconnect(qapp, tab)
+
+        assert tab.findChild(DeviceStatusBar).input_line_states() == {}
+
+
+class TestUsageNoted:
+    """Each 2.1 feature is noted where it is used, and only then."""
+
+    @pytest.fixture
+    def noted(self, tab: DeviceTab) -> list[object]:
+        found: list[object] = []
+        tab.usage_noted.connect(found.append)
+        return found
+
+    def test_the_usual_framing_is_not_noted_and_any_other_is(
+        self, qapp, tab, ports, port, config, noted,
+    ):
+        _connect(qapp, tab)
+        assert Feature.LINE_SETTINGS not in noted
+        _disconnect(qapp, tab)
+
+        PortMemory(config).remember(_PORT, baud_rate=_BAUD, line=TestPortSettings._LINE)
+        ports.append(_port_info())
+        tab.refresh_ports()
+        tab.connect_device()
+        wait_until(qapp, lambda: tab.is_connected)
+        assert Feature.LINE_SETTINGS in noted
+
+    def test_control_lines_are_noted_when_set_from_the_toolbar(self, qapp, tab, port, noted):
+        _connect(qapp, tab)
+        assert Feature.CONTROL_LINES not in noted
+
+        _toolbar(tab).rts_toggled.emit(False)
+
+        assert Feature.CONTROL_LINES in noted
+
+    def test_a_board_back_is_noted(self, qapp, tab, port, noted):
+        TestReconnect._connected_to(qapp, tab, port, _NAMED)
+        TestReconnect._unplug(qapp, tab, port)
+        assert Feature.RECONNECT not in noted
+
+        port.present = [_NAMED]
+        wait_until(qapp, lambda: not tab.is_waiting)
+
+        assert Feature.RECONNECT in noted
+
+    def test_highlights_and_ansi_colours_are_noted_once_drawn(
+        self, qapp, tab, port, config, noted,
+    ):
+        from app.modules import ANSI_COLOURS, HIGHLIGHTS, ModuleSettings
+        from core.highlight_rules import HighlightRule, HighlightStore
+
+        ModuleSettings(config).set_enabled(ANSI_COLOURS, True)
+        ModuleSettings(config).set_enabled(HIGHLIGHTS, True)
+        HighlightStore(config).set_rules((HighlightRule("boot", 1),))
+        tab.apply_preferences()
+        _connect(qapp, tab)
+        port.feed(b"\x1b[31mred\x1b[0m\nbooting\n")
+        wait_until(qapp, lambda: tab.console.total_count == 2)
+        tab.console.viewport().repaint()
+
+        wait_until(qapp, lambda: {Feature.HIGHLIGHTS, Feature.ANSI} <= set(noted))
+        assert noted.count(Feature.HIGHLIGHTS) == 1

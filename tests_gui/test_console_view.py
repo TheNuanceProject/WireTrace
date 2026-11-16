@@ -21,6 +21,7 @@ from app.constants import (
     TimestampMode,
 )
 from core.framing import HexFramer
+from core.highlight_rules import HighlightRule
 from core.records import LineRecord, command_record, notice_record
 from tests_gui.support import pixel
 from ui.themes import tokens
@@ -55,6 +56,8 @@ def console(qapp: QApplication, theme_manager: ThemeManager) -> ConsoleView:
     register_bundled_fonts()
     theme_manager.apply_theme(ThemeID.LIGHT)
     view = ConsoleView()
+    # The rows these tests measure carry the time of day.
+    view.set_timestamp_mode(TimestampMode.ABSOLUTE)
     view.resize(900, 300)
     view.show()
     qapp.processEvents()
@@ -73,6 +76,15 @@ def point_at(view: ConsoleView, line: int, col: int) -> QPoint:
 
 
 # ── Rows ─────────────────────────────────────────────────────────────────
+
+
+def test_a_new_console_shows_the_date_with_the_time(qapp):
+    view = ConsoleView()
+    view.append_records([record("boot")])
+
+    assert view._row_text(view._entry(view._last_row())).startswith(
+        START.strftime("%Y-%m-%d %H:%M:%S.")
+    )
 
 
 class TestRows:
@@ -117,6 +129,25 @@ class TestRows:
         console.append_records([record("a"), record("b", offset_ms=123_456_789_000)])
         console.set_timestamp_mode(TimestampMode.RELATIVE)
         assert console.display_lines()[1] == "+123456789.000 s       b"
+
+    def test_date_and_time_is_shown_as_the_log_writes_it(self, console):
+        console.append_records([record("a"), record("b", offset_ms=150)])
+        console.set_timestamp_mode(TimestampMode.DATE_TIME)
+
+        assert console.display_lines() == [
+            "2026-10-02 22:01:50.935       a",
+            "2026-10-02 22:01:51.085       b",
+        ]
+
+    def test_the_wider_date_column_moves_selection_and_search_with_it(self, console):
+        console.append_records([record("find me")])
+        console.set_search("find")
+        narrow = console.display_lines()[0].index("find")
+        console.set_timestamp_mode(TimestampMode.DATE_TIME)
+
+        wide = console.display_lines()[0].index("find")
+        assert console.match_count == 1
+        assert wide - narrow == len("YYYY-MM-DD ")
 
     def test_tab_is_drawn_to_the_next_tab_stop(self, console):
         console.append_records([record("a\tbb\tc")])
@@ -568,7 +599,7 @@ class TestSearch:
             record(f"crt err wrn inf dbg s {n} tab\there sS", tags[n % len(tags)], offset_ms=n * 37)
             for n in range(200)
         ])
-        for mode in (TimestampMode.ABSOLUTE, TimestampMode.RELATIVE):
+        for mode in TimestampMode:
             console.set_timestamp_mode(mode)
             lines = console.display_lines()
             for needle in ("c", "rt", "t  ", "s", "s  ", "g", "f", "n", "e", "w", "d", "b", "i", "x", "here", "1"):
@@ -791,6 +822,106 @@ class TestDrawing:
         theme_manager.apply_theme(ThemeID.DARK)
         qapp.processEvents()
         assert self.background(console, 0) == QColor(tokens.DARK.paper)
+
+
+class TestColoursAndHighlights:
+    @staticmethod
+    def colour_at(console: ConsoleView, row: int | None = None) -> tuple[dict[int, str], int]:
+        """The colour drawn at each column of a row (the last by default), and
+        where its message starts."""
+        entry = console._entry(console._last_row() if row is None else row)
+        text = console._row_text(entry)
+        prefix = len(text) - console._message_cols(entry.record.text)
+        colours = {
+            col: colour.name()
+            for start, end, colour in console._spans(entry, text, prefix)
+            for col in range(start, end)
+        }
+        return colours, prefix
+
+    def test_ansi_colours_are_drawn_only_when_switched_on(self, qapp, console):
+        coloured = LineRecord(START, "ok fail", TAG_DATA, colours=((0, 2, 2), (3, 7, 1)))
+        console.append_records([coloured])
+        palette = tokens.palette()
+
+        plain, prefix = self.colour_at(console)
+        assert plain[prefix] == QColor(palette.text).name()
+
+        console.set_ansi_colours(True)
+        shown, prefix = self.colour_at(console)
+        assert shown[prefix] == QColor(palette.ansi[2]).name()
+        assert shown[prefix + 2] == QColor(palette.text).name()
+        assert shown[prefix + 4] == QColor(palette.ansi[1]).name()
+        assert sorted(shown) == list(range(prefix + 7))
+
+    def test_ansi_colours_follow_the_columns_tabs_take(self, qapp, console):
+        console.set_ansi_colours(True)
+        console.append_records([LineRecord(START, "a\tb", TAG_DATA, colours=((2, 3, 4),))])
+
+        shown, prefix = self.colour_at(console)
+
+        assert shown[prefix + CONSOLE_TAB_WIDTH] == QColor(tokens.palette().ansi[4]).name()
+        assert shown[prefix] == QColor(tokens.palette().text).name()
+
+    def test_a_long_line_of_many_colours_and_tabs_is_coloured_once_per_row(self, qapp, console):
+        from core.ansi import AnsiColours
+
+        text, colours = AnsiColours().decode(b"\t\x1b[31mA\x1b[32mB" * 5_000)
+        console.set_ansi_colours(True)
+        console.append_records([LineRecord(START, text, TAG_DATA, colours=colours)])
+        found: list[int] = []
+        finding = console._spans
+        console._spans = lambda *args: found.append(1) or finding(*args)
+
+        for _ in range(3):
+            console.viewport().repaint()
+        assert len(found) == 1
+
+        shown, prefix = self.colour_at(console)
+        ansi = tokens.palette().ansi
+        last_a = prefix + 5_000 * CONSOLE_TAB_WIDTH
+        assert shown[last_a] == QColor(ansi[1]).name()
+        assert shown[last_a + 1] == QColor(ansi[2]).name()
+
+    def test_colours_kept_for_a_row_follow_a_change_of_setting(self, qapp, console):
+        console.append_records([LineRecord(START, "fail", TAG_DATA, colours=((0, 4, 1),))])
+        console.viewport().repaint()
+
+        console.set_ansi_colours(True)
+        row = console._last_row()
+        entry = console._entry(row)
+        text = console._row_text(entry)
+        prefix = len(text) - console._message_cols(entry.record.text)
+        spans = console._spans_of(row, entry, text, prefix)
+
+        assert spans[-1][2].name() == QColor(tokens.palette().ansi[1]).name()
+
+    def test_a_highlighted_line_takes_its_rules_colour_and_a_mark(self, qapp, console):
+        console.set_ansi_colours(True)
+        console.set_highlights((HighlightRule("panic", 6), HighlightRule("boot", 3)))
+        console.append_records([
+            record("Guru Meditation: PANIC in core 0", "ERROR"),
+            LineRecord(START, "booting", TAG_DATA, colours=((0, 7, 1),)),
+            notice_record("a boot notice is never highlighted", START),
+        ])
+        qapp.processEvents()
+        palette = tokens.palette()
+        entries = [console._entry(row) for row in range(console._row_base, console._last_row() + 1)]
+
+        assert [console.highlight_of(entry.record) for entry in entries] == [6, 3, None]
+        booting, prefix = self.colour_at(console, console._row_base + 1)
+        assert set(booting[col] for col in range(prefix, prefix + 7)) == {
+            QColor(palette.highlights[2]).name()
+        }
+        assert pixel(console.viewport(), 0, 2) == QColor(palette.highlights[5])
+
+    def test_clearing_the_rules_ends_the_highlights(self, qapp, console):
+        console.set_highlights((HighlightRule("x", 1),))
+        console.append_records([record("x marks")])
+
+        console.set_highlights(())
+
+        assert console.highlight_of(console._entry(console._last_row()).record) is None
 
 
 # ── Cost ─────────────────────────────────────────────────────────────────

@@ -290,10 +290,8 @@ def test_an_installation_that_cannot_update_itself_says_so(
         prepare_update(tmp_path / "installer", _release(b""))
 
 
-def test_the_installer_mutex_is_only_for_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(install.sys, "platform", "linux")
-
-    assert install.hold_installer_mutex() is False
+def test_the_installer_mutex_is_only_for_windows() -> None:
+    assert install.hold_installer_mutex("linux") is False
 
 
 # ── The answer the Windows installer recorded ────────────────────────────────

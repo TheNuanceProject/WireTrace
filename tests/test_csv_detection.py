@@ -15,7 +15,7 @@ from app.constants import (
     STRUCTURE_MAX_LINE_CHARACTERS,
     CSVMode,
 )
-from core.csv_engine import CSVEngine
+from core.csv_engine import CSVEngine, csv_cell
 
 _TS = "2026-01-01 10:00:00.000"
 
@@ -215,19 +215,19 @@ class TestRawMode:
 
 class TestCsvEscaping:
     def test_comma_triggers_quotes(self):
-        assert CSVEngine._csv_escape("a,b") == '"a,b"'
+        assert csv_cell("a,b") == '"a,b"'
 
     def test_quote_is_doubled(self):
-        assert CSVEngine._csv_escape('say "hi"') == '"say ""hi"""'
+        assert csv_cell('say "hi"') == '"say ""hi"""'
 
     def test_plain_value_unchanged(self):
-        assert CSVEngine._csv_escape("22.4") == "22.4"
+        assert csv_cell("22.4") == "22.4"
 
     def test_newline_triggers_quotes(self):
-        assert CSVEngine._csv_escape("a\nb") == '"a\nb"'
+        assert csv_cell("a\nb") == '"a\nb"'
 
     def test_empty_value(self):
-        assert CSVEngine._csv_escape("") == ""
+        assert csv_cell("") == ""
 
 
 class TestHeader:

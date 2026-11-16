@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
+from types import TracebackType
 
 from version import APP_NAME, APP_VERSION
 
@@ -54,11 +56,34 @@ _LATE_IMPORTS: tuple[tuple[str, str], ...] = (
 
 
 def setup_logging() -> None:
-    """Configure application logging."""
+    """Configure application logging.
+
+    An error nothing caught, on the main thread, in a Qt slot or on any
+    other thread, is logged with its traceback like every other error.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    sys.excepthook = _log_uncaught
+    threading.excepthook = _log_uncaught_in_thread
+
+
+def _log_uncaught(kind: type[BaseException], error: BaseException, trace: TracebackType | None) -> None:
+    if issubclass(kind, KeyboardInterrupt):
+        sys.__excepthook__(kind, error, trace)
+        return
+    logging.getLogger(__name__).critical("Uncaught error", exc_info=(kind, error, trace))
+
+
+def _log_uncaught_in_thread(args: threading.ExceptHookArgs) -> None:
+    if args.exc_value is None:
+        return
+    name = args.thread.name if args.thread is not None else "unknown"
+    logging.getLogger(__name__).critical(
+        "Uncaught error on thread %s", name,
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
     )
 
 

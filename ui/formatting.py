@@ -7,6 +7,8 @@ import os
 from collections.abc import Sequence
 from datetime import datetime
 
+from core.serial_settings import LineStates
+
 _BYTES_PER_UNIT = 1024
 _SIZE_UNITS = ("bytes", "KB", "MB", "GB", "TB")
 _SECONDS_PER_MINUTE = 60
@@ -94,6 +96,13 @@ def format_count(count: int, singular: str, plural: str | None = None) -> str:
     return f"{count:,} {noun}"
 
 
+def shorten(text: str, limit: int) -> str:
+    """``text`` cut to at most ``limit`` characters, ending in "…" when cut."""
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)].rstrip() + "…"
+
+
 def describe_files(text_paths: Sequence[str], csv_paths: Sequence[str]) -> str:
     """The files a log or an export wrote, in a few words.
 
@@ -110,3 +119,17 @@ def describe_files(text_paths: Sequence[str], csv_paths: Sequence[str]) -> str:
     counts = " and ".join(format_count(len(group), kind) for group, kind in kinds if group)
     name = os.path.splitext(os.path.basename(paths[0]))[0]
     return f"{name}, in {counts}"
+
+
+_INPUT_LINES: tuple[tuple[str, str], ...] = (
+    ("cts", "CTS"), ("dsr", "DSR"), ("dcd", "DCD"), ("ri", "RI"),
+)
+
+
+def input_line_texts(states: LineStates | None) -> list[tuple[str, str]]:
+    """Each input line's name and its state: on, off, or not reported."""
+    texts = []
+    for field, name in _INPUT_LINES:
+        value = None if states is None else getattr(states.inputs, field)
+        texts.append((name, "not reported" if value is None else ("on" if value else "off")))
+    return texts

@@ -6,6 +6,7 @@ to the screen:
 
     port --> reader thread --+--> session writer thread --> files on disk
                              +--> display buffer --> GUI, on its own timer
+                             +--> one buffer per module that reads lines
 
   Reader thread
       Owns the serial port. Cuts the byte stream into lines, stamps
@@ -19,6 +20,11 @@ to the screen:
       A bounded queue the GUI empties at its own pace. If the GUI falls
       behind, the oldest undisplayed lines are skipped in the view and
       counted. The log is unaffected.
+
+  Module buffers
+      Each module that reads lines has a bounded queue of its own, like
+      the display buffer. A module that falls behind skips lines for
+      itself only; the console, the log and other modules are unaffected.
 
 ``DevicePipeline`` is the only object a device tab talks to. It lives
 on the GUI thread; every call either returns at once or is carried to
@@ -40,36 +46,54 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from app.constants import (
+    BREAK_DURATION_MS,
+    CONSUMER_MAX_CHARACTERS,
+    CONSUMER_MAX_LINES,
+    CONTROL_LINE_POLL_INTERVAL_MS,
     DEFAULT_LINE_ENDING,
     DISPLAY_MAX_CHARACTERS,
     HEX_IDLE_FLUSH_MS,
+    MS_PER_SECOND,
     SERIAL_ARRIVAL_SPREAD_MAX_MS,
     STATS_INTERVAL_MS,
     TAG_DATA,
+    TAG_NOTICE,
+    TAG_NOTICE_EVENT,
     DisplayMode,
     LineEnding,
 )
+from core.ansi import AnsiColours
 from core.export_job import ExportJob, ExportRequest, ExportResult
 from core.framing import HexFramer, LineFramer, decode_line, escape_control_characters
 from core.log_writer import LogProgress, LogRequest, LogStarted, LogSummary, SessionWriter
 from core.records import LineRecord, command_record, notice_record
+from core.reset_detector import ResetDetector
+from core.serial_settings import InputLines, LineSettings, LineStates
+from core.session_counters import SessionCounters, SessionFigures
+from core.session_spool import SpoolPosition, SpoolSnapshot
 from core.tag_detector import TagDetector
 from core.transport import Transport, open_serial_transport
 
 logger = logging.getLogger(__name__)
 
-#: Opens a transport on the calling thread. Returns ``(transport, "")``
-#: or ``(None, reason)``.
-TransportFactory = Callable[[str, int], tuple[Transport | None, str]]
+class TransportFactory(Protocol):
+    """Opens a transport on the calling thread: port, baud rate, line
+    settings and, to reopen a lost board, the driver its session used.
+    Returns ``(transport, "")`` or ``(None, reason)``."""
+
+    def __call__(
+        self, port: str, baud: int, line: LineSettings, driver: type[Transport] | None = None,
+    ) -> tuple[Transport | None, str]: ...
 
 _COMMAND_ENCODING = "utf-8"
-_MS_PER_SECOND = 1000
 _ARRIVAL_SPREAD_MAX = timedelta(milliseconds=SERIAL_ARRIVAL_SPREAD_MAX_MS)
 _ONE_MICROSECOND = timedelta(microseconds=1)
+_ON_OFF = {True: "on", False: "off"}
 
 
 def arrival_times(count: int, previous: datetime | None, now: datetime) -> list[datetime]:
@@ -200,8 +224,13 @@ class _ReaderWorker(QObject):
     opened = Signal(str, int)            # port, baud
     open_failed = Signal(str, str)       # port, reason
     closed = Signal(str, bool, object)   # port, unexpected, LogSummary | None
+    suspended = Signal(str, str)         # port, why the connection was lost
+    resumed = Signal(str, int, float)    # port, baud, seconds the board was away
+    resume_failed = Signal(str, str)     # port, reason
     transport_error = Signal(str)
     command_failed = Signal(str)
+    control_failed = Signal(str)
+    lines_changed = Signal(object)       # LineStates
     stats = Signal(int, int)             # lines in the last second, total lines
 
     def __init__(
@@ -214,9 +243,30 @@ class _ReaderWorker(QObject):
         self._writer = writer
         self._display = display
         self._transport_factory = transport_factory
+        # Replaced whole from the GUI thread, never changed in place, so
+        # the reader always sees a complete tuple.
+        self.consumers: tuple[DisplayBuffer, ...] = ()
+        # The figures of the session; read from any thread.
+        self.counters = SessionCounters()
+        self._restarts = ResetDetector()
+        self._detect_restarts = True
+        # The ANSI colours of the lines, followed only while switched on.
+        self._ansi: AnsiColours | None = None
+        # Reconnect: whether a lost connection waits for the board (the
+        # tab says), and while it does, when it was lost.
+        self._reconnect = False
+        self._lost_at: datetime | None = None
+        # The driver the session's port was opened with; a board found
+        # again is reopened with the same one.
+        self._driver: type[Transport] | None = None
 
         self._transport: Transport | None = None
         self._port_name = ""
+        self._line = LineSettings()
+        self._dtr = False
+        self._rts: bool | None = None
+        self._inputs = InputLines()
+        self._break_active = False
         self._display_mode = DisplayMode.TEXT
         self._line_framer = LineFramer()
         self._hex_framer = HexFramer()
@@ -227,6 +277,8 @@ class _ReaderWorker(QObject):
         # Timers are created on the reader thread, in ``start``.
         self._stats_timer: QTimer | None = None
         self._hex_idle_timer: QTimer | None = None
+        self._line_poll_timer: QTimer | None = None
+        self._break_timer: QTimer | None = None
 
         # Set by ``shutdown`` for the thread that is waiting on it.
         self.finished_shutdown = threading.Event()
@@ -246,12 +298,23 @@ class _ReaderWorker(QObject):
         self._hex_idle_timer.setInterval(HEX_IDLE_FLUSH_MS)
         self._hex_idle_timer.timeout.connect(self._flush_hex_row)
 
-    @Slot(str, int)
-    def open(self, port: str, baud: int) -> None:
+        self._line_poll_timer = QTimer(self)
+        self._line_poll_timer.setInterval(CONTROL_LINE_POLL_INTERVAL_MS)
+        self._line_poll_timer.timeout.connect(self._poll_input_lines)
+
+        self._break_timer = QTimer(self)
+        self._break_timer.setSingleShot(True)
+        self._break_timer.setInterval(BREAK_DURATION_MS)
+        self._break_timer.timeout.connect(self._release_break)
+
+    @Slot(str, int, object)
+    def open(self, port: str, baud: int, line: LineSettings) -> None:
         if self._transport is not None:
             self._finish(unexpected=False)
+        elif self._lost_at is not None:
+            self._end_waiting()
 
-        transport, reason = self._transport_factory(port, baud)
+        transport, reason = self._transport_factory(port, baud, line)
         if transport is None:
             # The recording of the previous session is left as it was,
             # so it can still be exported.
@@ -262,31 +325,93 @@ class _ReaderWorker(QObject):
         # bytes are delivered: they reach this thread through its event
         # loop, which does not run until this method returns.
         self._writer.begin_session()
+        self.counters.start(port, baud, datetime.now())
+        self._restarts.reset()
+        if self._ansi is not None:
+            self._ansi.reset()
         self._display.clear()
+        for consumer in self.consumers:
+            consumer.clear()
         self._line_framer = LineFramer()
         self._hex_framer = HexFramer()
         self._lines_since_report = 0
         self._total_lines = 0
         self._last_read_time = None
+        self._attach(transport, port, line)
+        self.opened.emit(port, baud)
+        self._report_lines()
 
+    def _attach(self, transport: Transport, port: str, line: LineSettings) -> None:
+        """Make ``transport`` the connection the session reads from."""
         transport.data_received.connect(self._on_bytes)
         transport.link_lost.connect(self._on_link_lost)
         transport.error_occurred.connect(self.transport_error)
         self._transport = transport
+        self._driver = type(transport)
         self._port_name = port
+        self._line = line
+        self._dtr = line.dtr_on_open
+        self._rts = line.rts_on_open if line.rts_is_manual else None
+        self._inputs = transport.input_lines()
+        self._break_active = False
         self._stats_timer.start()
-        self.opened.emit(port, baud)
+        self._line_poll_timer.start()
+
+    @Slot(bool)
+    def set_reconnect(self, on: bool) -> None:
+        """Whether a connection lost unexpectedly waits for the board to return."""
+        self._reconnect = on
+
+    @Slot(str, int, object, str, object)
+    def resume(
+        self, port: str, baud: int, line: LineSettings, basis: str, still_the_board: object,
+    ) -> None:
+        """Continue the session on ``port``, the board found again.
+
+        ``still_the_board`` is called once the port is open and before
+        anything is read from it; if it says the port no longer shows the
+        board that was found, the port is closed and nothing is recorded.
+        """
+        if self._lost_at is None or self._transport is not None:
+            return
+        transport, reason = self._transport_factory(port, baud, line, self._driver)
+        if transport is None:
+            self.resume_failed.emit(port, reason)
+            return
+        if not still_the_board():
+            transport.close()
+            transport.deleteLater()
+            self.resume_failed.emit(port, "the port no longer shows the board that was found")
+            return
+        # The notice is recorded before the port's first bytes, which reach
+        # this thread through its event loop after this method returns.
+        self._attach(transport, port, line)
+        back = self._stamp_now()
+        away = max(0.0, (back - self._lost_at).total_seconds())
+        self._lost_at = None
+        self.counters.back(back)
+        self._note(
+            f"Reconnected on {port} after {away:.3f} s, {basis}. Anything the board sent "
+            "while it was disconnected was not received.",
+            TAG_NOTICE_EVENT,
+        )
+        self.resumed.emit(port, baud, away)
+        self._report_lines()
 
     @Slot()
     def close(self) -> None:
         if self._transport is not None:
             self._finish(unexpected=False)
+        elif self._lost_at is not None:
+            self._end_waiting()
 
     @Slot()
     def shutdown(self) -> None:
         """Close the connection, if any, then confirm from this thread."""
         if self._transport is not None:
             self.shutdown_summary = self._finish(unexpected=False)
+        elif self._lost_at is not None:
+            self.shutdown_summary = self._end_waiting()
         self.finished_shutdown.set()
 
     @Slot(str, str)
@@ -300,7 +425,78 @@ class _ReaderWorker(QObject):
             self.command_failed.emit(reason)
             return
         echo = command_record(escape_control_characters(command), self._stamp_now())
-        self._deliver([echo], count_as_received=False)
+        self._deliver([echo])
+
+    @Slot(bool)
+    def set_dtr(self, active: bool) -> None:
+        if self._transport is None:
+            self.control_failed.emit("The device is not connected")
+            return
+        reason = self._transport.set_dtr(active)
+        if reason:
+            self.control_failed.emit(f"DTR could not be set: {reason}")
+        else:
+            self._dtr = active
+            self._note(f"DTR set {_ON_OFF[active]}", TAG_NOTICE_EVENT)
+        self._report_lines()
+
+    @Slot(bool)
+    def set_rts(self, active: bool) -> None:
+        if self._transport is None:
+            self.control_failed.emit("The device is not connected")
+            return
+        if not self._line.rts_is_manual:
+            self.control_failed.emit("RTS is driven by hardware flow control")
+            return
+        reason = self._transport.set_rts(active)
+        if reason:
+            self.control_failed.emit(f"RTS could not be set: {reason}")
+        else:
+            self._rts = active
+            self._note(f"RTS set {_ON_OFF[active]}", TAG_NOTICE_EVENT)
+        self._report_lines()
+
+    @Slot()
+    def send_break(self) -> None:
+        if self._transport is None:
+            self.control_failed.emit("The device is not connected")
+            return
+        if self._break_active:
+            return
+        reason = self._transport.set_break(True)
+        if reason:
+            self.control_failed.emit(f"The break could not be sent: {reason}")
+            return
+        self._break_active = True
+        self._note(f"Break sent for {BREAK_DURATION_MS} ms", TAG_NOTICE_EVENT)
+        self._break_timer.start()
+
+    @Slot()
+    def _release_break(self) -> None:
+        if not self._break_active:
+            return
+        self._break_active = False
+        if self._transport is not None:
+            reason = self._transport.set_break(False)
+            if reason:
+                self.control_failed.emit(f"The break could not be ended: {reason}")
+
+    @Slot()
+    def _poll_input_lines(self) -> None:
+        if self._transport is None:
+            return
+        inputs = self._transport.input_lines()
+        if inputs != self._inputs:
+            self._inputs = inputs
+            self._report_lines()
+
+    def _report_lines(self) -> None:
+        if self._transport is not None:
+            self.lines_changed.emit(LineStates(self._dtr, self._rts, self._inputs))
+
+    def _note(self, message: str, tag: str = TAG_NOTICE) -> None:
+        """Add a notice line, stamped now, to the session."""
+        self._deliver([notice_record(message, self._stamp_now(), tag)])
 
     @Slot(bool)
     def set_log_paused(self, paused: bool) -> None:
@@ -348,12 +544,16 @@ class _ReaderWorker(QObject):
             )]
         self._deliver(records)
 
-    @staticmethod
-    def _decode(lines: list[bytes]) -> list[str]:
-        return [text for raw in lines if (text := decode_line(raw)) is not None]
+    def _decode(self, lines: list[bytes]) -> list[str] | list[tuple[str, tuple]]:
+        """The texts of received lines; with ANSI colours on, each with its colours."""
+        if self._ansi is None:
+            return [text for raw in lines if (text := decode_line(raw)) is not None]
+        decode = self._ansi.decode
+        return [line for raw in lines if (line := decode(raw)) is not None]
 
-    def _records(self, texts: list[str], now: datetime) -> list[LineRecord]:
-        """Stamp and classify the texts of one read."""
+    def _records(self, texts: list, now: datetime) -> list[LineRecord]:
+        """Stamp and classify the texts of one read (each with its colours
+        when ANSI colours are on)."""
         times = arrival_times(len(texts), self._last_read_time, now)
         self._last_read_time = now
         if self._display_mode is DisplayMode.HEX:
@@ -361,10 +561,46 @@ class _ReaderWorker(QObject):
                 LineRecord(when, text, TAG_DATA, hex_row=True)
                 for when, text in zip(times, texts, strict=True)
             ]
-        return [
-            LineRecord(when, text, TagDetector.detect(text))
-            for when, text in zip(times, texts, strict=True)
-        ]
+        if self._ansi is None:
+            records = [
+                LineRecord(when, text, TagDetector.detect(text))
+                for when, text in zip(times, texts, strict=True)
+            ]
+        else:
+            records = [
+                LineRecord(when, text, TagDetector.detect(text), colours=colours)
+                for when, (text, colours) in zip(times, texts, strict=True)
+            ]
+        return self._mark_restarts(records) if self._detect_restarts else records
+
+    def _mark_restarts(self, records: list[LineRecord]) -> list[LineRecord]:
+        """Follow each line that shows the board restarted with a notice
+        saying so, stamped with that line's time."""
+        marked: list[LineRecord] = []
+        for record in records:
+            marked.append(record)
+            reason = self._restarts.check(record.text)
+            if reason is not None:
+                count = self.counters.restarted(record.timestamp, reason)
+                marked.append(notice_record(
+                    f"Board restart {count:,} of this session: {reason}", record.timestamp,
+                ))
+        return marked
+
+    @Slot(bool)
+    def set_ansi_colours(self, on: bool) -> None:
+        """Follow the ANSI colours of the lines for the console, or stop."""
+        if on and self._ansi is None:
+            self._ansi = AnsiColours()
+        elif not on:
+            self._ansi = None
+
+    @Slot(bool)
+    def set_restart_detection(self, on: bool) -> None:
+        """Mark and count restarts of the board, or stop."""
+        if on and not self._detect_restarts:
+            self._restarts.reset()
+        self._detect_restarts = on
 
     def _flush_framer(self, now: datetime) -> list[LineRecord]:
         """Return what the active framer holds as final records."""
@@ -380,18 +616,23 @@ class _ReaderWorker(QObject):
         """Show an incomplete hex row once the stream has gone quiet."""
         self._deliver(self._flush_framer(datetime.now()))
 
-    def _deliver(self, records: list[LineRecord], count_as_received: bool = True) -> None:
+    def _deliver(self, records: list[LineRecord]) -> None:
+        """Hand records to the writer, the screen and the modules, and
+        count the device lines among them."""
         if not records:
             return
-        self._writer.submit(records)
+        if not self._writer.submit(records):
+            self.counters.not_recorded(records)
         self._display.put(records)
-        if count_as_received:
-            self._lines_since_report += len(records)
-            self._total_lines += len(records)
+        for consumer in self.consumers:
+            consumer.put(records)
+        received = self.counters.received(records)
+        self._lines_since_report += received
+        self._total_lines += received
 
     @Slot()
     def _report_stats(self) -> None:
-        rate = self._lines_since_report * _MS_PER_SECOND // STATS_INTERVAL_MS
+        rate = self._lines_since_report * MS_PER_SECOND // STATS_INTERVAL_MS
         self._lines_since_report = 0
         self.stats.emit(rate, self._total_lines)
 
@@ -400,8 +641,58 @@ class _ReaderWorker(QObject):
     @Slot(str)
     def _on_link_lost(self, message: str) -> None:
         logger.warning("Connection to %s lost: %s", self._port_name, message)
-        if self._transport is not None:
+        if self._transport is None:
+            return
+        if self._reconnect:
+            self._suspend(message)
+        else:
             self._finish(unexpected=True)
+
+    def _suspend(self, message: str) -> None:
+        """The connection was lost: keep the session and its log open, and wait.
+
+        What the transport had read and the last partial line are
+        delivered first, as at any end.
+        """
+        transport, self._transport = self._transport, None
+        port = self._port_name
+        self._line_poll_timer.stop()
+        self._break_timer.stop()
+        self._break_active = False
+        self._release(transport)
+        self._deliver(self._flush_framer(datetime.now()))
+        self._lost_at = self._stamp_now()
+        self.counters.lost(self._lost_at)
+        self._note(
+            f"Connection to {port} lost: {message}. Waiting for the same board to return."
+        )
+        self.suspended.emit(port, message)
+
+    def _end_waiting(self) -> LogSummary | None:
+        """Stop waiting for a lost board: the session ends, as a disconnect does.
+
+        The session ended because the board was lost, which the report
+        says; ``closed`` reports it as expected, since the tab has already
+        said the connection was lost.
+        """
+        port = self._port_name
+        self._note(f"Stopped waiting for the board on {port} to return.")
+        self._port_name = ""
+        self._lost_at = None
+        self._stats_timer.stop()
+        self.counters.end(datetime.now(), unexpected=True)
+        summary = self._writer.end_session()
+        self.stats.emit(0, self._total_lines)
+        self.closed.emit(port, False, summary)
+        return summary
+
+    def _release(self, transport: Transport) -> None:
+        """Close ``transport``, delivering what it had read, and let it go."""
+        transport.close()
+        transport.data_received.disconnect(self._on_bytes)
+        transport.link_lost.disconnect(self._on_link_lost)
+        transport.error_occurred.disconnect(self.transport_error)
+        transport.deleteLater()
 
     def _finish(self, unexpected: bool) -> LogSummary | None:
         """Run the shutdown order for the current connection.
@@ -411,16 +702,16 @@ class _ReaderWorker(QObject):
         transport, self._transport = self._transport, None
         port_name, self._port_name = self._port_name, ""
         self._stats_timer.stop()
+        self._line_poll_timer.stop()
+        self._break_timer.stop()
+        self._break_active = False
 
         # Closing delivers any bytes the transport has already read, so
         # it is done while the data connection is still in place.
-        transport.close()
-        transport.data_received.disconnect(self._on_bytes)
-        transport.link_lost.disconnect(self._on_link_lost)
-        transport.error_occurred.disconnect(self.transport_error)
-        transport.deleteLater()
+        self._release(transport)
 
         self._deliver(self._flush_framer(datetime.now()))
+        self.counters.end(datetime.now(), unexpected)
         summary = self._writer.end_session()
         self.stats.emit(0, self._total_lines)
         self.closed.emit(port_name, unexpected, summary)
@@ -436,9 +727,23 @@ class DevicePipeline(QObject):
         disconnected(str, bool, object): Connection ended and everything
                                         is on disk: port, whether it was
                                         unexpected, ``LogSummary`` or None.
+        connection_lost(str, str):      The connection was lost and the
+                                        session waits for the board: port,
+                                        why. The log stays open.
+        connection_back(str, int, float): The board is back and the session
+                                        continues: port, baud, seconds away.
+        reconnect_failed(str, str):     A port found for the lost board
+                                        could not be used: port, reason.
+                                        The session goes on waiting.
         transport_error(str):           A serial error that did not end
                                         the connection.
         command_failed(str):            A command could not be sent.
+        control_failed(str):            A control line could not be set,
+                                        or a break could not be sent.
+        lines_changed(object):          ``LineStates`` of the open port:
+                                        after opening, after DTR or RTS
+                                        is set, and when an input line
+                                        changes.
         stats_updated(int, int):        Lines per second, total lines.
         log_write_failed(str):          A log file cannot be written.
         log_write_recovered():          Log writing works again.
@@ -460,8 +765,13 @@ class DevicePipeline(QObject):
     connected = Signal(str, int)
     connect_failed = Signal(str, str)
     disconnected = Signal(str, bool, object)
+    connection_lost = Signal(str, str)
+    connection_back = Signal(str, int, float)
+    reconnect_failed = Signal(str, str)
     transport_error = Signal(str)
     command_failed = Signal(str)
+    control_failed = Signal(str)
+    lines_changed = Signal(object)
     stats_updated = Signal(int, int)
     log_write_failed = Signal(str)
     log_write_recovered = Signal()
@@ -472,12 +782,19 @@ class DevicePipeline(QObject):
 
     # Requests carried to the reader thread.
     _start_requested = Signal()
-    _open_requested = Signal(str, int)
+    _open_requested = Signal(str, int, object)
     _close_requested = Signal()
     _shutdown_requested = Signal()
     _send_requested = Signal(str, str)
+    _dtr_requested = Signal(bool)
+    _rts_requested = Signal(bool)
+    _break_requested = Signal()
     _display_mode_requested = Signal(object)
     _log_pause_requested = Signal(bool)
+    _restart_detection_requested = Signal(bool)
+    _ansi_colours_requested = Signal(bool)
+    _reconnect_requested = Signal(bool)
+    _resume_requested = Signal(str, int, object, str, object)
 
     # Raised on the export thread; handled on the GUI thread.
     _export_done = Signal(object)
@@ -516,14 +833,26 @@ class DevicePipeline(QObject):
         self._close_requested.connect(self._worker.close)
         self._shutdown_requested.connect(self._worker.shutdown)
         self._send_requested.connect(self._worker.send)
+        self._dtr_requested.connect(self._worker.set_dtr)
+        self._rts_requested.connect(self._worker.set_rts)
+        self._break_requested.connect(self._worker.send_break)
         self._display_mode_requested.connect(self._worker.set_display_mode)
         self._log_pause_requested.connect(self._worker.set_log_paused)
+        self._restart_detection_requested.connect(self._worker.set_restart_detection)
+        self._ansi_colours_requested.connect(self._worker.set_ansi_colours)
+        self._reconnect_requested.connect(self._worker.set_reconnect)
+        self._resume_requested.connect(self._worker.resume)
 
         self._worker.opened.connect(self.connected)
         self._worker.open_failed.connect(self.connect_failed)
         self._worker.closed.connect(self.disconnected)
+        self._worker.suspended.connect(self.connection_lost)
+        self._worker.resumed.connect(self.connection_back)
+        self._worker.resume_failed.connect(self.reconnect_failed)
         self._worker.transport_error.connect(self.transport_error)
         self._worker.command_failed.connect(self.command_failed)
+        self._worker.control_failed.connect(self.control_failed)
+        self._worker.lines_changed.connect(self.lines_changed)
         self._worker.stats.connect(self.stats_updated)
         self._export_done.connect(self._on_export_done)
 
@@ -531,12 +860,12 @@ class DevicePipeline(QObject):
 
     # ── Connection ───────────────────────────────────────────────────────
 
-    def open(self, port: str, baud: int) -> None:
+    def open(self, port: str, baud: int, line: LineSettings | None = None) -> None:
         """Open a port. Answered by ``connected`` or ``connect_failed``."""
         if not self._thread.isRunning():
             self._thread.start()
             self._start_requested.emit()
-        self._open_requested.emit(port, baud)
+        self._open_requested.emit(port, baud, line or LineSettings())
 
     def close(self) -> None:
         """End the connection. Answered by ``disconnected`` once the
@@ -553,6 +882,48 @@ class DevicePipeline(QObject):
     def set_display_mode(self, mode: DisplayMode) -> None:
         self._display_mode_requested.emit(mode)
 
+    def set_restart_detection(self, on: bool) -> None:
+        """Mark and count restarts of the board from its boot lines, or stop."""
+        self._restart_detection_requested.emit(on)
+
+    def set_reconnect(self, on: bool) -> None:
+        """Whether a connection lost unexpectedly waits for the board to return."""
+        self._reconnect_requested.emit(on)
+
+    def reconnect(
+        self,
+        port: str,
+        baud: int,
+        line: LineSettings,
+        basis: str,
+        still_the_board: Callable[[], bool],
+    ) -> None:
+        """Continue the waiting session on ``port``. Answered by
+        ``connection_back`` or ``reconnect_failed``. ``still_the_board`` is
+        asked on the reader thread once the port is open, before anything
+        is read; ``basis`` says in the notice how the board was told apart."""
+        self._resume_requested.emit(port, baud, line, basis, still_the_board)
+
+    def set_ansi_colours(self, on: bool) -> None:
+        """Give each line the colours the device set with ANSI codes, or stop."""
+        self._ansi_colours_requested.emit(on)
+
+    def session_figures(self) -> SessionFigures | None:
+        """The exact figures of the current or last session; None before the first."""
+        return self._worker.counters.figures()
+
+    def set_dtr(self, active: bool) -> None:
+        """Set DTR. A change is noted in the session."""
+        self._dtr_requested.emit(active)
+
+    def set_rts(self, active: bool) -> None:
+        """Set RTS. A change is noted in the session."""
+        self._rts_requested.emit(active)
+
+    def send_break(self) -> None:
+        """Hold a break for ``BREAK_DURATION_MS``. Noted in the session."""
+        self._break_requested.emit()
+
     # ── Display ──────────────────────────────────────────────────────────
 
     def take_display(self, max_count: int) -> tuple[list[LineRecord], int]:
@@ -566,6 +937,20 @@ class DevicePipeline(QObject):
     def discard_display(self) -> None:
         """Forget the lines still waiting for the console."""
         self._display.clear()
+
+    # ── Module Buffers ───────────────────────────────────────────────────
+
+    def add_consumer(self) -> DisplayBuffer:
+        """A buffer that receives every record from now on, for a module."""
+        buffer = DisplayBuffer(CONSUMER_MAX_LINES, CONSUMER_MAX_CHARACTERS)
+        self._worker.consumers = (*self._worker.consumers, buffer)
+        return buffer
+
+    def remove_consumer(self, buffer: DisplayBuffer) -> None:
+        """Stop filling ``buffer``."""
+        self._worker.consumers = tuple(
+            consumer for consumer in self._worker.consumers if consumer is not buffer
+        )
 
     # ── Logging ──────────────────────────────────────────────────────────
 
@@ -614,6 +999,14 @@ class DevicePipeline(QObject):
         self._export = ExportJob(snapshot, request, self._report_export_done)
         self._export.start()
         return True
+
+    def recording(
+        self, position: SpoolPosition | None = None, max_segments: int | None = None,
+    ) -> SpoolSnapshot | None:
+        """What the session recorded after ``position``, for reading older
+        plot values. May be called from any thread; the caller releases
+        the snapshot. None while nothing is being recorded."""
+        return self._writer.recording_from(position, max_segments)
 
     def _report_export_done(self, result: ExportResult) -> None:
         """Called on the export thread when it has finished."""

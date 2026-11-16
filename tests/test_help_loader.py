@@ -193,12 +193,11 @@ def test_keys_are_named_as_the_platform_names_them(
     assert key_names(keys, platform) == expected
 
 
-def test_a_shortcut_is_written_as_keys(images: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(help_loader.sys, "platform", "linux")
-
+def test_a_shortcut_is_written_as_keys(images: Path) -> None:
     filled = render_user_guide("{{key:copy_messages}}", images, FONTS)
 
-    assert filled == "<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>"
+    keys = key_names(shortcuts.SHORTCUTS["copy_messages"].keys)
+    assert filled == "+".join(f"<kbd>{key}</kbd>" for key in keys)
 
 
 def test_the_shortcut_table_holds_every_shortcut_under_its_group(images: Path) -> None:

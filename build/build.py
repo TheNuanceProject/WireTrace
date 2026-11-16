@@ -330,6 +330,9 @@ def nuitka_command(system: str) -> list[str]:
         # fails if one of them is missing from the build.
         "--include-package=pyqtgraph",
         "--include-package=numpy",
+        # The modules a user can switch on are imported by name when
+        # switched on (app/modules.py), so the compiler would not find them.
+        "--include-package=ui.features",
         # The test suites and example programs of those packages are no
         # part of the program.
         "--nofollow-import-to=*.tests",

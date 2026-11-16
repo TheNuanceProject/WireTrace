@@ -270,12 +270,14 @@ class PlotConfigDialog(DotGridDialog):
         auto_layout.addStretch()
 
         # Stack: index 0 = auto, 1 = manual
-        self._stack = QStackedLayout()
+        # The stack is placed in its holder before the panels are added:
+        # the stack shows its current panel, which would otherwise be a
+        # window of its own for a moment.
+        stack_holder = QWidget()
+        self._stack = QStackedLayout(stack_holder)
         self._stack.setContentsMargins(0, 0, 0, 0)
         self._stack.addWidget(self._auto_panel)
         self._stack.addWidget(self._manual_panel)
-        stack_holder = QWidget()
-        stack_holder.setLayout(self._stack)
         root.addWidget(stack_holder, 1)
 
         # ── Footer ─────────────────────────────────────────────────

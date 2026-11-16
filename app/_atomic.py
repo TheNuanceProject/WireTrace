@@ -6,7 +6,7 @@ crash, a power loss or a full disk in between leaves it empty or
 partial, and the next start would fall back to the defaults, losing the
 user's preferences and saved plot profiles.
 
-``atomic_write_text`` removes that window. It writes to a temporary
+``atomic_write_text`` (and ``atomic_write_bytes``) removes that window. It writes to a temporary
 file beside the destination, flushes and syncs it to the disk, then
 renames it over the destination. ``os.replace`` is atomic on POSIX
 (``rename(2)``) and on Windows (``MoveFileExW`` with
@@ -45,11 +45,20 @@ def atomic_write_text(path: str, data: str, encoding: str = "utf-8") -> None:
             renamed. The destination is left exactly as it was, and the
             temporary file is removed.
     """
+    _write_and_replace(path, data, "w", encoding)
+
+
+def atomic_write_bytes(path: str, data: bytes) -> None:
+    """Write ``data`` to ``path``, all or nothing, as ``atomic_write_text`` does."""
+    _write_and_replace(path, data, "wb", None)
+
+
+def _write_and_replace(path: str, data: str | bytes, mode: str, encoding: str | None) -> None:
     descriptor, tmp_path = tempfile.mkstemp(
         dir=os.path.dirname(path) or os.curdir, prefix=_TMP_PREFIX, suffix=_TMP_SUFFIX,
     )
     try:
-        with os.fdopen(descriptor, "w", encoding=encoding) as f:
+        with os.fdopen(descriptor, mode, encoding=encoding) as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())

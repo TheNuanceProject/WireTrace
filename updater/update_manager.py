@@ -34,6 +34,8 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.config import ConfigManager
 from app.constants import (
+    MS_PER_HOUR,
+    MS_PER_SECOND,
     UPDATE_CHECK_INTERVAL_HOURS,
     UPDATE_CHECK_STARTUP_DELAY_S,
     UPDATE_FIRST_CHECK_VALUE,
@@ -58,8 +60,6 @@ from version import APP_VERSION, UPDATE_MANIFEST_URL, UPDATE_PUBLIC_KEYS
 
 logger = logging.getLogger(__name__)
 
-_MS_PER_SECOND = 1000
-_MS_PER_HOUR = 3_600_000
 
 #: What a check that failed says. The cause is logged; what a server
 #: answered is never shown, so it cannot put words in the window.
@@ -111,10 +111,10 @@ class UpdateManager(QObject):
 
         self._first_check = QTimer(self)
         self._first_check.setSingleShot(True)
-        self._first_check.setInterval(UPDATE_CHECK_STARTUP_DELAY_S * _MS_PER_SECOND)
+        self._first_check.setInterval(UPDATE_CHECK_STARTUP_DELAY_S * MS_PER_SECOND)
         self._first_check.timeout.connect(self._check_automatically)
         self._next_check = QTimer(self)
-        self._next_check.setInterval(UPDATE_CHECK_INTERVAL_HOURS * _MS_PER_HOUR)
+        self._next_check.setInterval(UPDATE_CHECK_INTERVAL_HOURS * MS_PER_HOUR)
         self._next_check.timeout.connect(self._check_automatically)
 
     # ── Public API ───────────────────────────────────────────────────────

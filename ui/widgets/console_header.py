@@ -22,7 +22,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.constants import TAG_COMMAND, TAG_DATA, TimestampMode
+from app.constants import (
+    DEFAULT_TIMESTAMP_MODE,
+    ERROR_LEVELS,
+    LEVEL_NAMES,
+    TAG_COMMAND,
+    TAG_DATA,
+    TIMESTAMP_MODE_NAMES,
+    WARNING_LEVELS,
+    TimestampMode,
+)
 from ui import shortcuts
 from ui.themes import tokens
 from ui.widgets.button import Button
@@ -40,17 +49,12 @@ class LevelChoice:
 
 LEVEL_CHOICES: tuple[LevelChoice, ...] = (
     LevelChoice("all", "All", None),
-    LevelChoice("error", "Error", frozenset({"ERROR", "CRITICAL"})),
-    LevelChoice("warning", "Warning", frozenset({"WARNING"})),
-    LevelChoice("info", "Info", frozenset({"INFO"})),
-    LevelChoice("debug", "Debug", frozenset({"DEBUG"})),
-    LevelChoice("data", "Data", frozenset({TAG_DATA, TAG_COMMAND})),
+    LevelChoice("error", LEVEL_NAMES["ERROR"], ERROR_LEVELS),
+    LevelChoice("warning", LEVEL_NAMES["WARNING"], WARNING_LEVELS),
+    LevelChoice("info", LEVEL_NAMES["INFO"], frozenset({"INFO"})),
+    LevelChoice("debug", LEVEL_NAMES["DEBUG"], frozenset({"DEBUG"})),
+    LevelChoice("data", LEVEL_NAMES["DATA"], frozenset({TAG_DATA, TAG_COMMAND})),
 )
-
-_TIME_MODE_LABELS: dict[TimestampMode, str] = {
-    TimestampMode.ABSOLUTE: "Time of day",
-    TimestampMode.RELATIVE: "Since previous line",
-}
 
 
 class ConsoleHeader(QFrame):
@@ -76,7 +80,7 @@ class ConsoleHeader(QFrame):
 
         self._choice = LEVEL_CHOICES[0]
         self._counts: dict[str, int] = {}
-        self._timestamp_mode = TimestampMode.ABSOLUTE
+        self._timestamp_mode = DEFAULT_TIMESTAMP_MODE
 
         # Level buttons, and the drop-down that replaces them when narrow.
         self._level_group = QButtonGroup(self)
@@ -116,7 +120,9 @@ class ConsoleHeader(QFrame):
         self._filter.textChanged.connect(self.filter_changed)
 
         self._time_mode = Button(compact=True)
-        self._time_mode.setToolTip("Switch between the time of day and the time since the previous line")
+        self._time_mode.setToolTip(
+            "Switch the timestamps: time of day, date and time, or time since the previous line"
+        )
         self._time_mode.clicked.connect(self._toggle_timestamp_mode)
 
         self._follow = Button(compact=True)
@@ -171,7 +177,7 @@ class ConsoleHeader(QFrame):
 
     def set_timestamp_mode(self, mode: TimestampMode) -> None:
         self._timestamp_mode = mode
-        self._time_mode.setText(_TIME_MODE_LABELS[mode])
+        self._time_mode.setText(TIMESTAMP_MODE_NAMES[mode])
 
     def set_following(self, following: bool) -> None:
         self._follow.setChecked(following)
@@ -207,11 +213,9 @@ class ConsoleHeader(QFrame):
             self.levels_changed.emit(choice.tags)
 
     def _toggle_timestamp_mode(self) -> None:
-        mode = (
-            TimestampMode.RELATIVE
-            if self._timestamp_mode == TimestampMode.ABSOLUTE
-            else TimestampMode.ABSOLUTE
-        )
+        """Switch to the next timestamp mode, in the order they are offered."""
+        modes = list(TIMESTAMP_MODE_NAMES)
+        mode = modes[(modes.index(self._timestamp_mode) + 1) % len(modes)]
         self.set_timestamp_mode(mode)
         self.timestamp_mode_changed.emit(mode)
 

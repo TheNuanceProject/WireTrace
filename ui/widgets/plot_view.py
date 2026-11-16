@@ -17,6 +17,15 @@ value as received, never one worked out between two samples.
 The view is built on first use, which may be after the engine has
 found the values and collected samples; it then starts from that state.
 
+Older time than the samples in memory comes from the plot's history
+(``ui/features/plot_history.py``), read from the session recording.
+While live, it is drawn by the least and greatest value of each slice
+of time, so no spike is lost. Once the plot is held still, the time on
+screen is read again in full: every sample when there is room for each,
+or the least and greatest per pixel, with exact figures. Where only the
+least and greatest are drawn, the view says so and reads no value from
+between them: the card and the cursors ask to zoom in instead.
+
 All parsing, detection and buffering is in ``core/plot_engine.py``; the
 figures are worked out in ``core/plot_stats.py``.
 """
@@ -31,8 +40,22 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QBuffer,
+    QEvent,
+    QIODevice,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QHideEvent,
     QPainter,
@@ -49,6 +72,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QScrollArea,
     QSizePolicy,
     QStackedLayout,
@@ -56,17 +80,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app._atomic import atomic_write_bytes
 from app.constants import (
     PLOT_DEFAULT_WINDOW_SECONDS,
+    PLOT_HISTORY_DETAIL_DELAY_MS,
+    PLOT_LIVE_SPAN_MIN_SECONDS,
     PLOT_REDRAW_INTERVAL_MS,
     PLOT_STATS_INTERVAL_MS,
     PLOT_WINDOW_CHOICES,
 )
+from core.plot_history import DetailRequest
 from core.plot_stats import (
     SeriesStats,
     group_by_scale,
     magnitude,
     nearest_sample,
+    stats_after,
     value_held,
     visible_stats,
 )
@@ -86,13 +115,19 @@ from ui.widgets.styling import SECONDARY, SMALL, plain_label, plain_tooltip, set
 from ui.widgets.vertical_scroll import VerticalScrollArea
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from core.plot_engine import PlotEngine
+    from core.plot_history import DetailResult
+    from ui.features.plot_history import PlotHistory
     from ui.themes.theme_manager import ThemeManager
 
 logger = logging.getLogger(__name__)
 
 #: How strongly the grid is drawn, from 0 to 1: part of the drawing of the
 #: chart, named as such by the design language, like the trace colours.
+_WHEEL_STEP = 1.02
+_CUSTOM_WINDOW = "Custom"
 _GRID_ALPHA = 0.3
 #: Space left beside the newest sample, as a share of the time shown.
 _X_PADDING = 0.02
@@ -121,6 +156,32 @@ _NOT_FOUND_TEXT = (
     "You can describe the format of your lines yourself."
 )
 _NO_FIGURE = "no data"
+#: In place of a value where only the least and greatest are drawn.
+_NOT_EXACT = "zoom in"
+
+_EXTREMES_LIVE_NOTE = (
+    "Older time is drawn by its least and greatest values. Pause to read every value."
+)
+_EXTREMES_HELD_NOTE = (
+    "This time is drawn by its least and greatest values. Zoom in to read every value."
+)
+_READING_NOTE = "Reading every value of this time from the session recording."
+_READING_OLDER_NOTE = "Reading older values from the session recording."
+_INCOMPLETE_NOTE = (
+    "Not every line of this time is still held, or there is too much to read at once. "
+    "Zoom in to read every value."
+)
+_START_LOST_NOTE = (
+    "The start of this session is no longer available; "
+    "the plot begins with the oldest data still held."
+)
+_STALLED_HISTORY_NOTE = (
+    "Older values cannot be read: the pattern takes too long on the recorded lines."
+)
+#: The figures beside a value, until every value of the time shown is known.
+_FIGURES_LIVE = "Pause for min, max and avg"
+_FIGURES_READING = "Reading min, max and avg"
+_FIGURES_ZOOM = "Zoom in for min, max and avg"
 
 
 class PlotLayout(enum.Enum):
@@ -128,6 +189,15 @@ class PlotLayout(enum.Enum):
 
     ONE_CHART = "one"
     PANELS = "panels"
+
+
+class PlotExport(enum.Enum):
+    """What the Export menu saves, with the words of its entry."""
+
+    PNG = "Picture (PNG)..."
+    SVG = "Picture (SVG)..."
+    VALUES_SHOWN = "Values of the time shown (CSV)..."
+    VALUES_ALL = "Values of the whole session (CSV)..."
 
 
 class _Swatch(QWidget):
@@ -230,6 +300,11 @@ class ValueRow(QFrame):
             f"avg {format_value(stats.mean)}"
         )
 
+    def set_last_only(self, last: float | None, why: str) -> None:
+        """Show the last value only, and why the other figures are not shown."""
+        self._last.setText(_NO_FIGURE if last is None else format_value(last))
+        self._figures.setText(why)
+
     def texts(self) -> tuple[str, str, str]:
         """Name, last value and the min/max/avg line as shown."""
         return self.name, self._last.text(), self._figures.text()
@@ -299,6 +374,33 @@ class _Readout(QFrame):
             self._time.text(), self._since.text(),
             [(name.text(), value.text()) for _, name, value in self._rows],
         )
+
+
+class _Note(QFrame):
+    """A line under the toolbar saying what the chart cannot show in full."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("plotNote")
+        metrics = tokens.METRICS
+        self._label = plain_label()
+        self._label.setProperty(SECONDARY, True)
+        self._label.setProperty(SMALL, True)
+        self._label.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(metrics.space_3, metrics.space_2, metrics.space_3, metrics.space_2)
+        layout.setSpacing(0)
+        layout.addWidget(self._label)
+        self.hide()
+
+    def text(self) -> str:
+        return self._label.text() if not self.isHidden() else ""
+
+    def show_text(self, text: str) -> None:
+        """Show ``text``, or hide when it is empty."""
+        if text != self._label.text() or self.isHidden() == bool(text):
+            self._label.setText(text)
+            self.setHidden(not text)
 
 
 class _SidewaysScroll(QScrollArea):
@@ -425,6 +527,38 @@ class _MeasureTable(QFrame):
                 widget.show()
 
 
+class _TimeViewBox(pg.ViewBox):
+    """The view of one chart. While the plot is live, the wheel asks for
+    more or less recent time and dragging asks to hold the plot; while it
+    is held, both move and zoom time as usual.
+
+    Signals:
+        zoom_asked(float):  The wheel turned while live: the factor by which
+                            to scale the recent time shown.
+        hold_asked():       A drag began while live.
+    """
+
+    zoom_asked = Signal(float)
+    hold_asked = Signal()
+
+    def __init__(self, live: Callable[[], bool]) -> None:
+        super().__init__()
+        self._live = live
+
+    def wheelEvent(self, ev: object, axis: int | None = None) -> None:
+        if not self._live():
+            super().wheelEvent(ev, axis)
+            return
+        # The same step per notch as pyqtgraph's own zoom.
+        self.zoom_asked.emit(_WHEEL_STEP ** (ev.delta() * self.state["wheelScaleFactor"]))
+        ev.accept()
+
+    def mouseDragEvent(self, ev: object, axis: int | None = None) -> None:
+        if self._live() and ev.button() == Qt.MouseButton.LeftButton and ev.isStart():
+            self.hold_asked.emit()
+        super().mouseDragEvent(ev, axis)
+
+
 class _Panel:
     """One chart: a pyqtgraph plot item, its traces, the line under the
     pointer with a dot on each trace, and its two cursor lines."""
@@ -449,16 +583,19 @@ class PlotView(QWidget):
         float_requested(bool):   The user asked for the plot to open in its
                                  own window (True) or to return (False).
         close_requested():       The user asked for the plot to close.
-        height_wanted(int):      The measuring table appeared and takes this
-                                 many pixels (positive), or went and gave
-                                 them back (negative). The host adds them
-                                 to the plot, so the chart keeps its height.
+        export_requested(object): The user chose a ``PlotExport`` entry.
+        height_wanted(int):      The measuring table or the note appeared and
+                                 takes this many pixels (positive), or went
+                                 and gave them back (negative). Under the
+                                 console the host adds them to the plot, so
+                                 the chart keeps its height.
     """
 
     pause_toggled = Signal(bool)
     configure_requested = Signal()
     float_requested = Signal(bool)
     close_requested = Signal()
+    export_requested = Signal(object)
     height_wanted = Signal(int)
 
     def __init__(
@@ -466,24 +603,49 @@ class PlotView(QWidget):
         plot_engine: PlotEngine,
         theme_manager: ThemeManager,
         parent: QWidget | None = None,
+        history: PlotHistory | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("plotView")
         self._engine = plot_engine
         self._theme_manager = theme_manager
+        self._history = history
+        # For each value, the time from which every sample is drawn; older
+        # time shows only the least and greatest of each slice.
+        self._exact_from: dict[str, float] = {}
+        # The samples in memory as they were when the plot was held still.
+        self._held_samples: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+        # Older time held still on screen, being read in full, and the
+        # figures that reading gave.
+        self._detail_in_view: DetailRequest | None = None
+        self._lines_skipped = 0
+        # The height the note took when it appeared, given back when it goes.
+        self._note_height = 0
 
         self._columns: list[str] = []
         self._rows: dict[str, ValueRow] = {}
         self._traces: dict[str, pg.PlotDataItem] = {}
         self._panels: list[_Panel] = []
         self._data: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        self._layout_mode = PlotLayout.ONE_CHART
+        # When the board was lost, each time it was: no line joins the
+        # samples on either side. Their times on the chart are worked out
+        # again once the time of x = 0 is known or changes.
+        self._breaks: list[datetime] = []
+        self._break_x: np.ndarray | None = None
+        self._break_origin: datetime | None = None
+        self._layout_mode = PlotLayout.PANELS
         self._window_seconds: float | None = PLOT_DEFAULT_WINDOW_SECONDS
         self._paused = False
         self._floating = False
         self._measuring = False
         # Measuring held the plot, and stopping measuring lets it go live.
         self._held_for_measuring = False
+        # Dragging back in time held the plot, and Fit lets it go live.
+        self._held_for_looking_back = False
+        # The latest choice made from the time list, and whether the wheel
+        # has changed the time shown since; Fit gives that choice back.
+        self._chosen_window: float | None = PLOT_DEFAULT_WINDOW_SECONDS
+        self._zoomed = False
         # The height the measuring table took when it appeared, given back
         # exactly when it goes.
         self._table_height = 0
@@ -505,6 +667,11 @@ class PlotView(QWidget):
         self._stats_timer = QTimer(self)
         self._stats_timer.setInterval(PLOT_STATS_INTERVAL_MS)
         self._stats_timer.timeout.connect(self._update_figures)
+        # Older time held still is read in full once the view has rested.
+        self._detail_timer = QTimer(self)
+        self._detail_timer.setSingleShot(True)
+        self._detail_timer.setInterval(PLOT_HISTORY_DETAIL_DELAY_MS)
+        self._detail_timer.timeout.connect(self._ask_for_detail)
 
         self._build()
         self._apply_theme()
@@ -519,6 +686,8 @@ class PlotView(QWidget):
         elif self._engine.detection_gave_up:
             self._on_detection_failed()
         theme_manager.theme_changed.connect(self._on_theme_changed)
+        if history is not None:
+            history.changed.connect(self._on_history_changed)
 
     # ── Building ─────────────────────────────────────────────────────────
 
@@ -574,6 +743,7 @@ class PlotView(QWidget):
         body_layout.addLayout(chart, 1)
         self._chart_area = body
         self._readout = _Readout(body)
+        self._note = _Note()
 
         content = QWidget()
         self._stack = QStackedLayout(content)
@@ -585,6 +755,7 @@ class PlotView(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(self._build_toolbar())
+        outer.addWidget(self._note)
         outer.addWidget(content, 1)
 
     def _new_graphics(self) -> None:
@@ -684,7 +855,15 @@ class PlotView(QWidget):
         )
         for text, seconds in PLOT_WINDOW_CHOICES:
             self._window_combo.addItem(text, seconds)
-        self._window_combo.setCurrentIndex(self._window_combo.findData(self._window_seconds))
+        # Wide enough from the start for every entry, Custom included,
+        # which appears only while the wheel has zoomed.
+        self._window_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._window_combo.setMinimumContentsLength(
+            max(len(text) for text in (*(text for text, _ in PLOT_WINDOW_CHOICES), _CUSTOM_WINDOW))
+        )
+        self._window_combo.setCurrentIndex(self._window_index(self._window_seconds))
         self._window_combo.currentIndexChanged.connect(self._on_window_changed)
 
         self._pause_btn = self._button("Pause", self._on_pause_toggled, checkable=True)
@@ -697,6 +876,21 @@ class PlotView(QWidget):
         self._clear_btn.setToolTip("Forget the samples drawn so far. The values stay.")
         self._configure_btn = self._button("Configure...", self.configure_requested.emit)
         self._configure_btn.setToolTip("Choose how values are found in the lines")
+        self._export_btn = Button(compact=True)
+        self._export_btn.setObjectName("flatIconButton")
+        self._export_btn.setAccessibleName("Export")
+        self._export_btn.setToolTip("Save the chart as a picture, or the values as a CSV file")
+        bind_icon(self._export_btn, "export", "text_secondary")
+        self._export_menu = QMenu(self)
+        self._export_actions: dict[PlotExport, QAction] = {}
+        for kind in PlotExport:
+            if kind is PlotExport.VALUES_SHOWN:
+                self._export_menu.addSeparator()
+            action = self._export_menu.addAction(kind.value)
+            action.triggered.connect(lambda _checked=False, k=kind: self.export_requested.emit(k))
+            self._export_actions[kind] = action
+        self._export_menu.aboutToShow.connect(self._enable_exports)
+        self._export_btn.setMenu(self._export_menu)
         self._float_btn = self._button("", lambda: self.float_requested.emit(not self._floating))
         self.set_floating(False)
         self._close_btn = Button(compact=True)
@@ -718,6 +912,7 @@ class PlotView(QWidget):
         layout.addWidget(self._configure_btn)
         layout.addStretch(1)
         layout.addWidget(self._float_btn)
+        layout.addWidget(self._export_btn)
         layout.addWidget(self._close_btn)
         return bar
 
@@ -756,12 +951,75 @@ class PlotView(QWidget):
         """The card under the pointer as shown, or None when there is none."""
         return self._readout.texts() if self._readout.isVisible() else None
 
+    def time_in_view(self) -> tuple[float, float]:
+        """The time on screen, in seconds on the plot, never before 0."""
+        if not self._panels:
+            return 0.0, 0.0
+        low, high = self._time_in_view()
+        return max(low, 0.0), max(high, 0.0)
+
+    def save_picture(self, path: str) -> None:
+        """Save the chart as shown: SVG when ``path`` ends in .svg, PNG otherwise.
+
+        The SVG is drawn by Qt's own SVG writer, the PNG by pyqtgraph's
+        image exporter, each from the chart's scene as it is on screen.
+
+        Raises:
+            OSError: The picture could not be made or written.
+        """
+        if self._graphics is None:
+            raise OSError("there is no chart to save")
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        if path.lower().endswith(".svg"):
+            self._draw_svg(buffer)
+        else:
+            import pyqtgraph.exporters as exporters
+
+            image = exporters.ImageExporter(self._graphics.ci).export(toBytes=True)
+            if not image.save(buffer, "PNG"):
+                raise OSError("the picture could not be made")
+        atomic_write_bytes(path, bytes(buffer.data()))
+
+    def _draw_svg(self, device: QBuffer) -> None:
+        from PySide6.QtSvg import QSvgGenerator
+
+        area = self._graphics.ci.sceneBoundingRect()
+        size = area.size().toSize()
+        generator = QSvgGenerator()
+        generator.setOutputDevice(device)
+        generator.setSize(size)
+        generator.setViewBox(QRect(QPoint(0, 0), size))
+        generator.setResolution(self._graphics.logicalDpiX())
+        painter = QPainter()
+        if not painter.begin(generator):
+            raise OSError("the picture could not be made")
+        try:
+            painter.fillRect(QRect(QPoint(0, 0), size), QColor(tokens.palette().paper))
+            self._graphics.scene().render(painter, QRectF(QPoint(0, 0), area.size()), area)
+        finally:
+            painter.end()
+
+    def note_text(self) -> str:
+        """The note over the chart about what it shows, or "" when there is none."""
+        return self._note.text()
+
+    def set_lines_skipped(self, count: int) -> None:
+        """Lines of this session the plot fell too far behind to draw."""
+        self._lines_skipped = count
+
     def summary(self) -> str:
         """One line saying how much is shown: "4 values, last 60 s shown"."""
         values = format_count(len(self._columns), "value")
         if self._window_seconds is None:
-            return f"{values}, everything held is shown"
-        return f"{values}, last {self._window_combo.currentText()} shown"
+            shown = f"{values}, everything held is shown"
+        elif self._custom_index() is not None:
+            shown = f"{values}, last {format_value(self._window_seconds)} s shown"
+        else:
+            shown = f"{values}, last {self._window_combo.currentText()} shown"
+        if self._lines_skipped:
+            shown += f", {format_count(self._lines_skipped, 'line')} not drawn: the plot fell behind"
+        return shown
 
     def set_layout_mode(self, mode: PlotLayout) -> None:
         """Draw every value in one chart, or in panels by scale."""
@@ -840,12 +1098,57 @@ class PlotView(QWidget):
         )
 
     def fit(self) -> None:
-        """Undo zoom and panning, and sort the values into panels again."""
+        """Undo zoom and panning, and sort the values into panels again.
+
+        A plot held still takes the newest samples in memory; one held by
+        dragging back in time goes live again.
+        """
+        if self._zoomed:
+            self._zoomed = False
+            self._select_window(self._window_index(self._chosen_window))
+            self._remove_custom_window()
+            self._window_seconds = self._chosen_window
+        if self._held_for_looking_back:
+            self._pause_btn.setChecked(False)
         self._fit_pending = True
+        self._held_samples = None
         if self._layout_mode is PlotLayout.PANELS:
             self._regroup_pending = True
         if self._paused:
             self._redraw(force=True)
+
+    def set_breaks(self, lost: list[datetime]) -> None:
+        """When the board was lost: each value's line is broken there."""
+        self._breaks = list(lost)
+        self._break_x = None
+        if self._paused and self._traces:
+            self._redraw(force=True)
+
+    def _broken(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """``x`` and ``y`` with a gap after the last sample before each break.
+
+        The gap is a sample with no value at the time of the one before,
+        so the times stay in order for clipping and thinning.
+        """
+        breaks = self._break_positions()
+        if not breaks.size or x.size < 2:
+            return x, y
+        at = np.unique(np.searchsorted(x, breaks, side="right"))
+        at = at[(at > 0) & (at < x.size)]
+        if not at.size:
+            return x, y
+        return np.insert(x, at, x[at - 1]), np.insert(y.astype(float, copy=False), at, np.nan)
+
+    def _break_positions(self) -> np.ndarray:
+        origin = self._engine.origin
+        if self._break_x is None or origin != self._break_origin:
+            self._break_origin = origin
+            self._break_x = np.array(
+                [(lost - origin).total_seconds() for lost in self._breaks]
+                if origin is not None else [],
+                dtype=float,
+            )
+        return self._break_x
 
     def reset_session(self) -> None:
         """Start afresh for a new connection, keeping the view itself.
@@ -854,6 +1157,8 @@ class PlotView(QWidget):
         to the waiting text. The layout chosen and the time shown stay.
         """
         self._engine.reset()
+        self._held_samples = None
+        self._lines_skipped = 0
         self._set_columns([])
         self._placeholder.setText(_WAITING_TEXT)
         self._describe.setVisible(False)
@@ -863,6 +1168,7 @@ class PlotView(QWidget):
         if self._measure_btn.isChecked():
             self._measure_btn.setChecked(False)
         self._fit_pending = False
+        self._show_note()
 
     def shutdown(self) -> None:
         """Stop for good. Called once, when the tab closes.
@@ -880,6 +1186,10 @@ class PlotView(QWidget):
             self._theme_manager.theme_changed.disconnect(self._on_theme_changed)
         self._timer.stop()
         self._stats_timer.stop()
+        self._detail_timer.stop()
+        if self._history is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                self._history.changed.disconnect(self._on_history_changed)
 
         # The charts are taken apart here, while every part still exists,
         # and not left to the destruction of the window.
@@ -914,6 +1224,7 @@ class PlotView(QWidget):
         self._columns = columns
         self._rows = {}
         self._data = {}
+        self._exact_from = {}
         for index, name in enumerate(columns):
             row = ValueRow(name, self._colour_of(name))
             row.shown_changed.connect(self._on_value_shown)
@@ -941,17 +1252,38 @@ class PlotView(QWidget):
         groups = self._groups()
         metrics = tokens.METRICS
         for row, names in enumerate(groups):
-            item = self._graphics.ci.addPlot(row=row, col=0)
+            box = _TimeViewBox(self._is_live)
+            box.zoom_asked.connect(self._zoom_live)
+            box.hold_asked.connect(self._hold_to_look_back)
+            item = self._graphics.ci.addPlot(row=row, col=0, viewBox=box)
             item.showGrid(x=True, y=True, alpha=_GRID_ALPHA)
+            # The wheel and dragging move and zoom time only, every panel
+            # together; each panel's scale always fits the values in the
+            # time shown. While live, the wheel changes how much recent
+            # time is shown, and dragging back holds the plot.
+            item.getViewBox().setMouseEnabled(x=True, y=False)
+            item.setAutoVisible(y=True)
+            # pyqtgraph's own right-click menu and auto-range button are
+            # not offered: its menu exports SVG through an exporter that
+            # fails with PySide6, redraws a chart (spectrum, log scale) in
+            # ways the card and Measure do not follow, and zooms the value
+            # scale by rectangle. Everything the plot does is in its toolbar.
+            item.setMenuEnabled(False)
+            item.hideButtons()
             item.getAxis("left").setWidth(metrics.plot_axis_width)
             if row:
                 item.setXLink(self._panels[0].item)
+            else:
+                item.getViewBox().sigXRangeChanged.connect(self._on_view_moved)
             is_last = row == len(groups) - 1
             item.getAxis("bottom").setStyle(showValues=is_last)
             if is_last:
                 item.setLabel("bottom", "Time", units="s")
             for name in names:
-                trace = item.plot(pen=pg.mkPen(color=self._colour_of(name), width=tokens.METRICS.mark))
+                trace = item.plot(
+                    pen=pg.mkPen(color=self._colour_of(name), width=tokens.METRICS.mark),
+                    connect="finite",
+                )
                 trace.setVisible(self._rows[name].shown)
                 self._traces[name] = trace
             hover = pg.InfiniteLine(angle=90, movable=False)
@@ -968,7 +1300,9 @@ class PlotView(QWidget):
         self._rebuild_cursors()
         self._fit_pending = True
         self._regroup_pending = self._layout_mode is PlotLayout.PANELS and not self._data
-        if self._panels and (self._paused or not self._timer.isActive()):
+        # Drawn at once, not at the next tick: the new panels are never
+        # shown empty or out of place.
+        if self._panels:
             self._redraw(force=True)
 
     def _on_value_shown(self, name: str, shown: bool) -> None:
@@ -980,9 +1314,23 @@ class PlotView(QWidget):
 
     # ── Toolbar ──────────────────────────────────────────────────────────
 
+    def _enable_exports(self) -> None:
+        """Nothing can be saved before values have been found."""
+        found = bool(self._panels)
+        for action in self._export_actions.values():
+            action.setEnabled(found)
+
     def _on_pause_toggled(self, paused: bool) -> None:
         self._paused = paused
         self._pause_btn.setText("Resume" if paused else "Pause")
+        if not paused:
+            self._held_for_looking_back = False
+        if paused:
+            self._held_samples = {name: self._engine.snapshot(name) for name in self._columns}
+            self._detail_timer.start()
+        else:
+            self._held_samples = None
+            self._detail_timer.stop()
         if not paused and self._measuring:
             # Live and measuring do not go together: going live ends it.
             self._held_for_measuring = False
@@ -991,17 +1339,89 @@ class PlotView(QWidget):
 
     def _on_clear(self) -> None:
         self._engine.clear_buffers()
+        self._held_samples = None
         self._data = {}
         for trace in self._traces.values():
             trace.setData([], [])
         self._fit_pending = True
         self._update_figures()
 
-    def _on_window_changed(self, _index: int) -> None:
-        self._window_seconds = self._window_combo.currentData()
+    def _on_window_changed(self, index: int) -> None:
+        """A choice made from the time list."""
+        if index == self._custom_index():
+            return
+        self._zoomed = False
+        self._remove_custom_window()
+        self._chosen_window = self._window_combo.currentData()
+        self._show_window(self._chosen_window)
+
+    def _show_window(self, seconds: float | None) -> None:
+        """Show the last ``seconds``; None shows everything held."""
+        self._window_seconds = seconds
         self._fit_pending = True
         if self._paused:
             self._redraw(force=True)
+
+    def _is_live(self) -> bool:
+        return not self._paused
+
+    def _zoom_live(self, factor: float) -> None:
+        """Show ``factor`` times the recent time on screen, staying on the newest data.
+
+        Past everything held, the plot shows All; the time list's own
+        choice is kept for Fit.
+        """
+        latest = self._engine.latest_x
+        if latest <= 0:
+            return
+        on_screen = latest if self._window_seconds is None else min(self._window_seconds, latest)
+        span = on_screen * factor
+        self._zoomed = True
+        if span >= latest:
+            self._remove_custom_window()
+            self._select_window(self._window_index(None))
+            self._show_window(None)
+            return
+        span = max(PLOT_LIVE_SPAN_MIN_SECONDS, span)
+        index = self._custom_index()
+        if index is None:
+            self._window_combo.blockSignals(True)
+            self._window_combo.addItem(_CUSTOM_WINDOW, span)
+            self._window_combo.blockSignals(False)
+            index = self._window_combo.count() - 1
+        self._window_combo.setItemData(index, span)
+        self._select_window(index)
+        self._show_window(span)
+
+    def _select_window(self, index: int) -> None:
+        """Show entry ``index`` in the time list, as the plot's own change."""
+        self._window_combo.blockSignals(True)
+        self._window_combo.setCurrentIndex(index)
+        self._window_combo.blockSignals(False)
+
+    def _remove_custom_window(self) -> None:
+        index = self._custom_index()
+        if index is not None:
+            self._window_combo.blockSignals(True)
+            self._window_combo.removeItem(index)
+            self._window_combo.blockSignals(False)
+
+    def _window_index(self, seconds: float | None) -> int:
+        """The index of the time list's choice of ``seconds``; None is All."""
+        return next(
+            index for index in range(self._window_combo.count())
+            if self._window_combo.itemText(index) != _CUSTOM_WINDOW
+            and self._window_combo.itemData(index) == seconds
+        )
+
+    def _custom_index(self) -> int | None:
+        index = self._window_combo.findText(_CUSTOM_WINDOW)
+        return index if index >= 0 else None
+
+    def _hold_to_look_back(self) -> None:
+        """A drag back in time while live holds the plot where it is taken."""
+        self._held_for_looking_back = True
+        self._pause_btn.setChecked(True)
 
     # ── Drawing ──────────────────────────────────────────────────────────
 
@@ -1024,10 +1444,14 @@ class PlotView(QWidget):
         if (self._paused and not force) or not self._traces:
             return
         try:
+            if self._history is not None:
+                self._history.sync()
+            low, high = self._time_to_draw()
             for name, trace in self._traces.items():
-                x, y = self._engine.snapshot(name)
+                x, y, exact_from = self._series(name, low, high)
                 self._data[name] = (x, y)
-                trace.setData(x, y)
+                self._exact_from[name] = exact_from
+                trace.setData(*self._broken(x, y))
             if not any(x.size for x, _ in self._data.values()):
                 return
             if self._regroup_pending:
@@ -1044,7 +1468,13 @@ class PlotView(QWidget):
             self._pause_btn.setChecked(True)
 
     def _place_view(self) -> None:
-        """Keep the newest data in view, or fit everything once."""
+        """Keep the newest data in view, or fit everything once.
+
+        While held still (Pause, Measure) the time shown stays where it
+        is, however much arrives meanwhile; only Fit moves it.
+        """
+        if self._paused and not self._fit_pending:
+            return
         first = self._panels[0].item
         if self._window_seconds is None:
             if self._fit_pending:
@@ -1062,15 +1492,173 @@ class PlotView(QWidget):
         low, high = self._panels[0].item.getViewBox().viewRange()[0]
         return float(low), float(high)
 
+    def _time_to_draw(self) -> tuple[float, float]:
+        """The time the chart will show once placed: the time shown while
+        live, everything when everything is shown, or where it is held."""
+        latest = self._engine.latest_x
+        if self._window_seconds is None and (self._fit_pending or not self._paused):
+            return 0.0, latest
+        if self._fit_pending or not self._paused:
+            return max(0.0, latest - self._window_seconds), latest
+        return self._time_in_view()
+
+    def _samples_in_memory(self, name: str) -> tuple[np.ndarray, np.ndarray]:
+        held = self._held_samples
+        if held is not None and name in held:
+            return held[name]
+        return self._engine.snapshot(name)
+
+    def _series(self, name: str, low: float, high: float) -> tuple[np.ndarray, np.ndarray, float]:
+        """What to draw of ``name`` between ``low`` and ``high``, and the time
+        from which every sample is drawn.
+
+        The samples in memory, after older time from the history: every
+        sample read in full for this view if there is one, or else the
+        least and greatest of each slice of the overview.
+        """
+        x, y = self._samples_in_memory(name)
+        history = self._history
+        oldest = float(x[0]) if x.size else np.inf
+        # Times start at the session's first line: there is nothing before 0.
+        low = max(low, 0.0)
+        if history is None or low >= oldest:
+            return x, y, -np.inf
+        end = min(high, oldest)
+        detail = self._detail_for_view()
+        if detail is not None and name in detail.samples:
+            older_x, older_y = detail.samples[name]
+            exact_from = detail.request.low if detail.every_sample and detail.complete else oldest
+        else:
+            overview = history.overview(name)
+            if overview is None:
+                return x, y, oldest
+            older_x, older_y = overview.samples(low, end)
+            caught_up = history.reached is not None and history.reached >= oldest
+            # Once the recording has been read that far, an older time with
+            # no samples has none to draw.
+            exact_from = -np.inf if caught_up and not np.any(older_x < oldest) else oldest
+        before = older_x < oldest
+        return (
+            np.concatenate((older_x[before], x)),
+            np.concatenate((older_y[before], y)),
+            exact_from,
+        )
+
+    def _held_in_memory(self) -> dict[str, tuple[float, int]]:
+        """For each value, its oldest sample in memory and how many share its time."""
+        held: dict[str, tuple[float, int]] = {}
+        for name in self._columns:
+            x, _ = self._samples_in_memory(name)
+            if x.size:
+                oldest = float(x[0])
+                held[name] = (oldest, int(np.count_nonzero(x == oldest)))
+        return held
+
+    def _wanted_detail(self) -> DetailRequest | None:
+        """The older time on screen to read in full, if the plot is held
+        still and shows any time older than the samples in memory."""
+        if self._history is None or not self._paused or not self._panels or self._graphics is None:
+            return None
+        generation = self._engine.generation
+        low, high = self._time_in_view()
+        low = max(low, 0.0)
+        held = self._held_in_memory()
+        if held and all(low >= oldest for oldest, _ in held.values()):
+            return None
+        return DetailRequest(generation, low, high, max(1, self._graphics.width()), held)
+
+    def _detail_for_view(self) -> DetailResult | None:
+        """The full reading of the older time on screen, once it has come."""
+        history = self._history
+        wanted = self._detail_in_view
+        if history is None or wanted is None or not self._paused:
+            return None
+        detail = history.detail
+        if detail is None or detail.request != wanted:
+            return None
+        return detail
+
+    def _ask_for_detail(self) -> None:
+        wanted = self._wanted_detail()
+        self._detail_in_view = wanted
+        if wanted is not None:
+            self._history.request_detail(wanted)
+        self._show_note()
+
+    def _on_view_moved(self, *_: object) -> None:
+        """The time shown changed; while held still, read it in full once it rests."""
+        if self._paused and self._history is not None:
+            self._detail_timer.start()
+
+    def _on_history_changed(self) -> None:
+        if self._paused:
+            self._redraw(force=True)
+            self._update_figures()
+        self._show_note()
+
+    def _show_note(self) -> None:
+        """Say what the chart cannot show in full, if anything.
+
+        The note takes its room as the measuring table does: the host
+        adds it to the plot, so the chart keeps its height.
+        """
+        text = self._note_text()
+        self._note.show_text(text)
+        height = 0
+        if text:
+            note = self._note
+            height = note.heightForWidth(self.width()) if note.hasHeightForWidth() \
+                else note.sizeHint().height()
+        if height != self._note_height:
+            change, self._note_height = height - self._note_height, height
+            self.height_wanted.emit(change)
+
+    def _note_text(self) -> str:
+        history = self._history
+        if history is None or not self._panels:
+            return ""
+        if history.stalled:
+            return _STALLED_HISTORY_NOTE
+        low = max(self._time_in_view()[0], 0.0)
+        shown_whole = all(low >= self._exact_from.get(name, -np.inf) for name in self._columns)
+        if not shown_whole:
+            if not self._paused:
+                caught_up = history.reached is not None and all(
+                    history.reached >= self._exact_from.get(name, -np.inf) for name in self._columns
+                )
+                return _EXTREMES_LIVE_NOTE if caught_up else _READING_OLDER_NOTE
+            detail = self._detail_for_view()
+            if detail is None:
+                return _READING_NOTE if history.reading_detail else _EXTREMES_HELD_NOTE
+            if not detail.complete:
+                return _INCOMPLETE_NOTE
+            return _EXTREMES_HELD_NOTE
+        if history.start_lost and low <= 0:
+            return _START_LOST_NOTE
+        return ""
+
     def _update_figures(self) -> None:
         """Bring the figures beside the chart up to date."""
         if not self._panels:
             return
         low, high = self._time_in_view()
+        detail = self._detail_for_view()
         for name, row in self._rows.items():
             x, y = self._data.get(name, (np.empty(0), np.empty(0)))
-            row.set_stats(visible_stats(x, y, low, high))
+            exact_from = self._exact_from.get(name, -np.inf)
+            if max(low, 0.0) >= exact_from:
+                row.set_stats(visible_stats(x, y, low, high))
+            elif detail is not None and detail.complete and name in detail.request.held:
+                older = detail.figures.get(name)
+                row.set_stats(stats_after(older, x, y, detail.request.held[name][0], high))
+            else:
+                last = visible_stats(x, y, low, high)
+                why = _FIGURES_LIVE if not self._paused else (
+                    _FIGURES_READING if self._history.reading_detail else _FIGURES_ZOOM
+                )
+                row.set_last_only(None if last is None else last.last, why)
         self._update_measure()
+        self._show_note()
 
     # ── Measuring ────────────────────────────────────────────────────────
 
@@ -1117,10 +1705,13 @@ class PlotView(QWidget):
         ]
         for name in shown:
             at_a, at_b = self._held(name, a), self._held(name, b)
-            rows[0].append(_NO_FIGURE if at_a is None else format_received(at_a))
-            rows[1].append(_NO_FIGURE if at_b is None else format_received(at_b))
-            change = None if at_a is None or at_b is None else at_b - at_a
-            rows[2].append(_NO_FIGURE if change is None else format_change(change))
+            rows[0].append(self._held_text(name, a))
+            rows[1].append(self._held_text(name, b))
+            if not (self._exact_at(name, a) and self._exact_at(name, b)):
+                rows[2].append(_NOT_EXACT)
+            else:
+                change = None if at_a is None or at_b is None else at_b - at_a
+                rows[2].append(_NO_FIGURE if change is None else format_change(change))
         self._measure_table.set_figures(columns, rows)
 
     # ── Under the pointer ────────────────────────────────────────────────
@@ -1128,12 +1719,26 @@ class PlotView(QWidget):
     def _shown_names(self) -> list[str]:
         return [name for name in self._columns if self._rows[name].shown]
 
+    def _exact_at(self, name: str, time: float) -> bool:
+        """True where every sample of ``name`` is drawn, so a value held can be read."""
+        return time >= self._exact_from.get(name, -np.inf)
+
     def _held(self, name: str, time: float) -> float | None:
-        """What ``name`` last received at or before ``time``, if anything."""
-        if name not in self._data:
+        """What ``name`` last received at or before ``time``, if anything.
+
+        None where only the least and greatest are drawn: the value
+        then is not known from what is drawn.
+        """
+        if name not in self._data or not self._exact_at(name, time):
             return None
         x, y = self._data[name]
         return value_held(x, y, time)
+
+    def _held_text(self, name: str, time: float) -> str:
+        if not self._exact_at(name, time):
+            return _NOT_EXACT
+        value = self._held(name, time)
+        return _NO_FIGURE if value is None else format_received(value)
 
     def _snapped(self, time: float) -> float:
         """The time of the received sample nearest to ``time``, among the values shown."""
@@ -1196,12 +1801,10 @@ class PlotView(QWidget):
         if time is None:
             self._readout.hide()
             return
-        values = []
-        for name in self._shown_names():
-            value = self._held(name, time)
-            values.append(
-                (self._colour_of(name), name, _NO_FIGURE if value is None else format_received(value))
-            )
+        values = [
+            (self._colour_of(name), name, self._held_text(name, time))
+            for name in self._shown_names()
+        ]
         self._readout.set_moment(self._moment_text(time), f"{format_value(time)} s", values)
         self._place_readout(time)
         self._readout.show()

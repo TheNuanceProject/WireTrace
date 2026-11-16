@@ -115,7 +115,7 @@ class CSVEngine:
     def header(self) -> str:
         """The column header line. Meaningful once detection is complete."""
         if self._mode == CSVMode.AUTO:
-            names = [self._csv_escape(column) for column in self._columns]
+            names = [csv_cell(column) for column in self._columns]
             return ",".join([TIMESTAMP_COLUMN, *names])
         return f"{TIMESTAMP_COLUMN},{RAW_DATA_COLUMN}"
 
@@ -232,12 +232,12 @@ class CSVEngine:
     def _format_row(self, timestamp: str, line: str) -> str | None:
         """Format one line as a row, or None if it is not a row."""
         if self._mode == CSVMode.RAW:
-            return f"{timestamp},{self._csv_escape(line)}"
+            return f"{timestamp},{csv_cell(line)}"
 
         values = self._extract_values(line)
         if len(values) < self._min_columns_per_row:
             return None
-        cells = [self._csv_escape(values.get(column, "")) for column in self._columns]
+        cells = [csv_cell(values.get(column, "")) for column in self._columns]
         return ",".join([timestamp, *cells])
 
     def _extract_values(self, line: str) -> dict[str, str]:
@@ -262,28 +262,28 @@ class CSVEngine:
             return value
         return json.dumps(value, ensure_ascii=False)
 
-    @staticmethod
-    def _csv_escape(value: str) -> str:
-        """Escape a value for CSV output, safe against formula injection.
 
-        Two layers, in order:
+def csv_cell(value: str) -> str:
+    """Escape a value for CSV output, safe against formula injection.
 
-          1. Formula-injection neutralisation: a value whose first
-             character is one a spreadsheet treats as a formula start
-             (``=`` ``+`` ``-`` ``@`` tab CR) is prefixed with a single
-             quote, so Excel and LibreOffice render it as literal text
-             and never execute it. A plain signed number is exempt: it
-             cannot carry a formula, and prefixing it would turn every
-             negative reading into text.
+    Two layers, in order:
 
-          2. RFC 4180 structural escaping: the (possibly prefixed) value
-             is wrapped in quotes if it contains a comma, quote, or
-             newline, with internal quotes doubled.
-        """
-        if not value:
-            return ""
-        if value[0] in _CSV_FORMULA_TRIGGERS and not _PLAIN_NUMBER_RE.fullmatch(value):
-            value = "'" + value
-        if "," in value or '"' in value or "\n" in value or "\r" in value:
-            return '"' + value.replace('"', '""') + '"'
-        return value
+      1. Formula-injection neutralisation: a value whose first
+         character is one a spreadsheet treats as a formula start
+         (``=`` ``+`` ``-`` ``@`` tab CR) is prefixed with a single
+         quote, so Excel and LibreOffice render it as literal text
+         and never execute it. A plain signed number is exempt: it
+         cannot carry a formula, and prefixing it would turn every
+         negative reading into text.
+
+      2. RFC 4180 structural escaping: the (possibly prefixed) value
+         is wrapped in quotes if it contains a comma, quote, or
+         newline, with internal quotes doubled.
+    """
+    if not value:
+        return ""
+    if value[0] in _CSV_FORMULA_TRIGGERS and not _PLAIN_NUMBER_RE.fullmatch(value):
+        value = "'" + value
+    if "," in value or '"' in value or "\n" in value or "\r" in value:
+        return '"' + value.replace('"', '""') + '"'
+    return value

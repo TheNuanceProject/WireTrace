@@ -63,6 +63,8 @@ from app.constants import (
     LOG_FLUSH_THRESHOLD_BYTES,
     LOG_FSYNC_INTERVAL_MS,
     LOG_PENDING_MAX_CHARACTERS,
+    MS_PER_SECOND,
+    TAG_NOTICE_EVENT,
 )
 from core.csv_engine import CSVEngine
 from core.log_files import FileBackend, SplitLogFile
@@ -81,11 +83,10 @@ from core.records import (
     format_timestamp,
     notice_record,
 )
-from core.session_spool import SessionSpool, SpoolSnapshot
+from core.session_spool import SessionSpool, SpoolPosition, SpoolSnapshot
 
 logger = logging.getLogger(__name__)
 
-_MS_PER_SECOND = 1000.0
 
 _T = TypeVar("_T")
 
@@ -294,8 +295,8 @@ class SessionWriter:
         self._listener = listener
         self._spool_root = spool_root
         self._max_pending_lines = max_pending_lines
-        self._flush_interval = flush_interval_ms / _MS_PER_SECOND
-        self._sync_interval = LOG_FSYNC_INTERVAL_MS / _MS_PER_SECOND
+        self._flush_interval = flush_interval_ms / MS_PER_SECOND
+        self._sync_interval = LOG_FSYNC_INTERVAL_MS / MS_PER_SECOND
         self._backend = backend
 
         self._condition = threading.Condition()
@@ -319,7 +320,7 @@ class SessionWriter:
         """Apply changed preferences."""
         with self._condition:
             self._max_pending_lines = max_pending_lines
-            self._flush_interval = flush_interval_ms / _MS_PER_SECOND
+            self._flush_interval = flush_interval_ms / MS_PER_SECOND
             self._condition.notify()
 
     def begin_session(self) -> None:
@@ -327,8 +328,9 @@ class SessionWriter:
         self._ensure_thread()
         self._call(self._begin_session)
 
-    def submit(self, records: list[LineRecord]) -> None:
-        """Queue records for writing. Never blocks.
+    def submit(self, records: list[LineRecord]) -> bool:
+        """Queue records for writing. Never blocks. Returns False if they
+        were dropped.
 
         Records beyond the queue limit, counted in lines and in
         characters, are dropped. The drop keeps its place in the queue,
@@ -338,14 +340,15 @@ class SessionWriter:
         there is none.
         """
         if not records:
-            return
+            return True
         with self._condition:
             characters = sum(len(record.text) for record in records)
             fits = (
                 self._pending_lines + len(records) <= self._max_pending_lines
                 and self._pending_characters + characters <= LOG_PENDING_MAX_CHARACTERS
             )
-            if fits or self._pending_lines == 0:
+            accepted = fits or self._pending_lines == 0
+            if accepted:
                 self._items.append(records)
                 self._pending_lines += len(records)
                 self._pending_characters += characters
@@ -354,6 +357,7 @@ class SessionWriter:
             else:
                 self._items.append(_Dropped(len(records), records[0].timestamp))
             self._condition.notify()
+        return accepted
 
     def start_log(self, request: LogRequest) -> LogStarted:
         """Open the log files. Records submitted after this are logged.
@@ -395,6 +399,16 @@ class SessionWriter:
         Returns None if no session is being recorded.
         """
         return self._call(self._snapshot)
+
+    def recording_from(
+        self, position: SpoolPosition | None, max_segments: int | None = None,
+    ) -> SpoolSnapshot | None:
+        """Capture what the session recorded after ``position`` (see
+        ``SessionSpool.snapshot_from``). May be called from any thread.
+
+        Returns None if no session is being recorded.
+        """
+        return self._call(lambda: self._recording_from(position, max_segments))
 
     def end_session(self) -> LogSummary | None:
         """Stop the log, if any, and stop recording. The spool stays
@@ -686,7 +700,8 @@ class SessionWriter:
         log.last_timestamp = moment
         message = "Logging paused" if paused else "Logging resumed"
         log.text_file.append(
-            encode_text_line(notice_record(message, moment), log.line_ending), units=0,
+            encode_text_line(notice_record(message, moment, TAG_NOTICE_EVENT), log.line_ending),
+            units=0,
         )
 
     def _mark_export_start(self) -> None:
@@ -695,6 +710,13 @@ class SessionWriter:
 
     def _snapshot(self) -> SpoolSnapshot | None:
         return self._spool.snapshot() if self._spool is not None else None
+
+    def _recording_from(
+        self, position: SpoolPosition | None, max_segments: int | None,
+    ) -> SpoolSnapshot | None:
+        if self._spool is None:
+            return None
+        return self._spool.snapshot_from(position, max_segments)
 
     def _end_session(self) -> LogSummary | None:
         self._session_active = False

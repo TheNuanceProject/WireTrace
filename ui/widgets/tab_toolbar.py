@@ -26,7 +26,9 @@ from app.constants import (
     DEFAULT_BAUD_RATE,
     DisplayMode,
 )
+from core.serial_settings import LineSettings, LineStates
 from ui import shortcuts
+from ui.formatting import input_line_texts
 from ui.themes import tokens
 from ui.themes.icons import bind_icon
 from ui.widgets.button import Button, join_buttons
@@ -50,6 +52,11 @@ class TabToolbar(QFrame):
         connect_requested(str, int):  Port and baud rate to open.
         disconnect_requested():       Close the connection.
         ports_wanted():               The port list should be read again.
+        port_chosen(str):             The user chose another port in the list.
+        port_settings_requested():    Open the settings of the chosen port.
+        dtr_toggled(bool):            Set DTR on or off.
+        rts_toggled(bool):            Set RTS on or off.
+        break_requested():            Send a break.
         log_toggled():                Start a log, or stop the running one.
         pause_toggled():              Pause the log, or resume it.
         clear_requested():            Clear the console.
@@ -63,6 +70,11 @@ class TabToolbar(QFrame):
     connect_requested = Signal(str, int)
     disconnect_requested = Signal()
     ports_wanted = Signal()
+    port_chosen = Signal(str)
+    port_settings_requested = Signal()
+    dtr_toggled = Signal(bool)
+    rts_toggled = Signal(bool)
+    break_requested = Signal()
     log_toggled = Signal()
     pause_toggled = Signal()
     clear_requested = Signal()
@@ -82,6 +94,8 @@ class TabToolbar(QFrame):
         self._logging = False
         self._paused = False
         self._has_session = False
+        self._line_states: LineStates | None = None
+        self._plot_available = True
 
         self._build_connection()
         self._build_actions()
@@ -102,8 +116,9 @@ class TabToolbar(QFrame):
         layout.setContentsMargins(metrics.space_3, 0, metrics.space_3, 0)
         layout.setSpacing(metrics.space_2)
         dividers = (self._divider(), self._divider())
-        for widget in (self._port, self._baud, self._connect, dividers[0], self._log, self._pause,
-                       dividers[1], self._clear, self._export, self._plot):
+        for widget in (self._port, self._baud, self._port_settings, self._lines, self._connect,
+                       dividers[0], self._log, self._pause, dividers[1], self._clear, self._export,
+                       self._plot):
             layout.addWidget(widget)
         layout.addStretch(1)
         layout.addWidget(self._display)
@@ -111,8 +126,8 @@ class TabToolbar(QFrame):
         layout.addWidget(self._more)
         # Every widget of the row, for working out what fits.
         self._row: tuple[QWidget, ...] = (
-            self._port, self._baud, self._connect, dividers[0], self._log, self._pause,
-            dividers[1], self._clear, self._export, self._plot,
+            self._port, self._baud, self._port_settings, self._lines, self._connect, dividers[0],
+            self._log, self._pause, dividers[1], self._clear, self._export, self._plot,
             self._display, self._search, self._more,
         )
 
@@ -120,6 +135,8 @@ class TabToolbar(QFrame):
         # the widget that leaves the row, the buttons it stands for, and
         # the label in the More menu (a button's own text when empty).
         self._overflow: tuple[tuple[QWidget, tuple[Button, ...], str], ...] = (
+            (self._lines, (self._lines,), ""),
+            (self._port_settings, (self._port_settings,), "Port settings"),
             (self._plot, (self._plot,), "Plot"),
             (self._export, (self._export,), "Export session"),
             (self._clear, (self._clear,), "Clear console"),
@@ -138,6 +155,7 @@ class TabToolbar(QFrame):
         self._port.setPlaceholderText("Choose a port")
         self._port.setAccessibleName("Serial port")
         self._port.about_to_open.connect(self.ports_wanted)
+        self._port.activated.connect(lambda _index: self.port_chosen.emit(self.selected_port))
 
         self._baud = QComboBox()
         self._baud.setEditable(True)
@@ -148,6 +166,11 @@ class TabToolbar(QFrame):
         self._baud.setCurrentText(str(DEFAULT_BAUD_RATE))
         self._baud.setValidator(QIntValidator(BAUD_RATE_MIN, BAUD_RATE_MAX, self))
         self._baud.lineEdit().textChanged.connect(self._mark_baud)
+
+        self._port_settings = Button()
+        bind_icon(self._port_settings, "port_settings")
+        self._port_settings.clicked.connect(self.port_settings_requested)
+        self.set_line_settings(LineSettings())
 
         self._connect = Button()
         self._connect.clicked.connect(self._on_connect_clicked)
@@ -165,6 +188,25 @@ class TabToolbar(QFrame):
         self._plot.setCheckable(True)
         self._plot.setToolTip(shortcuts.with_keys("Show or hide the live plot", "plot"))
         self._plot.toggled.connect(self.plot_toggled)
+
+        self._lines = self._button("Lines", "control_lines")
+        self._lines.setToolTip("Set DTR and RTS, send a break, and see the input lines")
+        self._lines_menu = QMenu("Control lines", self)
+        self._dtr = self._lines_menu.addAction("DTR")
+        self._dtr.setCheckable(True)
+        self._dtr.triggered.connect(self.dtr_toggled)
+        self._rts = self._lines_menu.addAction("RTS")
+        self._rts.setCheckable(True)
+        self._rts.triggered.connect(self.rts_toggled)
+        self._lines_menu.addSeparator()
+        self._break = self._lines_menu.addAction("Send break")
+        self._break.triggered.connect(self.break_requested)
+        self._lines_menu.addSeparator()
+        self._inputs = [self._lines_menu.addAction(name) for name, _ in input_line_texts(None)]
+        for action in self._inputs:
+            action.setEnabled(False)
+        self._lines.setMenu(self._lines_menu)
+        self.set_line_states(None)
 
     def _build_display(self) -> None:
         self._text_mode = Button("Text")
@@ -239,6 +281,31 @@ class TabToolbar(QFrame):
         self._logging = logging
         self._paused = logging and paused
         self._refresh_states()
+
+    def set_line_settings(self, line: LineSettings) -> None:
+        """Show the line settings the chosen port is, or will be, opened with."""
+        self._port_settings.setText(line.framing)
+        self._port_settings.setToolTip(f"Port settings: {line.describe()}")
+        self._port_settings.setAccessibleName(f"Port settings, {line.describe()}")
+
+    def set_line_states(self, states: LineStates | None) -> None:
+        """Show the control lines of the open port, or none when closed."""
+        self._line_states = states
+        self._dtr.setChecked(bool(states and states.dtr))
+        self._rts.setChecked(bool(states and states.rts))
+        self._rts.setEnabled(states is not None and states.rts is not None)
+        self._rts.setText("RTS" if states is None or states.rts is not None
+                          else "RTS (set by flow control)")
+        for action, (name, state) in zip(self._inputs, input_line_texts(states), strict=True):
+            action.setText(f"{name}: {state}")
+
+    def line_menu_texts(self) -> list[str]:
+        return [action.text() for action in self._lines_menu.actions() if action.text()]
+
+    def set_plot_available(self, available: bool) -> None:
+        """Show the Plot button only while the plot is switched on."""
+        self._plot_available = available
+        self._fit()
 
     def set_plot_open(self, is_open: bool) -> None:
         """Show the Plot button as on or off without announcing a toggle."""
@@ -346,9 +413,13 @@ class TabToolbar(QFrame):
         return margins.left() + margins.right() + widths + layout.spacing() * len(shown)
 
     def _fit(self) -> None:
-        """Move buttons that do not fit into the More menu."""
+        """Move buttons that do not fit into the More menu.
+
+        The port settings belong to a closed port and the control lines
+        to an open one, so only one of the two is ever in the row.
+        """
         for widget, _, _ in self._overflow:
-            widget.setVisible(True)
+            widget.setVisible(self._applies(widget))
         self._more.setVisible(False)
         self._more_menu.clear()
 
@@ -356,6 +427,8 @@ class TabToolbar(QFrame):
             return self._row_width([widget for widget in self._row if not widget.isHidden()])
 
         for widget, buttons, label in self._overflow:
+            if not self._applies(widget):
+                continue
             if needed() <= self.width():
                 break
             self._more.setVisible(True)
@@ -363,7 +436,20 @@ class TabToolbar(QFrame):
             for button in buttons:
                 self._add_to_more(button, label)
 
+    def _applies(self, widget: QWidget) -> bool:
+        if widget is self._port_settings:
+            return not self._connected
+        if widget is self._lines:
+            return self._connected
+        if widget is self._plot:
+            return self._plot_available
+        return True
+
     def _add_to_more(self, button: Button, label: str) -> None:
+        if button.menu() is not None:
+            submenu = self._more_menu.addMenu(button.menu())
+            submenu.setEnabled(button.isEnabled())
+            return
         action = self._more_menu.addAction(label or button.text())
         action.setEnabled(button.isEnabled())
         if button.isCheckable():

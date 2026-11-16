@@ -146,6 +146,25 @@ class TestSettingsMigration:
         assert cfg.font_family == DEFAULT_FONT_FAMILY
         assert cfg.log_split_size_mb == 250
 
+    @pytest.mark.parametrize(("stored", "expected"), [
+        ("absolute", "date_time"), ("", "date_time"), ("relative", "relative"),
+    ])
+    def test_a_2_0_file_shows_the_date_with_the_time(self, stored, expected):
+        line = f"timestamp_mode = {stored}\n" if stored else ""
+        _write_file(self.dir, f"[General]\nsettings_version = 2\ntheme = dark\n[Display]\n{line}")
+        cfg = ConfigManager()
+        assert cfg.timestamp_mode == expected
+        assert cfg.theme == "dark"
+
+    def test_time_of_day_chosen_after_the_upgrade_is_kept(self):
+        _write_file(self.dir, "[General]\nsettings_version = 2\n[Display]\ntimestamp_mode = absolute\n")
+        cfg = ConfigManager()
+        cfg.timestamp_mode = "absolute"
+        assert _reloaded(cfg).timestamp_mode == "absolute"
+
+    def test_a_new_installation_shows_the_date_with_the_time(self):
+        assert ConfigManager().timestamp_mode == "date_time"
+
     def test_reset_to_defaults_stays_at_the_current_version(self):
         _write_file(self.dir, _V1_FILE)
         cfg = ConfigManager()

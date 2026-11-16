@@ -343,7 +343,6 @@ def test_the_system_is_asked_for_the_chosen_scheme(
     assert hints.asked == [scheme]
 
 
-
 def test_following_the_system_draws_the_theme_once(
     theme_manager: ThemeManager, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

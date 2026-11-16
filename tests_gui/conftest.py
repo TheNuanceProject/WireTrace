@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gc
 import sys
+import weakref
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -29,8 +30,9 @@ from tests_gui.offscreen import use_offscreen_display  # noqa: E402
 
 use_offscreen_display()
 
-from PySide6.QtCore import QEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+import shiboken6  # noqa: E402
+from PySide6.QtCore import QEvent, QObject  # noqa: E402
+from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 import app.config as config_module  # noqa: E402
 from app.config import ConfigManager  # noqa: E402
@@ -61,20 +63,53 @@ def qapp() -> Iterator[QApplication]:
     instance.processEvents()
 
 
+class _WindowWatch(QObject):
+    """Notes every widget shown as a window of its own, without keeping it alive."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shown: list[weakref.ref[QWidget]] = []
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.Show
+            and isinstance(watched, QWidget)
+            and watched.isWindow()
+            and watched.parent() is None
+        ):
+            self.shown.append(weakref.ref(watched))
+        return False
+
+
 @pytest.fixture(autouse=True)
 def no_leftover_windows(qapp: QApplication) -> Iterator[None]:
-    """Destroy every window a test leaves behind.
+    """Fail on a widget that flashed as a window of its own, and destroy
+    every window a test leaves behind.
+
+    A widget shown before it was placed in its parent appears for a
+    moment as a separate window (on Windows it also takes the focus from
+    the main window). Such a widget is shown as a window and later has a
+    parent; a real window never gets one.
 
     A window that outlives its test is restyled by every later theme
     change, which makes the suite slower with each test that runs.
     """
+    watch = _WindowWatch()
+    qapp.installEventFilter(watch)
     yield
+    qapp.removeEventFilter(watch)
+    flashed = sorted({
+        f"{type(widget).__name__} {widget.objectName()!r}".strip()
+        for widget in (ref() for ref in watch.shown)
+        if widget is not None and shiboken6.isValid(widget) and widget.parent() is not None
+    })
     for widget in qapp.topLevelWidgets():
         widget.close()
         widget.deleteLater()
     qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     qapp.processEvents()
     gc.collect()
+    assert not flashed, f"shown as a window before it was placed in its parent: {flashed}"
 
 
 @pytest.fixture

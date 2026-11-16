@@ -35,11 +35,21 @@ from app.config import ConfigManager
 from app.constants import (
     DEFAULT_FONT_FAMILY,
     FILENAME_DEFAULT_NAME,
+    HIGHLIGHT_RULES_MAX,
     ExportFormat,
     LineEnding,
     ThemeID,
 )
 from app.plot_config import PlotConfig, PlotProfileStore
+from core.highlight_rules import HighlightRule, HighlightStore
+from core.serial_settings import (
+    FlowControl,
+    LineSettings,
+    Parity,
+    StopBits,
+    parities_for,
+    stop_bits_for,
+)
 from tests.update_helpers import release
 from tests_gui.support import pixel
 from ui.dialogs.about_dialog import AboutDialog
@@ -47,12 +57,14 @@ from ui.dialogs.common import ChoiceRow
 from ui.dialogs.export_dialog import DEFAULT_EXPORT_NAME, ExportDialog
 from ui.dialogs.new_log_dialog import NewLogDialog
 from ui.dialogs.plot_config_dialog import PlotConfigDialog
+from ui.dialogs.port_settings_dialog import PortSettingsDialog
 from ui.dialogs.preferences_dialog import PAGES, PreferencesDialog
 from ui.dialogs.saved_commands_dialog import SavedCommandsDialog
 from ui.dialogs.shortcuts_dialog import ShortcutsDialog
 from ui.splash_screen import SplashScreen
 from ui.themes import tokens
 from ui.themes.theme_manager import ThemeManager
+from ui.widgets.highlight_editor import HighlightEditor
 from updater.update_dialog import UpdateDialog
 from updater.update_manager import UpdateManager
 from version import (
@@ -104,6 +116,10 @@ def _saved_commands(_config: ConfigManager, _theme: ThemeManager, _: Path) -> QD
     return SavedCommandsDialog(["status", "reset"])
 
 
+def _port_settings(_config: ConfigManager, _theme: ThemeManager, _: Path) -> QDialog:
+    return PortSettingsDialog(_SAMPLE_PORT, LineSettings())
+
+
 _DIALOG_FACTORIES: dict[str, DialogFactory] = {
     "saved_commands": _saved_commands,
     "preferences": _preferences,
@@ -113,6 +129,7 @@ _DIALOG_FACTORIES: dict[str, DialogFactory] = {
     "plot_config": _plot_config,
     "shortcuts": _shortcuts,
     "update": _update,
+    "port_settings": _port_settings,
 }
 
 
@@ -180,6 +197,55 @@ def test_no_button_of_a_dialog_is_narrower_than_its_text(
 def light(theme_manager: ThemeManager) -> ThemeManager:
     theme_manager.apply_theme(ThemeID.LIGHT)
     return theme_manager
+
+
+class TestPortSettings:
+    def _dialog(self, qapp, settings: LineSettings) -> PortSettingsDialog:
+        dialog = PortSettingsDialog(_SAMPLE_PORT, settings)
+        dialog.show()
+        qapp.processEvents()
+        return dialog
+
+    def _combo(self, dialog: QDialog, name: str) -> QComboBox:
+        return next(c for c in dialog.findChildren(QComboBox) if c.accessibleName() == name)
+
+    def test_settings_shown_are_the_settings_read_back(self, qapp, light):
+        settings = LineSettings(7, Parity.ODD, StopBits.TWO, FlowControl.SOFTWARE, False, False)
+        dialog = self._dialog(qapp, settings)
+
+        assert dialog.settings == settings
+        assert _SAMPLE_PORT in _texts(dialog)
+        dialog.close()
+
+    def test_only_choices_this_system_supports_are_offered(self, qapp, light):
+        dialog = self._dialog(qapp, LineSettings())
+        parity = self._combo(dialog, "Parity")
+        stop_bits = self._combo(dialog, "Stop bits")
+
+        assert [parity.itemData(i) for i in range(parity.count())] == list(parities_for())
+        assert [stop_bits.itemData(i) for i in range(stop_bits.count())] == list(stop_bits_for())
+        dialog.close()
+
+    def test_hardware_flow_control_hands_rts_to_the_driver(self, qapp, light):
+        dialog = self._dialog(qapp, LineSettings())
+        flow = self._combo(dialog, "Flow control")
+        dtr, rts = dialog.findChildren(QCheckBox)
+        assert rts.isEnabled()
+
+        flow.setCurrentIndex(flow.findData(FlowControl.HARDWARE))
+        qapp.processEvents()
+
+        assert dtr.isEnabled() and not rts.isEnabled()
+        assert "With hardware flow control, the driver sets RTS." in _texts(dialog)
+        dialog.close()
+
+    def test_usual_settings_restores_8n1(self, qapp, light):
+        dialog = self._dialog(qapp, LineSettings(5, Parity.EVEN, StopBits.TWO, dtr_on_open=False))
+
+        _button(dialog, "Usual settings").click()
+
+        assert dialog.settings == LineSettings()
+        dialog.close()
 
 
 class TestStartALog:
@@ -418,8 +484,8 @@ class TestPreferences:
 
     def test_pages_are_listed_in_order_and_the_first_is_shown(self, dialog):
         assert PAGES == (
-            "Appearance", "Console", "Connection", "Logging", "Plot", "Updates and privacy",
-            "Advanced",
+            "Appearance", "Console", "Connection", "Logging", "Features", "Plot", "Alerts",
+            "Highlights", "Updates and privacy", "Advanced",
         )
         assert dialog.current_page == "Appearance"
 
@@ -433,6 +499,9 @@ class TestPreferences:
         assert page in _texts(dialog._pages.currentWidget())
 
     def test_no_page_name_is_cut_short(self, qapp, dialog):
+        # Every feature on, so every page is listed.
+        for switch in dialog._module_switches.values():
+            switch.setChecked(True)
         dialog.show()
         qapp.processEvents()
         sidebar = dialog._sidebar
@@ -448,13 +517,82 @@ class TestPreferences:
         assert dialog.setting_names() == [
             "Theme",
             "Font", "Text size", "Timestamps", "Colours", "Following", "Blank lines",
-            "Baud rate",
+            "Baud rate", "Reconnect", "Stop waiting after", "Ports without USB identity",
             "Log folder", "Log format", "Maximum log file size", "Line endings in files",
-            "Default profile", "Profiles",
+            "Live plot", "Restart detection", "Session report", "Alerts", "Highlight rules",
+            "ANSI colours",
+            "Where it opens", "Default profile", "Profiles",
+            "Error lines", "Connection lost", "Quiet board", "Sound", "Desktop notification",
+            "Time between alerts",
             "Updates", "Usage statistics",
             "Console line limit", "Screen refresh", "Write to disk every",
             "Lines that may wait for a slow disk",
         ]
+
+    def test_every_timestamp_mode_is_offered_saved_and_read_back(self, qapp, config, light):
+        dialog = PreferencesDialog(config, light)
+        names = [dialog._timestamps.itemText(i) for i in range(dialog._timestamps.count())]
+        assert names == ["Time of day", "Date and time", "Since previous line"]
+
+        dialog._timestamps.setCurrentIndex(names.index("Date and time"))
+        _button(dialog, "Save").click()
+
+        assert config.timestamp_mode == "date_time"
+        assert PreferencesDialog(config, light)._timestamps.currentText() == "Date and time"
+
+    def test_choosing_sound_or_alerts_with_sound_plays_it_once(
+        self, qapp, config, light, monkeypatch,
+    ):
+        import ui.dialogs.preferences_dialog as preferences_module
+
+        played: list[int] = []
+        monkeypatch.setattr(preferences_module, "play_alert_sound", lambda: played.append(1))
+        config.alert_sound = False
+        dialog = PreferencesDialog(config, light)
+        alerts = dialog._module_switches["alerts"]
+        assert played == []
+
+        dialog._alert_sound.click()
+        assert played == [1]
+        dialog._alert_sound.click()
+        assert played == [1]
+
+        alerts.setChecked(False)
+        dialog._alert_sound.setChecked(True)
+        alerts.click()
+        assert played == [1, 1]
+        dialog._alert_sound.setChecked(False)
+        alerts.click()
+        alerts.click()
+        assert played == [1, 1]
+
+    def test_desktop_notification_is_offered_only_where_it_can_be_shown(
+        self, qapp, config, light, monkeypatch,
+    ):
+        import ui.dialogs.preferences_dialog as preferences_module
+
+        monkeypatch.setattr(preferences_module, "notifications_unavailable", lambda: "No area.")
+        refused = PreferencesDialog(config, light)
+        assert not refused._alert_notification.isEnabled()
+        assert refused._hints["Desktop notification"] == "No area."
+
+        monkeypatch.setattr(preferences_module, "notifications_unavailable", lambda: "")
+        offered = PreferencesDialog(config, light)
+        offered._alert_notification.setChecked(True)
+        _button(offered, "Save").click()
+        assert config.alert_notification is True
+
+    def test_a_notification_chosen_elsewhere_is_kept_where_it_cannot_be_shown(
+        self, qapp, config, light, monkeypatch,
+    ):
+        import ui.dialogs.preferences_dialog as preferences_module
+
+        config.alert_notification = True
+        monkeypatch.setattr(preferences_module, "notifications_unavailable", lambda: "No area.")
+        dialog = PreferencesDialog(config, light)
+        _button(dialog, "Save").click()
+
+        assert config.alert_notification is True
 
     def test_opening_and_saving_changes_nothing(self, qapp, config, dialog):
         before = {
@@ -469,6 +607,38 @@ class TestPreferences:
         assert after == before
         assert dialog.result() == QDialog.DialogCode.Accepted
 
+    def test_highlight_rules_are_added_saved_and_removed(self, qapp, config, light):
+        dialog = PreferencesDialog(config, light)
+        editor = dialog.findChild(HighlightEditor)
+        editor._add.click()
+        editor._add.click()
+        editor._add.click()
+        rows = editor._rows
+        rows[0][1].setText("  panic  ")
+        rows[1][1].setText("")
+        rows[2][1].setText("boot")
+        rows[2][2].setCurrentIndex(rows[2][2].findData(4))
+        _button(dialog, "Save").click()
+
+        assert HighlightStore(ConfigManager()).rules() == (
+            HighlightRule("panic", 1), HighlightRule("boot", 4),
+        )
+
+        reopened = PreferencesDialog(ConfigManager(), light)
+        editor = reopened.findChild(HighlightEditor)
+        assert [row[1].text() for row in editor._rows] == ["panic", "boot"]
+        editor._rows[0][0].findChild(QPushButton).click()
+        assert editor.rules() == (HighlightRule("boot", 4),)
+
+    def test_no_more_rules_than_the_limit_can_be_added(self, qapp, config, light):
+        dialog = PreferencesDialog(config, light)
+        editor = dialog.findChild(HighlightEditor)
+
+        for _ in range(HIGHLIGHT_RULES_MAX):
+            editor._add.click()
+
+        assert not editor._add.isEnabled()
+
     def test_every_value_is_saved_and_read_back(self, qapp, config, light, tmp_path):
         store = PlotProfileStore(config)
         store.upsert(PlotConfig(name="Motor", mode="auto"))
@@ -477,15 +647,23 @@ class TestPreferences:
 
         dialog._theme.setCurrentIndex(dialog._theme.findData(ThemeID.DARK.value))
         dialog._font_size.setValue(15)
-        dialog._timestamps.setCurrentIndex(1)
+        dialog._timestamps.setCurrentIndex(dialog._timestamps.findText("Since previous line"))
         dialog._severity_colours.setChecked(False)
         dialog._follow.setChecked(False)
         dialog._hide_blank.setChecked(True)
         dialog._baud.setCurrentIndex(dialog._baud.findData(9600))
+        dialog._reconnect_limit.setValue(90)
+        dialog._reconnect_by_name.setChecked(False)
         dialog._log_folder.setText(f"  {folder}  ")
         dialog._log_format.set_value(ExportFormat.BOTH)
         dialog._split.setValue(250)
         dialog._line_ending.set_value(LineEnding.CRLF)
+        dialog._plot_own_window.setChecked(False)
+        dialog._alert_errors.setChecked(False)
+        dialog._alert_quiet.setChecked(True)
+        dialog._alert_quiet_seconds.setValue(45)
+        dialog._alert_sound.setChecked(True)
+        dialog._alert_pause_seconds.setValue(90)
         dialog._plot_profile.setCurrentIndex(dialog._plot_profile.findData("Motor"))
         dialog._check_updates.setChecked(False)
         dialog._console_lines.setValue(20_000)
@@ -503,10 +681,16 @@ class TestPreferences:
         assert saved.auto_scroll is False
         assert saved.hide_blank_lines is True
         assert saved.default_baud_rate == 9600
+        assert (saved.reconnect, saved.reconnect_limit_minutes) == (True, 90)
+        assert saved.reconnect_by_port_name is False
         assert saved.default_log_directory == str(folder)
         assert saved.default_log_format is ExportFormat.BOTH
         assert saved.log_split_size_mb == 250
         assert saved.log_line_ending is LineEnding.CRLF
+        assert saved.plot_own_window is False
+        assert (saved.alert_error_lines, saved.alert_connection_lost) == (False, True)
+        assert (saved.alert_silence, saved.alert_silence_seconds, saved.alert_sound) == (True, 45, True)
+        assert saved.alert_pause_seconds == 90
         assert PlotProfileStore(saved).default_name == "Motor"
         assert saved.check_updates_on_startup is False
         assert saved.max_console_lines == 20_000
@@ -519,7 +703,10 @@ class TestPreferences:
         assert reopened._log_format.value is ExportFormat.BOTH
         assert reopened._line_ending.value is LineEnding.CRLF
         assert reopened._plot_profile.currentData() == "Motor"
+        assert not reopened._plot_own_window.isChecked()
         assert reopened._split.value() == 250
+        assert reopened._reconnect_limit.value() == 90
+        assert not reopened._reconnect_by_name.isChecked()
 
     def test_cancel_saves_nothing(self, qapp, config, dialog):
         dialog._font_size.setValue(dialog._font_size.value() + 3)
@@ -582,6 +769,19 @@ class TestPreferences:
 
         assert asked == ["Return every setting to its default?"]
         assert config.font_size == 15
+
+    def test_reconnect_rows_follow_the_reconnect_switch(self, qapp, config, light):
+        config.reconnect = False
+        dialog = PreferencesDialog(config, light)
+        rows = (dialog._reconnect_limit, dialog._reconnect_by_name)
+        assert dialog._reconnect_limit.text() == "Never"
+        assert not any(row.isEnabled() for row in rows)
+
+        dialog._reconnect.setChecked(True)
+        assert all(row.isEnabled() for row in rows)
+
+        _button(dialog, "Save").click()
+        assert ConfigManager().reconnect is True
 
     def test_restore_defaults_resets_settings_and_keeps_profiles(
         self, qapp, config, light, monkeypatch,

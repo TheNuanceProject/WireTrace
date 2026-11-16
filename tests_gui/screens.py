@@ -116,20 +116,33 @@ def main_window(
 
 
 def start_session(qapp: QApplication, window: MainWindow, port: LoopbackPort) -> None:
-    """Connect, receive lines, and open Find, the plot and a toast."""
+    """Connect, receive lines, and open Find, the plot under the console and a toast."""
     tab = window.current_tab()
     tab.findChild(ConnectPage).connect_requested.emit(_PORT, _BAUD)
     wait_until(qapp, lambda: tab.is_connected)
     port.feed(_LINES)
     tab.activate_search()
     tab.toggle_plot()
+    tab.set_plot_floating(False)
     Toast.success(tab, "Exported", "Show", lambda: None)
     qapp.processEvents()
 
 
-def lose_connection(qapp: QApplication, window: MainWindow, port: LoopbackPort) -> None:
+def wait_for_board(qapp: QApplication, window: MainWindow, port: LoopbackPort) -> None:
+    """Unplug the board, with Reconnect on: the tab waits for it."""
     tab = window.current_tab()
     port.transport.drop()
+    wait_until(qapp, lambda: tab.is_waiting)
+    qapp.processEvents()
+
+
+def lose_connection(qapp: QApplication, window: MainWindow, port: LoopbackPort) -> None:
+    """End a session whose board was unplugged: stop waiting for it if the tab is."""
+    tab = window.current_tab()
+    if not tab.is_waiting:
+        port.transport.drop()
+        wait_until(qapp, lambda: tab.is_waiting or not tab.is_connected)
+    tab.stop_waiting()
     wait_until(qapp, lambda: not tab.is_connected)
     qapp.processEvents()
 
@@ -142,6 +155,8 @@ def every_screen(
         yield "First screen", window
         start_session(qapp, window, port)
         yield "Session", window
+        wait_for_board(qapp, window, port)
+        yield "Waiting for the board", window
         lose_connection(qapp, window, port)
         yield "Connection lost", window
     for name, build in _dialogs(config, theme_manager):

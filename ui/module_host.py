@@ -34,6 +34,7 @@ from app.constants import (
     MODULE_TICK_BUDGET_FRACTION,
     MS_PER_SECOND,
 )
+from app.diagnostic_log import log_data_failure
 from app.modules import MODULES, ModuleSettings, ModuleSpec
 
 if TYPE_CHECKING:
@@ -160,7 +161,7 @@ class _GuardedSlot(QObject):
         try:
             self._slot(*args)
         except Exception:
-            logger.exception("Module %s raised in a slot", type(self._module).__name__)
+            log_data_failure(logger, "Module %s raised in a slot", type(self._module).__name__)
             self._module.slot_failed.emit()
 
 
@@ -324,7 +325,7 @@ class ModuleHost(QObject):
         try:
             call()
         except Exception:
-            logger.exception("Module %s raised", spec_id)
+            log_data_failure(logger, "Module %s raised", spec_id)
             self._fail(spec_id)
             return False
         return True

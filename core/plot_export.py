@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.constants import LOG_FLUSH_THRESHOLD_BYTES, PLOT_MAX_LINE_CHARACTERS
+from app.diagnostic_log import described, log_data_failure
 from core.csv_engine import TIMESTAMP_COLUMN, csv_cell
 from core.log_files import OsFileBackend
 from core.log_format import FileHeaderInfo, csv_header, encode_csv_line
@@ -149,9 +150,9 @@ class PlotCsvJob:
             result = PlotCsvResult(request.path, 0, _STALLED)
         except Exception as exc:
             if isinstance(exc, OSError):
-                logger.error("Saving plot values failed: %s", exc)
+                logger.error("Saving plot values failed: %s", described(exc))
             else:
-                logger.exception("Saving plot values failed unexpectedly")
+                log_data_failure(logger, "Saving plot values failed unexpectedly")
             with contextlib.suppress(OSError):
                 os.remove(partial)
             result = PlotCsvResult(request.path, 0, str(exc) or type(exc).__name__)

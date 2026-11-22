@@ -312,15 +312,17 @@ class PlotProfileStore:
             try:
                 data = json.loads(raw)
                 if isinstance(data, list):
-                    for entry in data:
+                    for position, entry in enumerate(data, 1):
                         if not isinstance(entry, dict):
                             continue
                         try:
                             profiles.append(PlotConfig.from_dict(entry))
                         except (ValueError, TypeError) as exc:
+                            # By its position: its name and pattern were
+                            # typed by the user, and are not logged.
                             logger.warning(
-                                "Skipping malformed plot profile %r: %s",
-                                entry, exc,
+                                "Skipping malformed plot profile %d: %s",
+                                position, exc,
                             )
             except (ValueError, RecursionError) as exc:
                 logger.warning(

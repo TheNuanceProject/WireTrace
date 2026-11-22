@@ -1,19 +1,20 @@
-WireTrace v2.1.0
+WireTrace v2.2.0
 
-Leave your boards running. When one is unplugged or resets its USB connection, WireTrace waits for the same board and carries on with the same session and the same log.
+Updates you notice and can undo, a tour of every part of WireTrace, and a diagnostic log to send with a report.
 
 Added
-- Reconnect: when WireTrace cannot be sure the board that came back is the same one, it asks. On by default; switched per tab in the Device menu.
-- Line settings: data bits, parity, stop bits and flow control per port. While connected, set DTR and RTS and send a break; the status bar shows CTS, DSR, DCD and RI.
-- The plot in a window of its own, back to the start of the session, saved as PNG or SVG, with its values as CSV.
-- Restart detection for ESP32 and Zephyr boards, and a session report with exact counts of lines, errors, warnings, lost connections and restarts.
-- Alerts on new error lines, a lost connection or a quiet board, with the system's sound and, if chosen, a desktop notification. Off by default.
-- The console shows each line's date and time by default, as the log writes it.
-- Highlight rules, and ANSI colours from the device on screen. Logs stay plain text.
-- A Features page in Preferences: switch off what you do not use.
+- A tour, offered at the first start and kept in Help, on a sample board built in.
+- Help > Return to version 2.1.0...: the earlier release, verified by signature. From this version on, your settings are copied before each update and put back on a return.
+- A diagnostic log of WireTrace's own events, kept on this computer and never sent. Help copies a summary to paste into a report.
+- An update found stays offered in the status bar until you install it, skip it or put it off.
+- benchmarks.json with each release: WireTrace measured on GitHub's machines as the release is built.
+
+Changed
+- The plot uses less of the processor and still shows every spike.
+- After an update or a return, the update check also says which version WireTrace changed from.
 
 Fixed
-- On Windows, an unplugged CH340 adapter could leave the session open, repeating "Access is denied". An error that leaves a port unusable now ends the connection at once.
-- No part of a window appears on its own for a moment as it opens.
+- On Windows, a tab could stop showing new lines while its port stayed open. The lines are now picked up without reopening the port.
+- On some computers, updates could not be downloaded. Certificates are now checked by the operating system.
 
 Every change: CHANGELOG.md in the repository. Privacy: https://thenuanceproject.com/privacy/

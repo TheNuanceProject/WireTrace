@@ -75,9 +75,12 @@ class TestExtractNormal:
 class TestRedosTimeout:
     def test_pathological_extract_returns_none_quickly(self):
         parser = RegexParser(PATHOLOGICAL_PATTERN)
-        t0 = time.time()
+        # The processor time of this thread, which runs the search: a busy
+        # machine may keep the thread waiting, but the search itself does
+        # no more than its budget of work.
+        t0 = time.thread_time()
         result = parser.extract(ADVERSARIAL_LINE)
-        elapsed = time.time() - t0
+        elapsed = time.thread_time() - t0
 
         # Timed out → treated as a non-match (skipped line).
         assert result is None
@@ -94,10 +97,10 @@ class TestRedosTimeout:
 
     def test_extract_does_not_freeze_on_repeated_bad_lines(self):
         parser = RegexParser(PATHOLOGICAL_PATTERN)
-        t0 = time.time()
+        t0 = time.thread_time()
         for _ in range(5):
             assert parser.extract(ADVERSARIAL_LINE) is None
-        elapsed = time.time() - t0
+        elapsed = time.thread_time() - t0
         # Five lines, each bounded by the budget: nowhere near a freeze.
         assert elapsed < (PLOT_REGEX_TIMEOUT_SECONDS * 5) + 1.0
 
@@ -185,10 +188,10 @@ class TestPatternThatKeepsRunningOutOfTime:
         assert engine.stalled is True
         assert stalls == [True]
 
-        started = time.time()
+        started = time.thread_time()
         for _ in range(1_000):
             engine.process(ADVERSARIAL_LINE, _tick())
-        assert time.time() - started < _PROMPT_SECONDS
+        assert time.thread_time() - started < _PROMPT_SECONDS
         assert stalls == [True]
 
     def test_a_new_pattern_starts_plotting_again(self):

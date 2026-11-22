@@ -1,0 +1,6 @@
+# What tools/benchmark.py needs beside the locked release dependencies:
+# psutil reads a process's processor and memory use the same way on
+# Linux, Windows and macOS. Locked, with hashes, in
+# requirements-benchmark.txt:
+#   uv pip compile requirements-benchmark.in --universal --python-version 3.12 --generate-hashes -o requirements-benchmark.txt
+psutil==7.2.2

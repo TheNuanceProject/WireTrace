@@ -144,6 +144,20 @@ def user_agent() -> str:
     return f"{APP_NAME}/{APP_VERSION} ({system_name()}; {architecture()}; {install_channel()})"
 
 
+def installation_lines() -> list[str]:
+    """What this run is: the version, how it was installed, the system and
+    the libraries. The first lines of the diagnostic log and of its
+    summary."""
+    import PySide6
+    from PySide6.QtCore import qVersion
+
+    return [
+        f"{APP_NAME} {APP_VERSION}, installed as {install_channel()}",
+        f"System: {platform.platform()} ({platform.machine()})",
+        f"Python {platform.python_version()}, PySide6 {PySide6.__version__}, Qt {qVersion()}",
+    ]
+
+
 def installer_update_choice() -> bool | None:
     """What was chosen in the Windows installer about update checks, or
     None if nothing was chosen there.

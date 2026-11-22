@@ -4,23 +4,27 @@ scale, the measuring cursors, and the plot in a window of its own."""
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtWidgets import QApplication, QFileDialog, QFrame, QPushButton
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt
+from PySide6.QtWidgets import QApplication, QFileDialog, QFrame, QPushButton, QWidget
 
+import core.plot_engine as plot_engine_module
 from app.config import ConfigManager
 from app.constants import (
     NAME_SEPARATOR,
+    PLOT_DRAWN_MARGIN_VIEWS,
     PLOT_MAX_PANELS,
     PLOT_REGEX_MAX_CONSECUTIVE_TIMEOUTS,
     ThemeID,
 )
 from app.port_memory import PortMemory
 from core.plot_engine import PlotEngine
-from tests_gui.support import LoopbackPort, pixel, wait_until
+from core.plot_thinning import SAMPLES_PER_COLUMN
+from tests_gui.support import LoopbackPort, let_events_run, pixel, wait_until
 from ui import shortcuts
 from ui.device_tab import DeviceTab
 from ui.formatting import format_value
@@ -671,6 +675,226 @@ class TestBreaks:
 
         _, y = running._traces["RPM"].getData()
         assert not np.isnan(y).any()
+
+
+def _line_at(engine: PlotEngine, seconds: float) -> None:
+    engine.process("RPM: 1460, Current: 2.4, Voltage: 12.5, MotorTemp: 46", _START + timedelta(seconds=seconds))
+
+
+def _seconds_per_pixel(view: PlotView) -> float:
+    """The time one pixel of the screen spans, as pyqtgraph measures it."""
+    return view._panels[0].item.getViewBox().viewPixelSize()[0] / view._graphics.devicePixelRatioF()
+
+
+class _HandOverCount:
+    """Counts the samples handed to every trace: each hand-over paints the chart again."""
+
+    def __init__(self, view: PlotView, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.count = 0
+        for trace in view._traces.values():
+            monkeypatch.setattr(trace, "setData", self._counting(trace.setData))
+
+    def _counting(self, original):
+        def counted(*args, **kwargs):
+            self.count += 1
+            return original(*args, **kwargs)
+        return counted
+
+
+class _PaintCount(QObject):
+    """Counts the paints of a widget."""
+
+    def __init__(self, widget: QWidget) -> None:
+        super().__init__(widget)
+        self.count = 0
+        widget.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Paint:
+            self.count += 1
+        return False
+
+
+class TestDrawingCost:
+    """A frame is drawn only when the picture would change."""
+
+    @pytest.fixture
+    def settled(self, qapp, running) -> PlotView:
+        """A live plot whose last tick has drawn everything there is."""
+        running._timer.stop()
+        running._timer.timeout.emit()
+        qapp.processEvents()
+        return running
+
+    def test_the_grid_has_major_lines_and_one_level_between(self, running):
+        for panel in running._panels:
+            for side in ("left", "bottom"):
+                assert panel.item.getAxis(side).style["maxTickLevel"] == 1
+
+    def test_a_device_with_nothing_new_draws_nothing(self, qapp, settled, monkeypatch):
+        handed = _HandOverCount(settled, monkeypatch)
+
+        for _ in range(3):
+            settled._timer.timeout.emit()
+            qapp.processEvents()
+
+        assert handed.count == 0
+
+    def test_samples_within_a_pixel_wait_and_a_whole_pixel_is_drawn(
+        self, qapp, settled, engine, monkeypatch,
+    ):
+        handed = _HandOverCount(settled, monkeypatch)
+        pixel = _seconds_per_pixel(settled)
+
+        _line_at(engine, _SECONDS + pixel / 4)
+        settled._timer.timeout.emit()
+        assert handed.count == 0
+
+        _line_at(engine, _SECONDS + pixel * 1.5)
+        settled._timer.timeout.emit()
+        assert handed.count == len(settled._traces)
+        assert settled._data["RPM"][0][-1] == pytest.approx(_SECONDS + pixel * 1.5)
+
+    def test_each_frame_is_painted_once(self, qapp, settled, engine):
+        paints = _PaintCount(settled._graphics.viewport())
+        frames = 5
+        seconds = float(_SECONDS)
+        for frame in range(frames):
+            seconds += 2 * _seconds_per_pixel(settled)
+            engine.process(
+                f"RPM: {1460 + 50 * frame}, Current: 2.4, Voltage: 12.5, MotorTemp: 46",
+                _START + timedelta(seconds=seconds),
+            )
+            settled._timer.timeout.emit()
+            wait_until(qapp, lambda frame=frame: paints.count > frame)
+            let_events_run(qapp)
+
+        assert paints.count == frames
+
+    def test_a_new_time_span_is_drawn_at_the_next_tick_with_nothing_new(self, qapp, settled):
+        settled._window_combo.setCurrentIndex(settled._window_combo.findData(10.0))
+        settled._timer.timeout.emit()
+        qapp.processEvents()
+        low, high = settled._time_in_view()
+
+        assert 49 <= low <= 51
+        assert high >= _SECONDS
+
+    def test_going_live_puts_the_newest_data_back_with_nothing_new(self, qapp, settled):
+        _button(settled, "Pause").click()
+        settled._panels[0].item.setXRange(10.0, 20.0, padding=0)
+        _button(settled, "Resume").click()
+        settled._timer.timeout.emit()
+        qapp.processEvents()
+
+        assert settled._time_in_view()[1] >= _SECONDS
+
+    def test_a_loss_while_live_is_drawn_at_the_next_tick(self, qapp, settled):
+        settled.set_breaks([_START + timedelta(seconds=_SECONDS - 5.05)])
+        settled._timer.timeout.emit()
+
+        _, y = settled._traces["RPM"].getData()
+        assert np.isnan(y).any()
+
+    def test_clear_while_live_empties_the_chart_at_once(self, qapp, settled):
+        _button(settled, "Clear").click()
+
+        x, _ = settled._traces["RPM"].getData()
+        assert x is None or x.size == 0
+
+
+_DENSE_PER_SECOND = 500
+_DENSE_SECONDS = 60
+_DENSE_SAMPLES = _DENSE_PER_SECOND * _DENSE_SECONDS
+
+
+class TestThinnedLines:
+    """A line is handed to the chart as at most four samples a pixel column;
+    everything read from the plot still comes from every sample."""
+
+    @pytest.fixture
+    def dense(self, qapp, theme_manager, monkeypatch) -> PlotView:
+        """A held plot of 30,000 samples a value in memory: more than the
+        chart has columns for at every display scale."""
+        monkeypatch.setattr(plot_engine_module, "PLOT_RING_BUFFER_SIZE", _DENSE_SAMPLES)
+        theme_manager.apply_theme(ThemeID.LIGHT)
+        engine = PlotEngine()
+        engine.set_active(True)
+        view = PlotView(engine, theme_manager)
+        view.resize(1000, 520)
+        view.show()
+        qapp.processEvents()
+        for index in range(_DENSE_SAMPLES):
+            spike = 900 if index % 997 == 0 else 0
+            engine.process(
+                f"RPM: {1460 + 20 * np.sin(index / 9) + spike:.1f}, Current: 2.4, "
+                f"Voltage: 12.5, MotorTemp: 46",
+                _START + timedelta(seconds=index / _DENSE_PER_SECOND),
+            )
+        view._redraw()
+        view._timer.stop()
+        qapp.processEvents()
+        _button(view, "Pause").click()
+        view._redraw(force=True)
+        qapp.processEvents()
+        yield view
+        view.shutdown()
+
+    def test_the_chart_is_handed_at_most_four_samples_a_column(self, dense):
+        x, _ = dense._traces["RPM"].getData()
+        columns = math.ceil(dense._pixels_wide() * (1 + 2 * PLOT_DRAWN_MARGIN_VIEWS))
+
+        assert dense._data["RPM"][0].size == _DENSE_SAMPLES
+        assert x.size <= SAMPLES_PER_COLUMN * columns + 4
+        assert x.size < _DENSE_SAMPLES
+
+    def test_every_spike_is_drawn_and_read_from_every_sample(self, dense):
+        _, drawn = dense._traces["RPM"].getData()
+        _, every = dense._data["RPM"]
+
+        assert np.count_nonzero(drawn > 2000) == np.count_nonzero(every > 2000) > 0
+        assert dense.value_texts()[0][2].startswith("min ")
+
+    def test_zooming_in_on_a_held_chart_draws_every_sample_there(self, qapp, dense):
+        x_all, _ = dense._data["RPM"]
+        low, high = float(x_all[-400]), float(x_all[-300])
+        dense._panels[0].item.setXRange(low, high, padding=0)
+        dense._timer.timeout.emit()
+        qapp.processEvents()
+
+        x, _ = dense._traces["RPM"].getData()
+        shown = (x_all >= low) & (x_all <= high)
+        assert np.isin(x_all[shown], x).all()
+
+    def test_a_small_drag_of_a_held_chart_is_not_drawn_again(self, dense, monkeypatch):
+        handed = _HandOverCount(dense, monkeypatch)
+        low, high = dense._time_in_view()
+        step = (high - low) / 4
+        dense._panels[0].item.setXRange(low - step, high - step, padding=0)
+        dense._timer.timeout.emit()
+
+        assert handed.count == 0
+
+    def test_a_wider_chart_is_drawn_again_for_its_pixels(self, qapp, dense, monkeypatch):
+        handed = _HandOverCount(dense, monkeypatch)
+        dense.resize(dense.width() * 2, dense.height())
+        wait_until(qapp, lambda: not dense._drawing_fits_view())
+        dense._timer.timeout.emit()
+
+        assert handed.count > 0
+        assert dense._drawing_fits_view()
+
+    def test_a_wider_live_chart_with_nothing_new_is_drawn_again(self, qapp, dense, monkeypatch):
+        _button(dense, "Resume").click()
+        dense._timer.timeout.emit()
+        qapp.processEvents()
+        handed = _HandOverCount(dense, monkeypatch)
+        dense.resize(dense.width() * 2, dense.height())
+        wait_until(qapp, lambda: not dense._drawing_fits_view())
+        dense._timer.timeout.emit()
+
+        assert handed.count > 0
+        assert dense._drawing_fits_view()
 
 
 class TestOwnWindow:

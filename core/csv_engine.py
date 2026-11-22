@@ -182,7 +182,7 @@ class CSVEngine:
             1, math.ceil(len(columns) * CSV_ROW_MIN_COLUMN_FRACTION),
         )
         self._detection_complete = True
-        logger.info("CSV structure settled: %s, columns=%s", mode.name, columns)
+        logger.info("CSV structure settled: %s, %d columns", mode.name, len(columns))
 
     def _release_held(self) -> list[str]:
         rows = [

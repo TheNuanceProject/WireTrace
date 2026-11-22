@@ -12,6 +12,7 @@ This module imports nothing from Qt, so it can be used before Qt is.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -43,6 +44,12 @@ def offscreen_platform(working_directory: Path | None = None) -> str:
             f"run the GUI tests from the drive that holds {_SCREENS.parent}"
         ) from exc
     return f"{_OFFSCREEN}:configfile={Path(relative).as_posix()}"
+
+
+def display_size() -> tuple[int, int]:
+    """The width and height of the test display, in pixels."""
+    screen = json.loads(_SCREENS.read_text(encoding="utf-8"))["screens"][0]
+    return int(screen["width"]), int(screen["height"])
 
 
 def use_offscreen_display() -> None:

@@ -746,6 +746,42 @@ class TestStatusBar:
     def test_bar_starts_idle(self, bar):
         assert bar.texts() == ["No device connected", "", "0 lines/s", "0 lines", "Not logging", "UTF-8"]
 
+    def test_a_release_on_offer_is_a_quiet_accent_button_at_the_right(self, bar):
+        assert bar.update_texts() == []
+        pressed: list[bool] = []
+        bar.update_requested.connect(lambda: pressed.append(True))
+
+        bar.set_update_offer("2.3.0")
+
+        assert bar.update_texts() == ["Update to 2.3.0"]
+        button = next(b for b in bar.findChildren(QPushButton) if b.text() == "Update to 2.3.0")
+        assert button.property("quiet") is True and button.property("accent") is True
+        assert button.toolTip() == "See what is new in 2.3.0 and update"
+        button.click()
+        assert pressed == [True]
+
+        bar.set_update_offer(None)
+        assert bar.update_texts() == []
+
+    def test_failing_checks_are_noted_with_a_way_to_check_now(self, bar):
+        pressed: list[bool] = []
+        bar.check_requested.connect(lambda: pressed.append(True))
+
+        bar.set_checks_failing("15 Nov")
+
+        assert bar.update_texts() == ["Updates not checked since 15 Nov", "Check now"]
+        next(b for b in bar.findChildren(QPushButton) if b.text() == "Check now").click()
+        assert pressed == [True]
+
+    def test_a_release_on_offer_takes_the_place_of_the_note(self, bar):
+        bar.set_checks_failing("15 Nov")
+        bar.set_update_offer("2.3.0")
+
+        assert bar.update_texts() == ["Update to 2.3.0"]
+
+        bar.set_update_offer(None)
+        assert bar.update_texts() == ["Updates not checked since 15 Nov", "Check now"]
+
     def test_connection_states_are_spelled_out(self, bar):
         bar.set_connecting("PORT0")
         assert bar.texts()[:2] == ["Connecting to PORT0", ""]

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.themes import tokens
+from ui.tour.targets import Target, mark
 from ui.widgets.button import Button
 from ui.widgets.styling import SECONDARY, SMALL, plain_label, set_primary
 
@@ -82,8 +83,9 @@ def note(
     return label
 
 
-def setting_row(label: str, hint: str, field: QWidget) -> QHBoxLayout:
-    """A setting: its name and hint on the left, its field on the right."""
+def setting_row(label: str, hint: str, field: QWidget, target: Target | None = None) -> QHBoxLayout:
+    """A setting: its name and hint on the left, its field on the right.
+    The tour finds a setting marked as ``target`` by its name and its field."""
     metrics = tokens.METRICS
     text = QVBoxLayout()
     text.setContentsMargins(0, 0, 0, 0)
@@ -100,6 +102,9 @@ def setting_row(label: str, hint: str, field: QWidget) -> QHBoxLayout:
     row.addWidget(field, 0, Qt.AlignmentFlag.AlignTop)
     row.addStretch(1)
     field.setAccessibleName(label)
+    if target is not None:
+        mark(text_column, target)
+        mark(field, target)
     return row
 
 

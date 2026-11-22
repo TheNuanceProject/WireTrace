@@ -4,6 +4,7 @@ files, and a loopback port in place of the hardware."""
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from pathlib import Path
@@ -962,7 +963,7 @@ class TestLogging:
         assert Toast.of(tab).message == f"The log was closed with 1 line: {log.name}."
 
     def test_log_that_cannot_start_is_reported_in_a_banner(
-        self, qapp, tab, port, accept_dialogs, monkeypatch,
+        self, qapp, tab, port, accept_dialogs, monkeypatch, caplog,
     ):
         blocker = accept_dialogs / "not-a-folder"
         blocker.write_text("")
@@ -971,10 +972,15 @@ class TestLogging:
         )
         _connect(qapp, tab)
 
-        _start_log(tab)
+        with caplog.at_level(logging.ERROR):
+            _start_log(tab)
 
         assert tab.is_logging is False
         assert _banners(tab).banner("log-end").title_label.text() == "Logging could not be started"
+        # The diagnostic log names the error by its kind: never the log's
+        # folder or name, which the user chose.
+        logged = [record.getMessage() for record in caplog.records if "Could not start logging" in record.getMessage()]
+        assert logged and all("not-a-folder" not in message for message in logged)
 
     def test_log_that_cannot_be_written_shows_a_banner_until_it_recovers(
         self, qapp, tab, port, accept_dialogs,

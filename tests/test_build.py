@@ -15,12 +15,11 @@ from pathlib import Path
 
 import pytest
 
+from app.privacy_policy import POLICY_FILENAME, load_policy, to_plain_text
 from updater.install import UPDATE_CHECK_OPTION
-from updater.privacy import PRIVACY_STATEMENT
 from version import (
     APP_MAINTAINER_EMAIL,
     APP_NAME,
-    APP_PRIVACY_URL,
     APP_VERSION,
     WINDOWS_INSTALLER_NAME,
 )
@@ -463,25 +462,17 @@ class TestTheWindowsInstaller:
         )
         assert "unchecked" not in task
 
-    def test_the_installer_shows_the_privacy_statement_before_installing(self, tmp_path):
+    def test_the_installer_shows_the_privacy_policy_before_installing(self, tmp_path):
         assert "InfoBeforeFile={#PrivacyFile}" in INSTALLER_SCRIPT
         path = tmp_path / "privacy.txt"
         build.write_privacy_statement(path)
         content = path.read_bytes()
-        assert content.decode("ascii").replace("\r\n", "\n") == PRIVACY_STATEMENT
+        assert content.decode("ascii").replace("\r\n", "\n") == to_plain_text(load_policy())
         assert b"\n" not in content.replace(b"\r\n", b"")
 
-    def test_the_privacy_statement_names_everything_a_check_sends(self):
-        statement = " ".join(PRIVACY_STATEMENT.split())
-        for stated in ("the version of WireTrace", "the operating system", "the processor type",
-                       "how WireTrace was installed", "the date of the previous check",
-                       "It carries no identifier", "network address",
-                       "the country and an approximate city", "never stores it",
-                       "Usage statistics are off", "does not switch them on",
-                       "Preferences", "GitHub receives each update check",
-                       "Usage reports and deletion requests never reach GitHub",
-                       APP_PRIVACY_URL, f"Questions and requests: {APP_MAINTAINER_EMAIL}"):
-            assert stated in statement
+    def test_the_policy_goes_beside_the_program(self):
+        assert POLICY_FILENAME in build._ROOT_DOCUMENTS
+        assert POLICY_FILENAME in build._REQUIRED_FILES
 
     def test_the_installer_waits_for_the_mutex_the_application_holds(self):
         assert "AppMutex={#AppMutexName}" in INSTALLER_SCRIPT

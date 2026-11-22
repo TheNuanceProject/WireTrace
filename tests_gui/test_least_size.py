@@ -44,6 +44,24 @@ def test_the_least_size_grows_with_the_content(qapp):
     assert dialog.width() >= dialog.minimumWidth()
 
 
+def test_text_that_wraps_gets_every_line_it_needs(qapp):
+    """Qt makes room for wrapped text itself only while a window has no
+    minimum of its own; this one always has."""
+    dialog = QDialog()
+    layout = QVBoxLayout(dialog)
+    keep_least_size(dialog, _FLOOR_WIDTH)
+    dialog.show()
+    qapp.processEvents()
+
+    wrapped = QLabel("A sentence long enough to wrap onto several lines in this narrow dialog. " * 4)
+    wrapped.setWordWrap(True)
+    layout.addWidget(wrapped)
+    qapp.processEvents()
+
+    assert dialog.minimumHeight() >= dialog.heightForWidth(dialog.minimumWidth())
+    assert dialog.minimumHeight() > dialog.minimumSizeHint().height()
+
+
 def test_the_least_size_follows_larger_text(qapp):
     dialog = QDialog()
     label = QLabel("Wide enough at a larger size to pass the floor")

@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import logging
+import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -83,12 +84,14 @@ from PySide6.QtWidgets import (
 from app._atomic import atomic_write_bytes
 from app.constants import (
     PLOT_DEFAULT_WINDOW_SECONDS,
+    PLOT_DRAWN_MARGIN_VIEWS,
     PLOT_HISTORY_DETAIL_DELAY_MS,
     PLOT_LIVE_SPAN_MIN_SECONDS,
     PLOT_REDRAW_INTERVAL_MS,
     PLOT_STATS_INTERVAL_MS,
     PLOT_WINDOW_CHOICES,
 )
+from app.diagnostic_log import log_data_failure
 from core.plot_history import DetailRequest
 from core.plot_stats import (
     SeriesStats,
@@ -99,6 +102,7 @@ from core.plot_stats import (
     value_held,
     visible_stats,
 )
+from core.plot_thinning import points_to_draw
 from ui import shortcuts
 from ui.formatting import (
     format_change,
@@ -110,6 +114,7 @@ from ui.formatting import (
 from ui.themes import tokens
 from ui.themes.fonts import monospace_font
 from ui.themes.icons import bind_icon
+from ui.tour.targets import Target, mark
 from ui.widgets.button import Button, join_buttons
 from ui.widgets.styling import SECONDARY, SMALL, plain_label, plain_tooltip, set_compact
 from ui.widgets.vertical_scroll import VerticalScrollArea
@@ -124,11 +129,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: How strongly the grid is drawn, from 0 to 1: part of the drawing of the
-#: chart, named as such by the design language, like the trace colours.
 _WHEEL_STEP = 1.02
 _CUSTOM_WINDOW = "Custom"
+#: How strongly the grid is drawn, from 0 to 1: part of the drawing of the
+#: chart, named as such by the design language, like the trace colours.
 _GRID_ALPHA = 0.3
+#: The finest level of grid lines drawn: 0 is the major lines alone, 1 adds
+#: one level between them. pyqtgraph's own 2 adds a third level, about 50
+#: lines an axis, which crowds the chart and costs most of each frame,
+#: since the grid is drawn again whenever the time shown moves.
+_GRID_LEVEL = 1
 #: Space left beside the newest sample, as a share of the time shown.
 _X_PADDING = 0.02
 #: A cursor's letter sits at the top end of its line (1 on a scale from
@@ -658,12 +668,24 @@ class PlotView(QWidget):
         self._fit_pending = False
         # The next redraw with data sorts the values into panels.
         self._regroup_pending = False
+        # What each trace was last handed. Handing a trace samples redraws
+        # the chart, so samples it already has are not handed again.
+        self._handed: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        # The engine's generation and newest time when the last frame was
+        # drawn, and whether something besides new samples has changed
+        # what the next frame shows.
+        self._drawn_generation: int | None = None
+        self._drawn_latest = 0.0
+        self._redraw_wanted = False
+        # The time a thinned line was worked out for and the time one
+        # pixel spanned then; None while every line is drawn whole.
+        self._drawn_span: tuple[float, float, float] | None = None
         self._is_shut_down = False
 
         # Both timers run only while the view can be seen.
         self._timer = QTimer(self)
         self._timer.setInterval(PLOT_REDRAW_INTERVAL_MS)
-        self._timer.timeout.connect(self._redraw)
+        self._timer.timeout.connect(self._on_tick)
         self._stats_timer = QTimer(self)
         self._stats_timer.setInterval(PLOT_STATS_INTERVAL_MS)
         self._stats_timer.timeout.connect(self._update_figures)
@@ -720,6 +742,7 @@ class PlotView(QWidget):
         values.setLayout(self._values_layout)
         self._values_scroll = VerticalScrollArea(values)
         self._values_scroll.setObjectName("plotValues")
+        mark(self._values_scroll, Target.PLOT_VALUES)
         # At least its design width, wider if a value needs it; never wider
         # than it asks, so the chart has the rest.
         self._values_scroll.setMinimumWidth(metrics.plot_values_width)
@@ -741,7 +764,7 @@ class PlotView(QWidget):
         body_layout.setSpacing(0)
         body_layout.addWidget(self._values_scroll)
         body_layout.addLayout(chart, 1)
-        self._chart_area = body
+        self._chart_area = mark(body, Target.PLOT_CHART)
         self._readout = _Readout(body)
         self._note = _Note()
 
@@ -798,6 +821,7 @@ class PlotView(QWidget):
             panel.item.close()
         self._panels = []
         self._traces = {}
+        self._handed = {}
         self._chart_layout.removeWidget(graphics)
         graphics.close()
         graphics.setParent(None)
@@ -840,12 +864,13 @@ class PlotView(QWidget):
             group.addButton(button)
             self._layout_buttons[mode] = button
         self._layout_buttons[self._layout_mode].setChecked(True)
-        modes = join_buttons(*self._layout_buttons.values())
+        modes = mark(join_buttons(*self._layout_buttons.values()), Target.PLOT_LAYOUT)
 
         self._measure_btn = self._button("Measure", self.set_measuring, checkable=True)
         self._measure_btn.setToolTip(
             "Two cursors, A and B: the time between them and the change in each value"
         )
+        mark(self._measure_btn, Target.PLOT_MEASURE)
 
         self._window_combo = QComboBox()
         set_compact(self._window_combo)
@@ -865,17 +890,21 @@ class PlotView(QWidget):
         )
         self._window_combo.setCurrentIndex(self._window_index(self._window_seconds))
         self._window_combo.currentIndexChanged.connect(self._on_window_changed)
+        mark(self._window_combo, Target.PLOT_TIME)
 
         self._pause_btn = self._button("Pause", self._on_pause_toggled, checkable=True)
         self._pause_btn.setToolTip("Hold the picture still. Values keep being collected.")
+        mark(self._pause_btn, Target.PLOT_HOLD)
         self._fit_btn = self._button("Fit", self.fit)
         self._fit_btn.setToolTip(
             "Undo any zoom and show the newest data. In panels, sort the values into panels again."
         )
+        mark(self._fit_btn, Target.PLOT_HOLD)
         self._clear_btn = self._button("Clear", self._on_clear)
         self._clear_btn.setToolTip("Forget the samples drawn so far. The values stay.")
         self._configure_btn = self._button("Configure...", self.configure_requested.emit)
         self._configure_btn.setToolTip("Choose how values are found in the lines")
+        mark(self._configure_btn, Target.PLOT_CONFIGURE)
         self._export_btn = Button(compact=True)
         self._export_btn.setObjectName("flatIconButton")
         self._export_btn.setAccessibleName("Export")
@@ -891,7 +920,10 @@ class PlotView(QWidget):
             self._export_actions[kind] = action
         self._export_menu.aboutToShow.connect(self._enable_exports)
         self._export_btn.setMenu(self._export_menu)
-        self._float_btn = self._button("", lambda: self.float_requested.emit(not self._floating))
+        mark(self._export_btn, Target.PLOT_SAVE)
+        self._float_btn = mark(
+            self._button("", lambda: self.float_requested.emit(not self._floating)), Target.PLOT_SAVE,
+        )
         self.set_floating(False)
         self._close_btn = Button(compact=True)
         self._close_btn.setObjectName("flatIconButton")
@@ -1121,8 +1153,7 @@ class PlotView(QWidget):
         """When the board was lost: each value's line is broken there."""
         self._breaks = list(lost)
         self._break_x = None
-        if self._paused and self._traces:
-            self._redraw(force=True)
+        self._redraw_soon()
 
     def _broken(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """``x`` and ``y`` with a gap after the last sample before each break.
@@ -1257,6 +1288,8 @@ class PlotView(QWidget):
             box.hold_asked.connect(self._hold_to_look_back)
             item = self._graphics.ci.addPlot(row=row, col=0, viewBox=box)
             item.showGrid(x=True, y=True, alpha=_GRID_ALPHA)
+            for side in ("left", "bottom"):
+                item.getAxis(side).setStyle(maxTickLevel=_GRID_LEVEL)
             # The wheel and dragging move and zoom time only, every panel
             # together; each panel's scale always fits the values in the
             # time shown. While live, the wheel changes how much recent
@@ -1331,6 +1364,9 @@ class PlotView(QWidget):
         else:
             self._held_samples = None
             self._detail_timer.stop()
+            # Going live puts the newest data back in view at the next
+            # tick, even if nothing has arrived while held.
+            self._redraw_wanted = True
         if not paused and self._measuring:
             # Live and measuring do not go together: going live ends it.
             self._held_for_measuring = False
@@ -1341,8 +1377,8 @@ class PlotView(QWidget):
         self._engine.clear_buffers()
         self._held_samples = None
         self._data = {}
-        for trace in self._traces.values():
-            trace.setData([], [])
+        for name in self._traces:
+            self._hand_over(name, np.empty(0), np.empty(0))
         self._fit_pending = True
         self._update_figures()
 
@@ -1359,8 +1395,7 @@ class PlotView(QWidget):
         """Show the last ``seconds``; None shows everything held."""
         self._window_seconds = seconds
         self._fit_pending = True
-        if self._paused:
-            self._redraw(force=True)
+        self._redraw_soon()
 
     def _is_live(self) -> bool:
         return not self._paused
@@ -1440,18 +1475,116 @@ class PlotView(QWidget):
         self._timer.stop()
         self._stats_timer.stop()
 
+    def _on_tick(self) -> None:
+        """Draw the next frame if it can show anything new.
+
+        A held chart is drawn again only when it was moved, zoomed or
+        widened past what its lines were worked out for.
+        """
+        if self._paused:
+            if self._traces and not self._drawing_fits_view():
+                self._redraw(force=True)
+        elif self._frame_due():
+            self._redraw()
+
+    def _frame_due(self) -> bool:
+        """True when the next frame would differ from the one on screen.
+
+        New samples change the picture once the newest time has moved
+        a whole pixel of the screen: before that they fall in the column
+        already drawn, and the chart would be painted again unchanged.
+        Anything else that changes what is shown is drawn at once.
+        """
+        if self._redraw_wanted or self._fit_pending or self._regroup_pending:
+            return True
+        if self._engine.generation != self._drawn_generation:
+            return True
+        if not self._drawing_fits_view():
+            return True
+        return abs(self._engine.latest_x - self._drawn_latest) >= self._seconds_per_pixel()
+
+    def _pixels_wide(self) -> float:
+        """The chart's width in the screen's own pixels, or 0 before it has a size."""
+        if not self._panels or self._graphics is None:
+            return 0.0
+        width = self._panels[0].item.getViewBox().width() * self._graphics.devicePixelRatioF()
+        return max(width, 0.0)
+
+    def _seconds_per_pixel(self) -> float:
+        """The time one pixel of the screen spans on the chart, or 0 before
+        the chart has a size."""
+        pixels = self._pixels_wide()
+        if not pixels:
+            return 0.0
+        low, high = self._time_in_view()
+        return (high - low) / pixels
+
+    def _drawing_span(self, low: float, high: float) -> tuple[float, float, int, float]:
+        """The time to work the lines out for when ``low`` to ``high`` is
+        shown, the columns to cut it into, and the time one pixel spans.
+
+        No columns before the chart has a size: the lines are drawn whole.
+        """
+        pixels = self._pixels_wide()
+        span = high - low
+        if not pixels or not span > 0:
+            return low, high, 0, 0.0
+        margin = PLOT_DRAWN_MARGIN_VIEWS * span
+        # Columns never wider than a pixel of the time shown.
+        columns = math.ceil(pixels * (1 + 2 * PLOT_DRAWN_MARGIN_VIEWS))
+        return low - margin, high + margin, columns, span / pixels
+
+    def _drawing_fits_view(self) -> bool:
+        """True when the lines drawn hold what the time shown needs: they
+        reach both its ends, and no pixel is narrower than a column."""
+        drawn = self._drawn_span
+        if drawn is None:
+            return True
+        start, end, seconds_per_pixel = drawn
+        low, high = self._time_in_view()
+        return start <= low and high <= end and self._seconds_per_pixel() >= seconds_per_pixel
+
+    def _redraw_soon(self) -> None:
+        """Show a change other than new samples: at once while held still,
+        at the next tick while live."""
+        if self._paused:
+            self._redraw(force=True)
+        else:
+            self._redraw_wanted = True
+
+    def _hand_over(self, name: str, x: np.ndarray, y: np.ndarray) -> None:
+        """Give the trace of ``name`` these samples, unless it has them already."""
+        handed = self._handed.get(name)
+        if (
+            handed is not None
+            and np.array_equal(handed[0], x, equal_nan=True)
+            and np.array_equal(handed[1], y, equal_nan=True)
+        ):
+            return
+        self._traces[name].setData(x, y)
+        self._handed[name] = (x, y)
+
     def _redraw(self, *, force: bool = False) -> None:
         if (self._paused and not force) or not self._traces:
             return
+        self._redraw_wanted = False
+        self._drawn_generation = self._engine.generation
+        self._drawn_latest = self._engine.latest_x
         try:
             if self._history is not None:
                 self._history.sync()
             low, high = self._time_to_draw()
-            for name, trace in self._traces.items():
+            start, end, columns, seconds_per_pixel = self._drawing_span(low, high)
+            thinned = False
+            for name in self._traces:
                 x, y, exact_from = self._series(name, low, high)
                 self._data[name] = (x, y)
                 self._exact_from[name] = exact_from
-                trace.setData(*self._broken(x, y))
+                broken_x, broken_y = self._broken(x, y)
+                drawn_x, drawn_y = points_to_draw(broken_x, broken_y, start, end, columns)
+                thinned = thinned or drawn_x is not broken_x
+                self._hand_over(name, drawn_x, drawn_y)
+            self._drawn_span = (start, end, seconds_per_pixel) if thinned else None
             if not any(x.size for x, _ in self._data.values()):
                 return
             if self._regroup_pending:
@@ -1461,10 +1594,14 @@ class PlotView(QWidget):
                     return
             self._place_view()
             self._refresh_hover()
+            # pyqtgraph fits each panel's value scale just before painting,
+            # and a scale changed during a paint asks for a second paint.
+            # Fitting it now makes each redraw one paint.
+            self._graphics.scene().prepareForPaint()
         except Exception:
             # A fault while drawing must not take the tab with it: the
             # plot stops updating and says why in the log.
-            logger.exception("Plot redraw failed; the plot is paused")
+            log_data_failure(logger, "Plot redraw failed; the plot is paused")
             self._pause_btn.setChecked(True)
 
     def _place_view(self) -> None:
@@ -1592,9 +1729,23 @@ class PlotView(QWidget):
 
     def _on_history_changed(self) -> None:
         if self._paused:
+            # Only traces whose samples changed are handed them again, so
+            # a held chart is painted again only when what it shows changed.
             self._redraw(force=True)
             self._update_figures()
+        elif self._draws_older_time():
+            self._redraw_wanted = True
         self._show_note()
+
+    def _draws_older_time(self) -> bool:
+        """True when the time to draw reaches back past the samples in
+        memory of any value, where the history fills it in."""
+        low = max(self._time_to_draw()[0], 0.0)
+        for name in self._columns:
+            x, _ = self._samples_in_memory(name)
+            if not x.size or low < x[0]:
+                return True
+        return False
 
     def _show_note(self) -> None:
         """Say what the chart cannot show in full, if anything.

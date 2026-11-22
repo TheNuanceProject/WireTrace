@@ -696,13 +696,27 @@ def test_every_scrolled_page_is_the_shared_scroll_area(path: Path) -> None:
     assert "QScrollArea(" not in path.read_text(encoding="utf-8")
 
 
+#: Files that write HTML for the user guide, which a browser draws with the
+#: guide's own style sheet, where ``strong`` is the medium weight; not Qt
+#: rich text.
+GUIDE_HTML_FILES = (ROOT / "app" / "privacy_policy.py",)
+GUIDE_FILE = ROOT / "resources" / "help" / "user_guide.html"
+
+
 @pytest.mark.parametrize(
     "path", _interface_files(), ids=lambda p: str(p.relative_to(ROOT))
 )
 def test_rich_text_is_never_bold(path: Path) -> None:
     """Poppins ships in Regular and Medium; emphasis is the medium weight."""
+    if path in GUIDE_HTML_FILES:
+        return
     source = path.read_text(encoding="utf-8").lower()
     assert "<b>" not in source and "<strong>" not in source and "font-weight: bold" not in source
+
+
+def test_the_guide_draws_strong_text_in_the_medium_weight() -> None:
+    """What lets the guide's HTML use ``strong``."""
+    assert "strong, b { font-weight: var(--weight-label); }" in GUIDE_FILE.read_text(encoding="utf-8")
 
 
 def test_template_writes_a_state_after_its_subcontrol() -> None:
@@ -710,3 +724,16 @@ def test_template_writes_a_state_after_its_subcontrol() -> None:
     box; the state of a part is written after it: ``::indicator:focus``."""
     template = re.sub(r"/\*.*?\*/", "", TEMPLATE_FILE.read_text(encoding="utf-8"), flags=re.S)
     assert not re.findall(r"[\w\]]:[\w!-]+::", template)
+
+
+def test_an_accent_quiet_button_is_never_drawn_on_the_divider_fill() -> None:
+    """``accent_strong`` is readable on paper and surface, not on divider
+    (the plain-background test holds it to both): pointed at, an accent
+    quiet button fills with paper and shows its edge instead."""
+    template = TEMPLATE_FILE.read_text(encoding="utf-8")
+    rule = re.search(
+        r'QPushButton\[quiet="true"\]\[accent="true"\]:hover[^{]*\{(.*?)\n\}', template, re.DOTALL,
+    )
+    assert rule is not None
+    assert "background-color: {{paper}};" in rule.group(1)
+    assert "border-color: {{edge}};" in rule.group(1)

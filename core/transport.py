@@ -36,6 +36,25 @@ Reading (QtSerialTransport):
   CP2102, FTDI, PL2303); the signal gives a faster response where it
   does work.
 
+  The poll can only take what Qt has collected. On Windows, Qt collects
+  by waiting for the driver to report a received character
+  (``WaitCommEvent`` for ``EV_RXCHAR``) and then reading. A driver that
+  does not report a character arriving just before that wait begins
+  leaves the wait pending while the input sits in the system's queue,
+  and Qt collects nothing more: the port stays open and the session
+  receives nothing. So, on Windows, a second check reads the system's
+  own count of waiting input (``ClearCommError``). Input found waiting
+  at two checks in a row, with nothing collected between them, means
+  Qt's wait was missed; setting the port's event mask again ends that
+  wait at once (``SetCommMask``, as Windows documents for
+  ``WaitCommEvent``), and Qt reads the waiting input as usual. Nothing
+  is lost and the port is not reopened, so no board is reset. Each such
+  recovery is written to the diagnostic log and counted.
+
+  On Linux and macOS, Qt is told about input by a notifier on the
+  port's file, which keeps reporting while input is waiting, so no
+  input can be left behind there.
+
 Line settings:
   A port is opened with the framing and flow control of its
   ``LineSettings``; DTR and RTS are then set to the states those
@@ -55,6 +74,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -67,6 +87,7 @@ from app.constants import (
     NAME_SEPARATOR,
     SERIAL_LISTED_RECHECK_MS,
     SERIAL_POLL_INTERVAL_MS,
+    SERIAL_STALL_CHECK_MS,
 )
 from core.serial_settings import FlowControl, InputLines, LineSettings, Parity, StopBits
 
@@ -216,6 +237,57 @@ class Transport(QObject):
         raise NotImplementedError
 
 
+class SystemInputQueue:
+    """The system's queue of received input of an open Windows port.
+
+    The two calls the stall check needs, on the port's handle:
+    ``waiting`` is the number of bytes the system holds that nothing
+    has read yet, or None if the system did not say; ``rewait`` ends a
+    pending wait for input by setting the port's event mask again to
+    the one Qt opened it with, and says whether the system accepted it.
+    """
+
+    #: Qt opens a port for reading with this event mask (``EV_RXCHAR``).
+    RECEIVED_CHARACTER = 0x0001
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Comstat(ctypes.Structure):
+            # COMSTAT: a word of status flags, then the input and output
+            # queue counts.
+            _fields_ = (
+                ("flags", wintypes.DWORD),
+                ("input_queued", wintypes.DWORD),
+                ("output_queued", wintypes.DWORD),
+            )
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # Qt gives the handle as a Python integer, which can be negative
+        # (an unopened port's is -1); the system takes it as a pointer.
+        self._handle_mask = (1 << (8 * ctypes.sizeof(ctypes.c_void_p))) - 1
+        self._comstat_type = _Comstat
+        self._byref = ctypes.byref
+        self._clear_comm_error = kernel32.ClearCommError
+        self._clear_comm_error.argtypes = (
+            wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(_Comstat),
+        )
+        self._clear_comm_error.restype = wintypes.BOOL
+        self._set_comm_mask = kernel32.SetCommMask
+        self._set_comm_mask.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        self._set_comm_mask.restype = wintypes.BOOL
+
+    def waiting(self, handle: int) -> int | None:
+        status = self._comstat_type()
+        if not self._clear_comm_error(handle & self._handle_mask, None, self._byref(status)):
+            return None
+        return int(status.input_queued)
+
+    def rewait(self, handle: int) -> bool:
+        return bool(self._set_comm_mask(handle & self._handle_mask, self.RECEIVED_CHARACTER))
+
+
 def _phrase(text: str, fallback: str) -> str:
     """A driver's message as a phrase: trimmed, with no final full stop."""
     return text.strip().rstrip(".").rstrip() or fallback
@@ -224,15 +296,36 @@ def _phrase(text: str, fallback: str) -> str:
 # ── Qt Driver ────────────────────────────────────────────────────────────
 
 class QtSerialTransport(Transport):
-    """``Transport`` on Qt's QSerialPort."""
+    """``Transport`` on Qt's QSerialPort.
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    ``system_input`` reads the system's input queue for the stall check
+    (see the module's "Reading"); it is given on Windows only, and a
+    test may give a stand-in. ``stall_recoveries`` counts the times Qt
+    was set reading again since the port was opened.
+    """
+
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        system_input: SystemInputQueue | None = None,
+    ) -> None:
         super().__init__(parent)
         self._port = QSerialPort(self)
         self._poll_timer = QTimer(self)
         self._poll_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._poll_timer.setInterval(SERIAL_POLL_INTERVAL_MS)
         self._poll_timer.timeout.connect(self._read_available)
+        if system_input is None and sys.platform == "win32":
+            system_input = SystemInputQueue()
+        self._system_input = system_input
+        self._stall_timer = QTimer(self)
+        self._stall_timer.setInterval(SERIAL_STALL_CHECK_MS)
+        self._stall_timer.timeout.connect(self._check_stall)
+        # Whether input was waiting in the system at the last check, and
+        # whether anything has been collected since.
+        self._input_was_waiting = False
+        self._collected = False
+        self.stall_recoveries = 0
         # Whether the port's signals are connected to this object.
         self._watching = False
         # The errors that left the port working, already reported while
@@ -245,6 +338,9 @@ class QtSerialTransport(Transport):
         self.access_refused = False
         self._reported.clear()
         self._listed_at = -float("inf")
+        self._input_was_waiting = False
+        self._collected = False
+        self.stall_recoveries = 0
         self._port.setPortName(port)
         self._port.setBaudRate(baud)
         self._port.setDataBits(_QT_DATA_BITS[line.data_bits])
@@ -265,6 +361,8 @@ class QtSerialTransport(Transport):
         self._port.errorOccurred.connect(self._on_port_error)
         self._watching = True
         self._poll_timer.start()
+        if self._system_input is not None:
+            self._stall_timer.start()
         logger.info("Opened %s @ %d baud, %s, via QSerialPort", port, baud, line.describe())
         return ""
 
@@ -314,6 +412,7 @@ class QtSerialTransport(Transport):
 
     def _close(self, collect_pending: bool) -> None:
         self._poll_timer.stop()
+        self._stall_timer.stop()
         # The port's signals are disconnected first: nothing done while
         # closing may call back into this object. Qt may have closed the
         # port itself after an error, so this does not depend on it being
@@ -337,7 +436,38 @@ class QtSerialTransport(Transport):
         if self._port.isOpen() and self._port.bytesAvailable() > 0:
             raw = self._port.readAll()
             if not raw.isEmpty():
+                self._collected = True
                 self.data_received.emit(bytes(raw.data()))
+
+    @Slot()
+    def _check_stall(self) -> None:
+        """Set Qt reading again if input has waited in the system for a
+        whole check while nothing was collected (the module's "Reading")."""
+        if self._system_input is None or not self._port.isOpen():
+            return
+        collected, self._collected = self._collected, False
+        handle = int(self._port.handle())
+        waiting = self._system_input.waiting(handle)
+        if not waiting:
+            self._input_was_waiting = False
+            return
+        stalled = self._input_was_waiting and not collected
+        self._input_was_waiting = not stalled
+        if not stalled:
+            return
+        if self._system_input.rewait(handle):
+            self.stall_recoveries += 1
+            logger.warning(
+                "%s: %d received bytes waited in the system for over %d ms without "
+                "Qt collecting them; its wait for input was restarted (%d this session)",
+                self._port.portName(), waiting, SERIAL_STALL_CHECK_MS, self.stall_recoveries,
+            )
+        else:
+            logger.error(
+                "%s: %d received bytes are waiting in the system and Qt's wait for "
+                "input could not be restarted",
+                self._port.portName(), waiting,
+            )
 
     @Slot(QSerialPort.SerialPortError)
     def _on_port_error(self, error: QSerialPort.SerialPortError) -> None:

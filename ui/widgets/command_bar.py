@@ -26,6 +26,7 @@ from core.records import COMMAND_PREFIX
 from ui import shortcuts
 from ui.themes import tokens
 from ui.themes.fonts import monospace_font
+from ui.tour.targets import Target, mark
 from ui.widgets.button import Button
 from ui.widgets.styling import plain_label, set_primary
 
@@ -74,11 +75,13 @@ class CommandBar(QFrame):
         self._input.lineEdit().setPlaceholderText("Send a command")
         self._input.lineEdit().returnPressed.connect(self._on_send)
         self._input.setAccessibleName("Command")
+        mark(self._input, Target.COMMAND)
 
         self._ending = QComboBox()
         self._ending.setFixedWidth(metrics.line_ending_field_width)
         self._ending.setToolTip("What is sent after the command")
         self._ending.setAccessibleName("Line ending")
+        mark(self._ending, Target.LINE_ENDING)
         for ending, name in LINE_ENDING_NAMES.items():
             self._ending.addItem(name, ending)
         self.set_line_ending(DEFAULT_LINE_ENDING)
@@ -93,6 +96,7 @@ class CommandBar(QFrame):
         self._saved_menu = QMenu(self)
         self._saved_menu.aboutToShow.connect(self._fill_saved_menu)
         self._saved.setMenu(self._saved_menu)
+        mark(self._saved, Target.SAVED_COMMANDS)
 
         self._send = Button("Send")
         self._send.setToolTip("Send the command (Enter)")

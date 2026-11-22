@@ -19,15 +19,17 @@ import types
 from typing import ClassVar
 
 import pytest
+from PySide6.QtCore import QByteArray
 from PySide6.QtSerialPort import QSerialPort
 from PySide6.QtWidgets import QApplication
 
 import core.transport as transport_module
-from app.constants import SERIAL_LISTED_RECHECK_MS
+from app.constants import SERIAL_LISTED_RECHECK_MS, SERIAL_STALL_CHECK_MS
 from core.serial_settings import FlowControl, InputLines, LineSettings, Parity, StopBits
 from core.transport import (
     PyserialTransport,
     QtSerialTransport,
+    SystemInputQueue,
     available_ports,
     open_serial_transport,
 )
@@ -224,6 +226,190 @@ class TestQtSerialErrors:
 
         assert lost == [] and len(errors) == 1
         assert transport._port.isOpen()
+
+class _StandInQueue:
+    """The system's input queue as a test sets it."""
+
+    def __init__(self) -> None:
+        self.waiting_bytes: int | None = 0
+        self.accepts = True
+        self.rewaits: list[int] = []
+
+    def waiting(self, handle: int) -> int | None:
+        return self.waiting_bytes
+
+    def rewait(self, handle: int) -> bool:
+        self.rewaits.append(handle)
+        return self.accepts
+
+
+@posix_only
+class TestStallCheck:
+    """Input the system holds while Qt collects nothing sets Qt reading
+    again; a port Qt is reading is left alone."""
+
+    @pytest.fixture
+    def opened(self, qapp, pseudo_terminal):
+        master, name = pseudo_terminal
+        system = _StandInQueue()
+        transport = QtSerialTransport(system_input=system)
+        received: list[bytes] = []
+        transport.data_received.connect(received.append)
+        assert transport.open(name, _BAUD, _LINE) == ""
+        yield transport, system, master, received
+        transport.close()
+
+    def test_input_waiting_at_two_checks_with_nothing_collected_restarts_the_wait(
+        self, qapp, opened, caplog,
+    ):
+        transport, system, _master, _received = opened
+        system.waiting_bytes = 12
+
+        transport._check_stall()
+        assert system.rewaits == []
+        with caplog.at_level("WARNING", logger=transport_module.__name__):
+            transport._check_stall()
+
+        assert system.rewaits == [int(transport._port.handle())]
+        assert transport.stall_recoveries == 1
+        assert "12 received bytes waited in the system" in caplog.text
+        assert transport._port.isOpen()
+
+    def test_input_waiting_at_one_check_only_is_left_to_qt(self, qapp, opened):
+        transport, system, _master, _received = opened
+
+        system.waiting_bytes = 5
+        transport._check_stall()
+        system.waiting_bytes = 0
+        transport._check_stall()
+        system.waiting_bytes = 5
+        transport._check_stall()
+
+        assert system.rewaits == [] and transport.stall_recoveries == 0
+
+    def test_input_collected_between_checks_is_not_a_stall(self, qapp, opened):
+        transport, system, master, received = opened
+        system.waiting_bytes = 64
+
+        for round_ in range(1, 5):
+            transport._check_stall()
+            os.write(master, b"line\n")
+            wait_until(qapp, lambda expected=round_: len(b"".join(received)) >= 5 * expected)
+
+        assert system.rewaits == [] and transport.stall_recoveries == 0
+
+    def test_a_lasting_stall_is_met_at_every_second_check(self, qapp, opened):
+        transport, system, _master, _received = opened
+        system.waiting_bytes = 1
+
+        for _ in range(6):
+            transport._check_stall()
+
+        assert len(system.rewaits) == 3 and transport.stall_recoveries == 3
+
+    def test_a_refused_restart_is_logged_and_not_counted(self, qapp, opened, caplog):
+        transport, system, _master, _received = opened
+        system.waiting_bytes = 3
+        system.accepts = False
+
+        with caplog.at_level("ERROR", logger=transport_module.__name__):
+            transport._check_stall()
+            transport._check_stall()
+
+        assert len(system.rewaits) == 1 and transport.stall_recoveries == 0
+        assert "could not be restarted" in caplog.text
+
+    def test_the_check_runs_only_while_the_port_is_open(self, qapp, opened):
+        transport, _system, _master, _received = opened
+        assert transport._stall_timer.isActive()
+        assert transport._stall_timer.interval() == SERIAL_STALL_CHECK_MS
+
+        transport.close()
+
+        assert not transport._stall_timer.isActive()
+
+
+class _StalledPort:
+    """An open port whose received bytes Qt has stopped collecting: they
+    stay in the system's queue until the wait for input is restarted."""
+
+    def __init__(self, waiting: bytes) -> None:
+        self.system = waiting
+        self.collected = b""
+
+    def isOpen(self) -> bool:
+        return True
+
+    def handle(self) -> int:
+        return 7
+
+    def portName(self) -> str:
+        return "COM15"
+
+    def bytesAvailable(self) -> int:
+        return len(self.collected)
+
+    def readAll(self) -> QByteArray:
+        data, self.collected = self.collected, b""
+        return QByteArray(data)
+
+
+class _QueueOf:
+    """The system's queue of a ``_StalledPort``; restarting the wait lets
+    Qt collect what was waiting."""
+
+    def __init__(self, port: _StalledPort) -> None:
+        self._port = port
+
+    def waiting(self, handle: int) -> int | None:
+        return len(self._port.system)
+
+    def rewait(self, handle: int) -> bool:
+        self._port.collected += self._port.system
+        self._port.system = b""
+        return True
+
+
+def test_input_left_in_the_system_reaches_the_session(qapp) -> None:
+    port = _StalledPort(b"temp=21.5\r\n")
+    transport = QtSerialTransport(system_input=_QueueOf(port))
+    transport._port = port
+    received: list[bytes] = []
+    transport.data_received.connect(received.append)
+
+    for _ in range(3):
+        transport._read_available()
+        transport._check_stall()
+    transport._read_available()
+
+    assert received == [b"temp=21.5\r\n"]
+    assert transport.stall_recoveries == 1
+
+
+@posix_only
+def test_without_a_system_queue_no_stall_check_runs(qapp, pseudo_terminal):
+    _, name = pseudo_terminal
+    transport = QtSerialTransport()
+
+    assert transport.open(name, _BAUD, _LINE) == ""
+    try:
+        assert not transport._stall_timer.isActive()
+    finally:
+        transport.close()
+
+
+def test_qt_gives_the_port_handle_as_an_integer(qapp) -> None:
+    """The stall check passes Qt's handle to the system as an integer."""
+    assert isinstance(int(QSerialPort().handle()), int)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the system's input queue is read on Windows")
+def test_the_system_queue_refuses_a_handle_that_is_not_a_port() -> None:
+    system = SystemInputQueue()
+
+    assert system.waiting(int(QSerialPort().handle())) is None
+    assert system.rewait(int(QSerialPort().handle())) is False
+
 
 @posix_only
 class TestQtLineSettings:

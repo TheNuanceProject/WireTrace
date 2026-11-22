@@ -14,11 +14,12 @@ page instead of a download it could not use.
 from __future__ import annotations
 
 import enum
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QHBoxLayout, QProgressBar, QTextEdit, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QTextEdit, QWidget
 
 from ui.dialogs.common import action_button, button_row, dialog_layout, heading, note, tighten
 from ui.dialogs.messages import confirm
@@ -27,21 +28,16 @@ from ui.themes import tokens
 from ui.widgets.dot_grid import DotGridDialog
 from ui.widgets.least_size import keep_least_size
 from ui.widgets.styling import plain_label
-from updater.background import Cancelled, Task
-from updater.download import (
-    DownloadCancelled,
-    DownloadError,
-    download,
-    is_verified_file,
-    remove_other_downloads,
-    update_cache_dir,
-)
-from updater.install import InstallKind, install_kind, platform_key, user_agent
+from updater.download_panel import DownloadPanel
+from updater.install import InstallKind, install_kind, platform_key
 from updater.manifest import ReleaseManifest, is_newer
 from updater.update_manager import UpdateManager
 from version import APP_NAME, APP_VERSION
 
-_PERCENT = 100
+logger = logging.getLogger(__name__)
+
+#: How the download is named in what a failed one says.
+UPDATE_DOWNLOAD = "the update"
 
 
 class UpdateAnswer(enum.Enum):
@@ -73,7 +69,6 @@ class UpdateDialog(DotGridDialog):
         self._manifest = manifest
         self._manager = manager
         self._release = manifest.platforms.get(platform_key())
-        self._task: Task | None = None
         self._installer: Path | None = None
         self.answer = UpdateAnswer.DISMISSED
 
@@ -116,15 +111,11 @@ class UpdateDialog(DotGridDialog):
                 "download and the steps."
             ))
 
-        self._progress = QProgressBar()
-        self._progress.setRange(0, _PERCENT)
-        self._progress.setTextVisible(False)
-        self._progress.setFixedHeight(metrics.progress_height)
-        self._progress.setVisible(False)
-        layout.addWidget(self._progress)
-        self._status = note()
-        self._status.setVisible(False)
-        layout.addWidget(self._status)
+        self._download = DownloadPanel(UPDATE_DOWNLOAD, self._manager.opener)
+        self._download.ready.connect(self._show_ready)
+        self._download.failed.connect(self._show_failed)
+        self._download.cancelled.connect(self._show_offer)
+        layout.addWidget(self._download)
 
         self._skip = action_button("Skip this version")
         self._skip.clicked.connect(self._on_skip)
@@ -133,6 +124,9 @@ class UpdateDialog(DotGridDialog):
         self._cancel = action_button("Cancel")
         self._cancel.setVisible(False)
         self._cancel.clicked.connect(self._on_cancel)
+        self._release_page = action_button("Open the release page")
+        self._release_page.setVisible(False)
+        self._release_page.clicked.connect(self._open_release_page)
         self._main = action_button("", primary=True)
         self._main.setDefault(True)
         self._main.clicked.connect(self._on_main)
@@ -140,7 +134,7 @@ class UpdateDialog(DotGridDialog):
         leading = QWidget()
         row = QHBoxLayout(leading)
         tighten(row)
-        for button in (self._skip, self._remind, self._cancel):
+        for button in (self._skip, self._release_page, self._remind, self._cancel):
             row.addWidget(button)
         layout.addStretch(1)
         layout.addLayout(button_row(self._main, leading=leading))
@@ -156,6 +150,16 @@ class UpdateDialog(DotGridDialog):
         self._skip.setVisible(True)
         self._remind.setVisible(True)
         self._cancel.setVisible(False)
+        self._release_page.setVisible(False)
+
+    def _show_failed(self, _text: str) -> None:
+        """The download failed, as the panel says: try again, or take the
+        release page."""
+        self._show_offer()
+        self._main.setText("Try again")
+        self._main.setFocus()
+        self._skip.setVisible(False)
+        self._release_page.setVisible(True)
 
     def _show_downloading(self) -> None:
         self._main.setText("Downloading...")
@@ -164,30 +168,21 @@ class UpdateDialog(DotGridDialog):
         self._remind.setVisible(False)
         self._cancel.setVisible(True)
         self._cancel.setEnabled(True)
-        self._progress.setValue(0)
-        self._progress.setVisible(True)
-        self._say("Connecting to the server...")
 
-    def _show_ready(self, installer: Path, *, already_there: bool) -> None:
+    def _show_ready(self, installer: Path, _already_there: bool) -> None:
         self._installer = installer
-        self._progress.setValue(_PERCENT)
-        self._progress.setVisible(True)
-        self._say(
-            "The installer was already downloaded and is verified" if already_there
-            else "Download complete and verified"
-        )
-        self._main.setText("Install and restart")
+        # The main button was disabled while downloading, which moved the
+        # focus to Cancel; Enter must now take the step the window offers.
         self._main.setEnabled(True)
+        self._main.setFocus()
+        self._main.setText("Install and restart")
         self._skip.setVisible(False)
         self._remind.setVisible(False)
         self._cancel.setVisible(False)
-
-    def _say(self, text: str) -> None:
-        self._status.setText(text)
-        self._status.setVisible(True)
+        self._release_page.setVisible(False)
 
     def status_text(self) -> str:
-        return self._status.text() if not self._status.isHidden() else ""
+        return self._download.status_text()
 
     # ── Answers ──────────────────────────────────────────────────────────
 
@@ -207,72 +202,21 @@ class UpdateDialog(DotGridDialog):
             self.accept()
             self.install_requested.emit(self._installer, self._release)
         elif self.can_self_update:
-            self._start_download()
+            self._show_downloading()
+            self._download.start(self._manifest, platform_key())
         else:
-            self.answer = UpdateAnswer.RELEASE_PAGE
-            if QDesktopServices.openUrl(QUrl(self._manifest.release_page)):
-                self.accept()
-            else:
-                self._say(f"The page could not be opened: {self._manifest.release_page}")
+            self._open_release_page()
 
-    # ── Download ─────────────────────────────────────────────────────────
-
-    def _start_download(self) -> None:
-        release = self._release
-        try:
-            destination = update_cache_dir() / release.file_name
-            if is_verified_file(destination, release.file_size, release.sha256):
-                self._show_ready(destination, already_there=True)
-                return
-            remove_other_downloads()
-        except DownloadError as exc:
-            self._on_failed(str(exc))
-            return
-        url = self._manifest.download_url(platform_key())
-        headers = {"User-Agent": user_agent()}
-
-        def work(task: Task) -> Path:
-            try:
-                return download(
-                    url, destination, release.file_size, release.sha256, headers,
-                    progress=task.progress.emit, cancelled=task.is_cancelled,
-                    opener=self._manager.opener,
-                )
-            except DownloadCancelled:
-                raise Cancelled from None
-
-        task = Task(work, (DownloadError,), self)
-        task.progress.connect(self._on_progress)
-        task.succeeded.connect(self._on_downloaded)
-        task.failed.connect(self._on_failed)
-        task.cancelled.connect(self._on_cancelled)
-        self._task = task
-        self._show_downloading()
-        task.start()
-
-    def _on_downloaded(self, path: Path) -> None:
-        self._show_ready(path, already_there=False)
-
-    def _on_progress(self, received: int, total: int) -> None:
-        percent = received * _PERCENT // total
-        self._progress.setValue(percent)
-        self._say(f"Downloading... {format_size(received)} of {format_size(total)} ({percent}%)")
-
-    def _on_failed(self, reason: str) -> None:
-        self._show_offer()
-        self._progress.setVisible(False)
-        self._say(f"The update could not be downloaded: {reason}")
-
-    def _on_cancelled(self) -> None:
-        self._show_offer()
-        self._progress.setVisible(False)
-        self._status.setVisible(False)
+    def _open_release_page(self) -> None:
+        self.answer = UpdateAnswer.RELEASE_PAGE
+        if QDesktopServices.openUrl(QUrl(self._manifest.release_page)):
+            self.accept()
+        else:
+            self._download.say(f"The page could not be opened: {self._manifest.release_page}")
 
     def _on_cancel(self) -> None:
-        if self._task is not None and self._task.running:
+        if self._download.cancel():
             self._cancel.setEnabled(False)
-            self._say("Cancelling the download...")
-            self._task.cancel()
 
     # ── Closing ──────────────────────────────────────────────────────────
 
@@ -281,11 +225,11 @@ class UpdateDialog(DotGridDialog):
 
         The close button and the Esc key both arrive here.
         """
-        if self._task is not None and self._task.running:
+        if self._download.running:
             if not confirm(
                 self, "Cancel download", "A download is in progress. Cancel it and close?",
                 proceed="Cancel download", stay="Keep downloading",
             ):
                 return
-            self._task.cancel()
+            self._download.cancel()
         super().reject()

@@ -96,10 +96,17 @@ def _is_geometry(value: object) -> bool:
 
 
 class PortMemory:
-    """Reads and updates the remembered settings of every port."""
+    """Reads and updates the remembered settings of every port.
 
-    def __init__(self, config: ConfigManager) -> None:
+    A memory that is not ``kept`` starts empty and lives only as long as
+    the object: the sample board's tab uses one, so that nothing about
+    it reaches the preferences.
+    """
+
+    def __init__(self, config: ConfigManager, *, kept: bool = True) -> None:
         self._config = config
+        self._kept = kept
+        self._unkept = ""
 
     def get(self, port: str) -> PortSettings | None:
         """Settings last used with ``port``, or None if it was never used."""
@@ -118,10 +125,11 @@ class PortMemory:
         while len(ports) > PORT_MEMORY_LIMIT:
             # The least recently used port is the first one.
             ports.pop(next(iter(ports)))
-        self._config.set(
-            SECTION, KEY,
-            json.dumps({name: settings.to_dict() for name, settings in ports.items()}),
-        )
+        stored = json.dumps({name: settings.to_dict() for name, settings in ports.items()})
+        if self._kept:
+            self._config.set(SECTION, KEY, stored)
+        else:
+            self._unkept = stored
 
     def note(self, port: str, line_ending_names: dict[LineEnding, str]) -> str:
         """One line saying what ``port`` was last used with, or ""."""
@@ -139,7 +147,7 @@ class PortMemory:
         return ", ".join(parts)
 
     def _load(self) -> dict[str, PortSettings]:
-        raw = self._config.get(SECTION, KEY, fallback="")
+        raw = self._config.get(SECTION, KEY, fallback="") if self._kept else self._unkept
         if not raw:
             return {}
         try:

@@ -34,6 +34,7 @@ from app.constants import (
 )
 from ui import shortcuts
 from ui.themes import tokens
+from ui.tour.targets import Target, mark
 from ui.widgets.button import Button
 from ui.widgets.styling import LEVEL, set_compact, set_state
 
@@ -97,7 +98,7 @@ class ConsoleHeader(QFrame):
             set_state(button, LEVEL, choice.key)
             button.clicked.connect(lambda _checked, c=choice: self._choose(c))
             self._level_group.addButton(button)
-            self._level_buttons[choice.key] = button
+            self._level_buttons[choice.key] = mark(button, Target.LEVELS)
 
             action = self._levels_menu.addAction("")
             action.setCheckable(True)
@@ -109,6 +110,7 @@ class ConsoleHeader(QFrame):
         self._levels_dropdown = Button(compact=True)
         self._levels_dropdown.setMenu(self._levels_menu)
         self._levels_dropdown.hide()
+        mark(self._levels_dropdown, Target.LEVELS)
 
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Filter lines")
@@ -118,17 +120,20 @@ class ConsoleHeader(QFrame):
         self._filter.setToolTip(shortcuts.with_keys("Show only lines that contain this text", "filter"))
         self._filter.setAccessibleName("Filter lines")
         self._filter.textChanged.connect(self.filter_changed)
+        mark(self._filter, Target.FILTER)
 
         self._time_mode = Button(compact=True)
         self._time_mode.setToolTip(
             "Switch the timestamps: time of day, date and time, or time since the previous line"
         )
         self._time_mode.clicked.connect(self._toggle_timestamp_mode)
+        mark(self._time_mode, Target.TIMESTAMPS)
 
         self._follow = Button(compact=True)
         self._follow.setCheckable(True)
         self._follow.setToolTip("Stay on the newest line as lines arrive")
         self._follow.clicked.connect(self.follow_requested)
+        mark(self._follow, Target.FOLLOWING)
 
         layout = QHBoxLayout(self)
         # The row decides for itself what to show at the width it is

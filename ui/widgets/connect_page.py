@@ -34,6 +34,7 @@ from ui import shortcuts
 from ui.formatting import format_count
 from ui.themes import tokens
 from ui.themes.icons import bind_icon
+from ui.tour.targets import Target, mark
 from ui.widgets.button import Button
 from ui.widgets.dot_grid import DotGridWidget
 from ui.widgets.styling import (
@@ -189,9 +190,13 @@ class ConnectPage(DotGridWidget):
         self._list_layout.setSpacing(0)
         self._scroll = VerticalScrollArea(self._list)
         self._scroll.setObjectName("portScroll")
+        mark(self._scroll, Target.PORTS)
 
         self._empty = QFrame()
         self._empty.setObjectName("portList")
+        # With no port to list, the message in its place is what the tour
+        # points at.
+        mark(self._empty, Target.PORTS)
         empty_title = plain_label(_NO_PORTS_TITLE)
         empty_title.setObjectName("portName")
         self._empty_help = plain_label(no_ports_help())
@@ -218,10 +223,12 @@ class ConnectPage(DotGridWidget):
         self._baud.setValidator(QIntValidator(BAUD_RATE_MIN, BAUD_RATE_MAX, self))
         self._baud.lineEdit().textChanged.connect(self._refresh_connect)
         self._baud.lineEdit().returnPressed.connect(self._connect_selected)
+        mark(self._baud, Target.BAUD)
 
         self._port_settings = Button()
         bind_icon(self._port_settings, "port_settings")
         self._port_settings.clicked.connect(self.port_settings_requested)
+        mark(self._port_settings, Target.PORT_SETTINGS)
         self.set_line_settings(LineSettings())
 
         self._refresh = Button("Refresh")
@@ -232,6 +239,7 @@ class ConnectPage(DotGridWidget):
         self._connect = Button("Connect")
         set_primary(self._connect)
         self._connect.clicked.connect(self._connect_selected)
+        mark(self._connect, Target.CONNECT)
 
         controls = QHBoxLayout()
         controls.setSpacing(metrics.space_2)

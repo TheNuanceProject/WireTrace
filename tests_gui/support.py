@@ -34,6 +34,14 @@ def wait_until(
         time.sleep(_POLL_SECONDS)
 
 
+def let_events_run(qapp: QApplication, rounds: int = 10) -> None:
+    """Run the event loop for a few rounds, so that anything already asked
+    for, such as a paint, has happened by the time it returns."""
+    for _ in range(rounds):
+        qapp.processEvents()
+        time.sleep(_POLL_SECONDS)
+
+
 def pixel(widget: QWidget, x: float, y: float) -> QColor:
     """Colour drawn at a point of a widget, given in the widget's own units.
 

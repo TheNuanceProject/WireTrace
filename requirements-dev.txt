@@ -12,3 +12,4 @@
 
 pytest>=7.0             # Test runner (tests/ suite)
 ruff>=0.1               # Linter + import sorter
+psutil>=7.2.2           # Processor and memory use, read by tools/benchmark.py

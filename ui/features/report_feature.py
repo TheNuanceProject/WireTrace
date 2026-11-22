@@ -14,6 +14,7 @@ from datetime import datetime
 from PySide6.QtWidgets import QFileDialog, QWidget
 
 from app._atomic import atomic_write_text
+from app.diagnostic_log import described
 from app.file_names import output_base_path
 from app.modules import RESTARTS, ModuleSettings
 from ui.dialogs.session_report_dialog import SessionReportDialog
@@ -47,12 +48,20 @@ class ReportFeature(TabModule):
 
     def open_report(self) -> None:
         """Show the report of the current or last session."""
-        text = self.report_text()
-        if text is None:
+        dialog = self.report_dialog()
+        if dialog is None:
             Toast.info(self.context.widget, "There is no session to report on yet")
             return
         self.context.note_usage(Feature.REPORT)
-        SessionReportDialog(text, self._save, self.context.widget).exec()
+        dialog.exec()
+
+    def report_dialog(self) -> SessionReportDialog | None:
+        """The window of the report of the current or last session, not yet
+        shown, or None before the first session."""
+        text = self.report_text()
+        if text is None:
+            return None
+        return SessionReportDialog(text, self._save, self.context.widget)
 
     def _save(self, parent: QWidget, text: str) -> None:
         config = self.context.config
@@ -66,7 +75,7 @@ class ReportFeature(TabModule):
         try:
             atomic_write_text(path, text)
         except OSError as exc:
-            logger.error("Could not save the session report: %s", exc)
+            logger.error("Could not save the session report: %s", described(exc))
             self.context.report_problem(_NOT_SAVED, str(exc))
             Toast.error(parent, f"{_NOT_SAVED}: {exc}")
             return

@@ -2,7 +2,12 @@
 """Fetching the manifest and downloading an installer, with nothing trusted.
 
 Every request is to an ``https`` address, and a redirect is followed only
-to another ``https`` address. An installer is written to a folder of the
+to another ``https`` address. Certificates are verified by the operating
+system's own verifier (Windows CryptoAPI, the macOS Security framework,
+or OpenSSL with the system's certificates on Linux), through
+``truststore``: like a browser, it can fetch a root certificate the
+system trusts but has not stored yet, and it honours the roots an
+organisation installs. An installer is written to a folder of the
 application's own that only the user can read, under a name the
 application built. It is accepted only if it has exactly the size and the
 SHA-256 the signed manifest gave; until then it carries a temporary name,
@@ -18,6 +23,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import ssl
 import stat
 import tempfile
 import time
@@ -26,6 +32,8 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol
+
+import truststore
 
 from app.constants import (
     UPDATE_DOWNLOAD_CHUNK_BYTES,
@@ -51,7 +59,24 @@ _LEGACY_DOWNLOAD_PATTERNS = ("WireTrace-Setup-*.exe", "WireTrace-*.dmg", "WireTr
 
 
 class DownloadError(Exception):
-    """The server could not be reached, or what it sent was not accepted."""
+    """The server could not be reached, or what it sent was not accepted.
+
+    Its text is the technical reason, for the log. Which of the kinds
+    below it is says what the user is told.
+    """
+
+
+class DownloadUnreachable(DownloadError):
+    """The server could not be reached, or the connection was lost."""
+
+
+class DownloadRejected(DownloadError):
+    """What arrived, or where it would come from, was not accepted: not
+    ``https``, or not the size and SHA-256 the release states."""
+
+
+class DownloadStorageError(DownloadError):
+    """The download could not be kept on this computer."""
 
 
 class DownloadCancelled(Exception):
@@ -71,7 +96,7 @@ def require_https(url: str) -> None:
         DownloadError: ``url`` uses another scheme.
     """
     if not isinstance(url, str) or not url.startswith(_HTTPS):
-        raise DownloadError(f"refusing an address that is not https: {url!r}")
+        raise DownloadRejected(f"refusing an address that is not https: {url!r}")
 
 
 class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
@@ -82,9 +107,18 @@ class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def tls_context() -> ssl.SSLContext:
+    """A context that verifies certificates and host names with the
+    operating system's own verifier."""
+    return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
 def default_opener() -> Opener:
-    """An opener that verifies certificates and never leaves ``https``."""
-    return urllib.request.build_opener(_HttpsOnlyRedirects)
+    """An opener that verifies certificates with the operating system and
+    never leaves ``https``."""
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=tls_context()), _HttpsOnlyRedirects
+    )
 
 
 def fetch(
@@ -110,9 +144,9 @@ def fetch(
     except DownloadError:
         raise
     except (OSError, ValueError) as exc:
-        raise DownloadError(f"the server could not be reached: {exc}") from exc
+        raise DownloadUnreachable(f"the server could not be reached: {exc}") from exc
     if len(data) > max_bytes:
-        raise DownloadError("the server sent more than was asked for")
+        raise DownloadRejected("the server sent more than was asked for")
     return data, answer_headers
 
 
@@ -146,7 +180,7 @@ def send(
     except urllib.error.HTTPError as exc:
         return int(exc.code)
     except (OSError, ValueError) as exc:
-        raise DownloadError(f"the server could not be reached: {exc}") from exc
+        raise DownloadUnreachable(f"the server could not be reached: {exc}") from exc
 
 
 # ── The folder downloads are kept in ─────────────────────────────────────────
@@ -166,7 +200,7 @@ def update_cache_dir() -> Path:
         # folder that belongs to someone else, which must not be used.
         os.chmod(directory, _PRIVATE_DIRECTORY)
     except OSError as exc:
-        raise DownloadError(f"the folder for downloads cannot be used: {exc}") from exc
+        raise DownloadStorageError(f"the folder for downloads cannot be used: {exc}") from exc
     return directory
 
 
@@ -215,33 +249,63 @@ def download(
     digest = hashlib.sha256()
     received = 0
     try:
-        with (opener or default_opener()).open(request, timeout=timeout) as response:
-            descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _PRIVATE_FILE)
+        with _opened(opener or default_opener(), request, timeout) as response:
+            try:
+                descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _PRIVATE_FILE)
+            except OSError as exc:
+                raise DownloadStorageError(f"the download could not be written: {exc}") from exc
             with os.fdopen(descriptor, "wb") as file:
                 while True:
                     if cancelled():
                         raise DownloadCancelled
-                    chunk = response.read(min(UPDATE_DOWNLOAD_CHUNK_BYTES, size - received + 1))
+                    try:
+                        chunk = response.read(min(UPDATE_DOWNLOAD_CHUNK_BYTES, size - received + 1))
+                    except (OSError, ValueError) as exc:
+                        raise DownloadUnreachable(f"the connection was lost: {exc}") from exc
                     if not chunk:
                         break
                     received += len(chunk)
                     if received > size:
-                        raise DownloadError("the download is larger than the release says")
-                    file.write(chunk)
+                        raise DownloadRejected("the download is larger than the release says")
+                    try:
+                        file.write(chunk)
+                    except OSError as exc:
+                        raise DownloadStorageError(f"the download could not be written: {exc}") from exc
                     digest.update(chunk)
                     progress(received, size)
         if received != size:
-            raise DownloadError("the download is smaller than the release says")
+            raise DownloadRejected("the download is smaller than the release says")
         if digest.hexdigest() != sha256:
-            raise DownloadError("the download does not match the release")
-        os.replace(partial, destination)
+            raise DownloadRejected("the download does not match the release")
+        try:
+            os.replace(partial, destination)
+        except OSError as exc:
+            raise DownloadStorageError(f"the download could not be kept: {exc}") from exc
     except (DownloadCancelled, DownloadError):
         _remove(partial)
         raise
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
+        # Closing the file flushes what is left of it to the disk.
         _remove(partial)
-        raise DownloadError(f"the download failed: {exc}") from exc
+        raise DownloadStorageError(f"the download could not be written: {exc}") from exc
+    except BaseException:
+        # Whatever else ends the download, no partial file is left behind.
+        _remove(partial)
+        raise
     return destination
+
+
+@contextlib.contextmanager
+def _opened(opener: Opener, request: urllib.request.Request, timeout: float):
+    """The answer to ``request``; a failure to get it is the server's."""
+    try:
+        response = opener.open(request, timeout=timeout)
+    except DownloadError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise DownloadUnreachable(f"the server could not be reached: {exc}") from exc
+    with response:
+        yield response
 
 
 def _remove(path: Path) -> None:

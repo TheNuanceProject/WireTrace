@@ -47,6 +47,13 @@ BAUD_RATE_MAX = 4_000_000
 # unreliable on Windows with several common USB-to-serial chipsets.
 SERIAL_POLL_INTERVAL_MS = 20
 
+# Interval of the check, on Windows, for input the system holds that Qt
+# has stopped collecting (see ``core/transport.py``, "Reading"). Input
+# found waiting at two checks in a row, with nothing collected between
+# them, has waited at least this long; Qt's own collection takes far
+# less, so a working port never meets the condition.
+SERIAL_STALL_CHECK_MS = 100
+
 # Interval at which the input lines of an open port (CTS, DSR, DCD, RI)
 # are read; a change is reported, an unchanged reading is not.
 CONTROL_LINE_POLL_INTERVAL_MS = 200
@@ -212,6 +219,11 @@ PLOT_HISTORY_HANDOVER_LINES = 20_000
 PLOT_HISTORY_DETAIL_DELAY_MS = 200
 PLOT_HISTORY_SAMPLES_PER_PIXEL = 2
 PLOT_HISTORY_DETAIL_MAX_LINES = 2_000_000
+# Each line is handed to the chart as at most four samples for each pixel
+# column of the time shown (``core/plot_thinning.py``), worked out for
+# this many widths of that time beyond each side as well, so a drag or
+# a zoom between two redraws still shows the line to the edges.
+PLOT_DRAWN_MARGIN_VIEWS = 1.0
 # Panels by scale: a value shares a panel with smaller ones while it is
 # at most this many times the smallest of them. No more than this many
 # panels are shown, so each stays tall enough to read.
@@ -221,8 +233,9 @@ PLOT_MAX_PANELS = 4
 # ones; a device cannot make the plot keep hundreds of buffers.
 PLOT_MAX_SERIES = 32
 
-# How often the plot is redrawn, and how often the figures beside it
-# (last, min, max, avg) are worked out again.
+# How often the plot looks for a new frame to draw, at most; it draws one
+# only when the picture would change (``PlotView._frame_due``). And how
+# often the figures beside it (last, min, max, avg) are worked out again.
 PLOT_REDRAW_INTERVAL_MS = 33
 PLOT_STATS_INTERVAL_MS = 250
 # The plot's charting library is loaded on a thread of its own this long
@@ -600,6 +613,23 @@ def get_default_log_dir() -> str:
     return os.path.join(os.path.expanduser("~"), "Documents", "WireTrace", "Logs")
 
 
+def get_diagnostic_log_dir() -> str:
+    """Return the system's place for the application's diagnostic log.
+
+    Windows: %LOCALAPPDATA%/WireTrace/Logs/
+    macOS:   ~/Library/Logs/WireTrace/
+    Linux:   $XDG_STATE_HOME/WireTrace/logs/ (default ~/.local/state/WireTrace/logs/)
+    """
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        return os.path.join(base, "WireTrace", "Logs")
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Logs", "WireTrace")
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
+    return os.path.join(base, "WireTrace", "logs")
+
+
 # ── Preferences File ─────────────────────────────────────────────────────────
 
 PREFERENCES_FILENAME = "preferences.ini"
@@ -687,6 +717,11 @@ UPDATE_CHECK_INTERVAL_HOURS = 12
 # "Remind later" keeps an update from being announced for this long.
 UPDATE_SNOOZE_HOURS = 24
 
+# Once automatic update checks have failed for this many days, with none
+# answered in between, the status bar says since when updates have not
+# been checked.
+UPDATE_CHECKS_FAILING_DAYS = 3
+
 # How long the manifest and the download may each wait for the server.
 UPDATE_MANIFEST_TIMEOUT_S = 15
 UPDATE_DOWNLOAD_TIMEOUT_S = 60
@@ -712,16 +747,97 @@ UPDATE_LAST_CHECK_HEADER = "X-WireTrace-Last-Check"
 UPDATE_FIRST_CHECK_VALUE = "new"
 UPDATE_SERVER_DAY_HEADER = "X-WireTrace-Day"
 
-# The name of the mutex the Windows installer waits for (AppMutex in
-# build/windows/installer.iss), so that it can tell the application is
-# still open.
+# The headers of a version change: a check made by a version other than
+# the one that made the previous counted check names that version, a
+# one-time number for this change alone, and, when there was one, the
+# last day of a check whose version was not kept. See
+# updater/version_change.py.
+UPDATE_LAST_VERSION_HEADER = "X-WireTrace-Last-Version"
+UPDATE_CHANGE_HEADER = "X-WireTrace-Change"
+UPDATE_UNKNOWN_UNTIL_HEADER = "X-WireTrace-Unknown-Until"
+# The size of a change's one-time number, in bytes of the system's secure
+# generator (sent as twice as many hex digits).
+UPDATE_CHANGE_TOKEN_BYTES = 16
+
 # The server names its own day as a count of days. One that differs from
 # this computer's count by more than this is not stored, so that the
 # value sent back can only ever be one of a few that every installation
 # checking on those days shares.
 UPDATE_SERVER_DAY_TOLERANCE = 2
 
+# The name of the mutex the Windows installer waits for (AppMutex in
+# build/windows/installer.iss), so that it can tell the application is
+# still open.
 WINDOWS_INSTALLER_MUTEX = "WireTrace_SingleInstance_Mutex"
+
+# ── Returning to the previous version ────────────────────────────────────
+
+# Before an update, the preferences file is copied into this folder beside
+# it, as the prefix, the version that made the copy and the suffix
+# (preferences-2.1.0.ini). The copies of the newest versions, this many,
+# are kept. A return to one of those versions puts its copy back. See
+# ConfigManager.keep_copy and ConfigManager.put_back.
+SETTINGS_COPY_DIRECTORY = "Before updates"
+SETTINGS_COPY_PREFIX = "preferences-"
+SETTINGS_COPY_SUFFIX = ".ini"
+SETTINGS_COPIES_KEPT = 2
+
+
+def get_settings_copy_dir(config_dir: str) -> str:
+    """The folder of the settings copies, beside the preferences file in
+    ``config_dir``."""
+    return os.path.join(config_dir, SETTINGS_COPY_DIRECTORY)
+
+# The signed update manifest of the installed version, kept in the cache
+# folder from the last check that found it, so that the release before
+# this one is known even once a newer one is out. It is verified again
+# every time it is read. See updater/update_manager.py.
+INSTALLED_MANIFEST_FILENAME = "installed-release.json"
+
+# ── The tour ─────────────────────────────────────────────────────────────
+# See ui/tour/.
+
+# The tour opens a tab on a built-in sample board, under this port name;
+# it sends a reading this often, so that the plot, which looks for values
+# in its first PLOT_AUTODETECT_SAMPLE_SIZE lines, finds them within
+# seconds. See core/sample_device.py.
+SAMPLE_PORT_NAME = "Sample"
+SAMPLE_PORT_DESCRIPTION = "No device"
+SAMPLE_LINE_INTERVAL_MS = 100
+
+# How long the desktop's own settings tool (GNOME's gsettings) is given to
+# say whether animations are off, before motion is taken as allowed.
+SYSTEM_MOTION_TIMEOUT_S = 1.0
+
+# ── Diagnostic log ───────────────────────────────────────────────────────
+# WireTrace's own events, kept on this computer. See app/diagnostic_log.py.
+
+# Each run writes its own files, named by the prefix, the moment it
+# started, its process number and the suffix; a file is continued in the
+# next once it would pass this size. The oldest files are removed so
+# that the folder never holds more than the total, counting the newest
+# file of every other run still going as a full one.
+DIAGNOSTIC_LOG_PREFIX = "wiretrace-"
+DIAGNOSTIC_LOG_SUFFIX = ".log"
+DIAGNOSTIC_LOG_FILE_BYTES = 1024 * 1024
+DIAGNOSTIC_LOG_TOTAL_BYTES = 5 * 1024 * 1024
+# The lock that runs take, in the folder, while they count its room and
+# begin a file. Not named like a log, so it is never counted or removed.
+DIAGNOSTIC_LOG_FOLDER_LOCK = "wiretrace-folder.lock"
+
+# Messages wait in a queue for the thread that writes them, so that
+# nothing waits on the disk. A message that finds the queue full is not
+# written, and the next one written says how many were not.
+DIAGNOSTIC_LOG_QUEUE_RECORDS = 2000
+
+# On exit, how long the thread that writes is given to write what is
+# waiting and close its file; a disk that does not answer within it does
+# not keep WireTrace from closing.
+DIAGNOSTIC_LOG_STOP_SECONDS = 5.0
+
+# How many of this run's latest events, and of its latest warnings and
+# errors, the diagnostic summary shows.
+DIAGNOSTIC_SUMMARY_EVENTS = 20
 
 # ── Usage statistics ─────────────────────────────────────────────────────
 # Off unless the user switches them on. See updater/usage.py.

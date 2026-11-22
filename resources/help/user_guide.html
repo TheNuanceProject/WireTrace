@@ -192,6 +192,7 @@
   <section>
     <h2>Start here</h2>
     <a href="#overview">What it does</a>
+    <a href="#tour">The tour</a>
     <a href="#connect">Connect a device</a>
     <a href="#port-settings">Port settings</a>
     <a href="#window">The window</a>
@@ -244,6 +245,7 @@
     <a href="#messages">Messages</a>
     <a href="#connection-lost">Connection lost</a>
     <a href="#troubleshooting">Troubleshooting</a>
+    <a href="#diagnostic-logs">Diagnostic logs</a>
   </section>
   <section>
     <h2>Reference</h2>
@@ -251,7 +253,9 @@
     <a href="#shortcuts">Keyboard shortcuts</a>
     <a href="#folders">Folders</a>
     <a href="#updates">Updates</a>
+    <a href="#return">Return to the previous version</a>
     <a href="#privacy">Privacy</a>
+    <a href="#help">Help and problems</a>
   </section>
 </nav>
 
@@ -269,6 +273,20 @@
   <li>Logs are plain text files that any editor opens. A spreadsheet file can be written beside them.</li>
   <li>What your devices send never leaves your computer. See <a href="#privacy">Privacy</a>.</li>
 </ul>
+
+<h2 id="tour">The tour</h2>
+<p>The tour shows each part of {{const:APP_NAME}} in turn: it rings one control, says what it does, and goes on when you choose <strong>Next</strong>. It is offered once, at the first start of a version that has it, and <span class="menu">Help &gt; Take the tour...</span> opens it at any time.</p>
+<figure>
+  {{image:tour|The window dimmed except for the level buttons, which have a ring around them, and a card beside them saying what they do, with Close tour and Next}}
+  <figcaption>Everything but the control a step is about is dimmed.</figcaption>
+</figure>
+<ul>
+  <li><strong>Chapters.</strong> Take the whole tour, or any chapter on its own: connecting a board, reading the console, logs and exports, sending commands, the plot, watching the board, alerts and highlights, and settings, updates and help. The list says which chapters you have taken.</li>
+  <li><strong>No board needed.</strong> From the second chapter on, the tour opens a tab called Sample, which reads a sample board built into {{const:APP_NAME}}. It opens no port, is not saved, and is closed when the tour ends. Your own tabs stay as they are.</li>
+  <li><strong>It takes you there.</strong> A step about an entry of a menu opens that menu with the entry chosen; a step about a setting opens Preferences at its page. Nothing can be changed while the tour is shown, and Preferences opened by the tour closes without saving.</li>
+  <li><strong>Keys.</strong> <kbd>Enter</kbd> or the right arrow goes on, the left arrow goes back, and <kbd>Esc</kbd> closes the tour.</li>
+</ul>
+<p>After a later update that adds something new, a chapter of just what is new is offered instead, and it stays in the Help menu, named for its version.</p>
 
 <h2 id="connect">Connect a device</h2>
 <p>A new tab opens on the list of serial ports. The list updates by itself: plug a device in and it appears, marked <strong>New</strong>.</p>
@@ -672,8 +690,22 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 <h3>The CSV file has only two columns</h3>
 <p>No names and values were found in the first {{const:CSV_DETECTION_GIVE_UP_LINES}} lines, so each line was written whole. The CSV file needs lines such as <code>name: value</code>, <code>name=value</code> or JSON. Values with no names can be plotted but have no column names for a table.</p>
 
+<h3>A new version does not suit you</h3>
+<p>Return to the version you had: see <a href="#return">Return to the previous version</a>.</p>
+
+<h3>A new version does not start</h3>
+<p>Every earlier version stays on the release page, <a href="{{const:RELEASES_URL}}">{{const:RELEASES_URL}}</a>. Download the one you had and install it as you installed {{const:APP_NAME}}; it reads your settings as they are. Please report the problem, with the files of the diagnostic logs folder (see <a href="#folders">Folders</a>).</p>
+
 <h3>Start again with the original settings</h3>
-<p><span class="menu">File &gt; Preferences...</span>, then <strong>Restore defaults</strong>. It takes effect at once and cannot be undone. Your plot profiles, saved commands, what each port remembers and the update check setting are kept.</p>
+<p><span class="menu">File &gt; Preferences...</span>, then <strong>Restore defaults</strong>. It takes effect at once and cannot be undone. Your plot profiles, highlight rules, saved commands, what each port remembers, and your choices about updates and usage statistics are kept.</p>
+
+<h2 id="diagnostic-logs">Diagnostic logs</h2>
+<p>{{const:APP_NAME}} keeps a log of its own events on this computer: when it starts, each port opened and closed with its driver and settings, errors, recoveries and updates. It helps find the cause of a problem. It never holds anything a device sent or anything you typed, and it is never sent anywhere.</p>
+<ul>
+  <li><span class="menu">Help &gt; Open diagnostic logs</span> opens its folder, which <a href="#folders">Folders</a> names.</li>
+  <li><span class="menu">Help &gt; Copy diagnostic summary</span> copies a summary to paste into a report: the version and how it was installed, the system, the versions of Python, PySide6 and Qt, the ports open now, and the latest warnings, errors and events of this run.</li>
+  <li>Each time {{const:APP_NAME}} starts, it writes a file of its own, which continues in a new file at {{size:DIAGNOSTIC_LOG_FILE_BYTES}}. The oldest files are removed, so the folder never holds more than {{size:DIAGNOSTIC_LOG_TOTAL_BYTES}}.</li>
+</ul>
 
 <!-- ────────────────────────────── Reference ───────────────────────────── -->
 
@@ -743,6 +775,8 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
   <tbody>
     <tr><td>Logs, unless you choose another folder</td><td><code>{{dir:logs}}</code></td></tr>
     <tr><td>Settings (<code>{{const:PREFERENCES_FILENAME}}</code>)</td><td><code>{{dir:config}}</code></td></tr>
+    <tr><td>Copies of the settings from before each update, kept for <a href="#return">a return</a></td><td><code>{{dir:settings_copies}}</code></td></tr>
+    <tr><td><a href="#diagnostic-logs">Diagnostic logs</a></td><td><code>{{dir:diagnostic_logs}}</code></td></tr>
     <tr><td>Working files, including the recording of each open session. Safe to delete while {{const:APP_NAME}} is closed.</td><td><code>{{dir:cache}}</code></td></tr>
   </tbody>
 </table>
@@ -750,7 +784,8 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 
 <h2 id="updates">Updates</h2>
 <p>{{const:APP_NAME}} looks for a new version shortly after it starts and every {{const:UPDATE_CHECK_INTERVAL_HOURS}} hours while it stays open. You can turn this off in Preferences, under Updates and privacy. <span class="menu">Help &gt; Check for updates...</span> checks at once, whatever that setting.</p>
-<p>A new version is announced by a message; your work is not interrupted. Open it to see what changed, and decide: update now, be reminded in {{const:UPDATE_SNOOZE_HOURS}} hours, or skip that version. Nothing is installed without your choice.</p>
+<p>A new version is announced by a message, and a button at the right of the status bar, <strong>Update to</strong> and the version, stays until you decide; your work is not interrupted. The button, or <span class="menu">Help &gt; Update to ...</span>, opens the update window: what changed, the size of the download, and the choice to update now, be reminded in {{const:UPDATE_SNOOZE_HOURS}} hours, or skip that version. A skipped version is still offered in the Help menu. Nothing is installed without your choice.</p>
+<p>If the automatic checks have failed for {{const:UPDATE_CHECKS_FAILING_DAYS}} days running, the status bar says since when updates have not been checked, with <strong>Check now</strong>; it goes once a check is answered. If a check or a download fails, a message says what happened and what to do, with <strong>Open the release page</strong>, where every version can be downloaded.</p>
 <p>An update is accepted only if its description is signed by the maintainer of {{const:APP_NAME}}, and the download is used only if it is exactly the file that description names. A description that is not signed, or a file that differs, is refused.</p>
 <table>
   <thead><tr><th scope="col">Installed as</th><th scope="col">When you choose to update</th></tr></thead>
@@ -761,19 +796,29 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
   </tbody>
 </table>
 
-<h2 id="privacy">Privacy</h2>
+<h2 id="return">Return to the previous version</h2>
+<p>If a new version does not suit you, <span class="menu">Help &gt; Return to version ...</span> installs the version you had before. The entry names that version once {{const:APP_NAME}} knows it; until then it reads <span class="menu">Return to the previous version...</span> and looks the version up when you choose it. A window then says what will happen, and nothing starts until you choose <strong>Return to</strong> and the version.</p>
 <ul>
-  <li>What your devices send stays on your computer, in the files you choose to write.</li>
-  <li>Settings, saved commands and what each port remembers are kept in the settings file on your computer.</li>
-  <li>{{const:APP_NAME}} connects to the internet by itself only to check for a newer version, to send usage statistics if you choose to share them, and, after you switch them off, to ask the server to delete what was sent.</li>
-  <li>The update check states the version, the operating system, the processor type, how {{const:APP_NAME}} was installed and the date of the previous check. It carries no identifier. The file it reads is on the website, which GitHub Pages hosts, so GitHub also receives the request. You can turn it off in Preferences, under Updates and privacy.</li>
-  <li>Usage statistics are off unless you switch them on. {{const:APP_NAME}} asks once, with a bar above the tabs. If you share them, {{const:APP_NAME}} makes a random installation identifier and sends one report for each day it is used: the identifier and the date; which features were used; whether lines were lost, a log could not be written, a connection was lost or {{const:APP_NAME}} closed unexpectedly; the highest line rate, the number of connections, the longest time one window stayed open and the number of starts, as ranges; the theme; the display scale; and the same version and system details as the update check. A report never holds a port or device name, a file name, a command, or anything a device sent.</li>
-  <li>You can change your answer at any time in Preferences, under Updates and privacy. Switching statistics off deletes the identifier and everything kept for them on your computer, and asks the server to delete every report sent under that identifier.</li>
-  <li>The privacy policy is at <a href="{{const:APP_PRIVACY_URL}}">{{const:APP_PRIVACY_URL}}</a>.</li>
+  <li>The earlier version is downloaded and checked exactly as an update is: only a release the maintainer has signed is installed.</li>
+  <li>When an update is installed, {{const:APP_NAME}} first keeps a copy of your settings, named for the version they came from; the copies of the last {{const:SETTINGS_COPIES_KEPT}} versions are kept (see <a href="#folders">Folders</a>). A return puts that version's copy back. Your saved commands, plot profiles, highlight rules and remembered ports stay as they are now, and so do your choices about updates and usage statistics. Without a copy for that version, for example after installing a version by hand, your settings stay as they are.</li>
+  <li>Open connections and logs are closed, as when {{const:APP_NAME}} exits. Logs already written are kept.</li>
+  <li>The earlier version offers the newest one again. <strong>Skip this version</strong> in its update window stops that.</li>
 </ul>
+<table>
+  <thead><tr><th scope="col">Installed as</th><th scope="col">When you choose to return</th></tr></thead>
+  <tbody>
+    <tr><td>Windows installer</td><td>The earlier installer is downloaded, checked and started, and {{const:APP_NAME}} closes.</td></tr>
+    <tr><td>Linux AppImage</td><td>The earlier AppImage is downloaded, checked and put in place of this one, and {{const:APP_NAME}} starts again.</td></tr>
+    <tr><td>Linux <code>.deb</code>, from source, or macOS</td><td>The page of the earlier release opens in your browser, for you to install it from there.</td></tr>
+  </tbody>
+</table>
+<p>The page of the earlier release also opens when that release has no file for this system.</p>
 
-<h3>Help and problems</h3>
-<p><span class="menu">Help &gt; Report a problem</span> opens the page where problems are reported: <a href="{{const:APP_ISSUES_URL}}">{{const:APP_ISSUES_URL}}</a>.</p>
+<h2 id="privacy">Privacy</h2>
+{{privacy}}
+
+<h2 id="help">Help and problems</h2>
+<p><span class="menu">Help &gt; Report a problem</span> opens the page where problems are reported: <a href="{{const:APP_ISSUES_URL}}">{{const:APP_ISSUES_URL}}</a>. Paste the diagnostic summary into your report (<span class="menu">Help &gt; Copy diagnostic summary</span>): it says which version and system you use and what {{const:APP_NAME}} recorded, never what your devices sent. See <a href="#diagnostic-logs">Diagnostic logs</a>.</p>
 
 <footer>
   {{const:APP_NAME}} {{const:APP_VERSION}}. {{const:COPYRIGHT}}.

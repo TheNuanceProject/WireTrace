@@ -15,7 +15,7 @@ No other module defines version or identity constants.
 # ── Application Identity ─────────────────────────────────────────────────────
 
 APP_NAME = "WireTrace"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 APP_DESCRIPTION = "Professional Serial Data Monitor"
 APP_AUTHOR = "The Nuance Project"
 APP_DEVELOPER = "Mohamad Shahin Ambalatha Kandy"
@@ -77,6 +77,10 @@ APP_ISSUES_URL = f"{APP_REPOSITORY_URL}/issues"
 # Where installers are downloaded from, and the page of one release
 RELEASES_BASE_URL = f"{APP_REPOSITORY_URL}/releases/download"
 RELEASE_PAGE_URL = f"{APP_REPOSITORY_URL}/releases/tag/v{{version}}"
+# The page of the newest release, for when no manifest says which it is
+LATEST_RELEASE_URL = f"{APP_REPOSITORY_URL}/releases/latest"
+# Every release, newest first: where an earlier version can be found
+RELEASES_URL = f"{APP_REPOSITORY_URL}/releases"
 
 # What the update check sends, and why, is described here
 APP_PRIVACY_URL = f"{APP_WEBSITE}/privacy/"

@@ -78,6 +78,7 @@ from app.constants import (
     PLOT_REGEX_MAX_CONSECUTIVE_TIMEOUTS,
     PLOT_RING_BUFFER_SIZE,
 )
+from app.diagnostic_log import log_data_failure
 from core.plot_parsers import ParserPipeline, RegexParser
 
 logger = logging.getLogger(__name__)
@@ -413,7 +414,7 @@ class PlotEngine(QObject):
         try:
             self._process_one(line, timestamp)
         except Exception:
-            logger.exception("Plot engine swallowed exception on line: %r", line)
+            log_data_failure(logger, "The plot could not read a line")
 
     def _process_one(self, line: str, timestamp: datetime) -> None:
         if self._origin is None:

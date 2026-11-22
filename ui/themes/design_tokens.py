@@ -7,8 +7,8 @@ edit: change the token files there and generate again. ``tokens.py``
 builds the palettes, sizes and type styles from these values.
 """
 
-SOURCES_SHA256 = "466cabf89f1bcb0e82aaaba60a20e69731eee425a6f7422b93f49a82e3001367"
-BODY_SHA256 = "092fe8d71ae03fb8afcca148f24f1584d70708bfb5768232e7273af432b965e8"
+SOURCES_SHA256 = "f78120290604986445a8efa54a8525db0e148ef972ce8623e2adf0aab7170e94"
+BODY_SHA256 = "ada652310cd5ab95e9ca1ffdb090e68f019896a363fbe51aa684bf0f52381a1b"
 
 #: Font families, first choice first.
 FONT_FAMILIES: dict[str, tuple[str, ...]] = {
@@ -188,6 +188,7 @@ COLOURS: dict[str, dict[str, tuple[str, float]]] = {
         "selection": ("#EECCBE", 1),
         "dot": ("#141413", 0.14),
         "dot-glow": ("#D97757", 0.7),
+        "scrim": ("#000000", 0.4),
         "wiretrace.error": ("#B42318", 1),
         "wiretrace.warning": ("#8A5300", 1),
         "wiretrace.info": ("#0B6577", 1),
@@ -246,6 +247,7 @@ COLOURS: dict[str, dict[str, tuple[str, float]]] = {
         "selection": ("#614130", 1),
         "dot": ("#FAF9F5", 0.09),
         "dot-glow": ("#E5895E", 0.82),
+        "scrim": ("#000000", 0.4),
         "wiretrace.error": ("#FF7B72", 1),
         "wiretrace.warning": ("#E3B341", 1),
         "wiretrace.info": ("#56C2D6", 1),

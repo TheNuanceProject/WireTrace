@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.constants import HIGHLIGHT_COLOURS, HIGHLIGHT_RULES_MAX, HIGHLIGHT_TEXT_MAX
+from app.diagnostic_log import described
 
 if TYPE_CHECKING:
     from app.config import ConfigManager
@@ -94,7 +95,7 @@ class HighlightStore:
         try:
             return clean_rules(json.loads(raw))
         except (ValueError, RecursionError) as exc:
-            logger.warning("Highlight rules are unreadable and are ignored: %s", exc)
+            logger.warning("Highlight rules are unreadable and are ignored: %s", described(exc))
             return ()
 
     def set_rules(self, rules: tuple[HighlightRule, ...]) -> None:

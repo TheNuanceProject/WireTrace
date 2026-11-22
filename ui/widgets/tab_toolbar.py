@@ -31,6 +31,7 @@ from ui import shortcuts
 from ui.formatting import input_line_texts
 from ui.themes import tokens
 from ui.themes.icons import bind_icon
+from ui.tour.targets import Target, mark
 from ui.widgets.button import Button, join_buttons
 from ui.widgets.styling import INVALID, set_primary, set_state
 
@@ -108,6 +109,7 @@ class TabToolbar(QFrame):
         bind_icon(self._more, "more")
         self._more_menu = QMenu(self)
         self._more.setMenu(self._more_menu)
+        mark(self._more, Target.MORE)
 
         layout = QHBoxLayout(self)
         # The row decides for itself what to show at the width it is
@@ -176,21 +178,25 @@ class TabToolbar(QFrame):
         self._connect.clicked.connect(self._on_connect_clicked)
 
     def _build_actions(self) -> None:
-        self._log = self._button("", "log_on", self.log_toggled)
-        self._pause = self._button("", "pause", self.pause_toggled)
+        self._log = mark(self._button("", "log_on", self.log_toggled), Target.START_LOG)
+        self._pause = mark(self._button("", "pause", self.pause_toggled), Target.PAUSE_LOG)
         self._clear = self._button("Clear", "clear", self.clear_requested)
         self._clear.setToolTip("Clear the console. An export then starts from here.")
+        mark(self._clear, Target.CLEAR)
         self._export = self._button("Export", "export", self.export_requested)
         self._export.setToolTip(shortcuts.with_keys(
             "Save everything since you connected, or since the last Clear", "export",
         ))
+        mark(self._export, Target.EXPORT)
         self._plot = self._button("Plot", "plot")
         self._plot.setCheckable(True)
         self._plot.setToolTip(shortcuts.with_keys("Show or hide the live plot", "plot"))
         self._plot.toggled.connect(self.plot_toggled)
+        mark(self._plot, Target.PLOT)
 
         self._lines = self._button("Lines", "control_lines")
         self._lines.setToolTip("Set DTR and RTS, send a break, and see the input lines")
+        mark(self._lines, Target.CONTROL_LINES)
         self._lines_menu = QMenu("Control lines", self)
         self._dtr = self._lines_menu.addAction("DTR")
         self._dtr.setCheckable(True)
@@ -223,7 +229,7 @@ class TabToolbar(QFrame):
         self._text_mode.setChecked(True)
         self._text_mode.setToolTip("Show received data as text")
         self._hex_mode.setToolTip("Show received data as bytes in hexadecimal")
-        self._display = join_buttons(self._text_mode, self._hex_mode)
+        self._display = mark(join_buttons(self._text_mode, self._hex_mode), Target.TEXT_HEX)
 
         self._search = Button()
         self._search.setToolTip(shortcuts.with_keys("Find text in the console", "find"))
@@ -231,6 +237,7 @@ class TabToolbar(QFrame):
         self._search.setObjectName("iconButton")
         bind_icon(self._search, "search")
         self._search.clicked.connect(self.search_requested)
+        mark(self._search, Target.FIND)
 
     def _button(self, text: str, icon_name: str, signal: Signal | None = None) -> Button:
         button = Button(text)

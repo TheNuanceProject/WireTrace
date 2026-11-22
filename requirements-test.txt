@@ -14,4 +14,5 @@
 numpy>=1.24               # imported by core/plot_engine.py and tests
 regex>=2024.0.0           # imported by core/plot_parsers.py (ReDoS-guarded patterns)
 cryptography>=42.0        # imported by updater/manifest.py (signature verification)
+truststore>=0.10          # imported by updater/download.py (certificate verification)
 pyserial>=3.5             # imported by core/port_identity.py (the port list behind reconnect)

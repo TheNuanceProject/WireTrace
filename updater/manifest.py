@@ -27,6 +27,16 @@ manifest signed before it, so an older manifest, genuinely signed, cannot
 be served again to hold an installation back. The release build writes
 the manifest without it; the signing tool adds it.
 
+From 2.2, the payload may also name the release before this one, which
+an installation of this one can return to::
+
+    "previous": {"version": "2.1.0", "platforms": {...}}
+
+with each platform written as in ``platforms``. The signing tool takes
+it from the manifest that was published before, once that manifest's
+own signature is verified, so it is as trusted as the rest. A version
+before 2.2 reads only the fields it knows, and so passes it over.
+
 Nothing of the payload is read before a signature has been verified, and
 every field is then checked against what this version of the application
 expects. The address of a download is never taken from the manifest: it
@@ -92,15 +102,11 @@ class PlatformRelease:
 
 
 @dataclass(frozen=True)
-class ReleaseManifest:
-    """A release, as a verified manifest describes it."""
+class Release:
+    """A release: its version and the installer of each platform."""
 
     version: str
-    min_version: str
-    release_notes: str
     platforms: dict[str, PlatformRelease]
-    #: When the maintainer signed it; None before it is signed.
-    signed_at: datetime | None = None
 
     @property
     def release_page(self) -> str:
@@ -110,6 +116,19 @@ class ReleaseManifest:
     def download_url(self, platform_key: str) -> str:
         """Where the installer of ``platform_key`` is downloaded from."""
         return f"{RELEASES_BASE_URL}/v{self.version}/{self.platforms[platform_key].file_name}"
+
+
+@dataclass(frozen=True)
+class ReleaseManifest(Release):
+    """A release, as a verified manifest describes it."""
+
+    min_version: str
+    release_notes: str
+    #: When the maintainer signed it; None before it is signed.
+    signed_at: datetime | None = None
+    #: The release before this one, which an installation of this one can
+    #: return to; None when the manifest names none.
+    previous: Release | None = None
 
 
 # ── Versions ─────────────────────────────────────────────────────────────
@@ -275,20 +294,52 @@ def parse_manifest(payload: bytes) -> ReleaseManifest:
     parse_version(version)
     min_version = _text(data, "min_version")
     parse_version(min_version)
-    platforms = data.get("platforms")
-    if not isinstance(platforms, dict):
-        raise ManifestError("the manifest lists no platforms")
     return ReleaseManifest(
         version=version,
         min_version=min_version,
         release_notes=_text(data, "release_notes"),
-        platforms={
-            key: _platform(key, entry, version)
-            for key, entry in platforms.items()
-            if key in PLATFORM_FILE_NAMES
-        },
+        platforms=_platforms(data.get("platforms"), version),
         signed_at=parse_signed_at(data.get("signed_at")) if "signed_at" in data else None,
+        previous=_previous(data.get("previous"), version) if "previous" in data else None,
     )
+
+
+def _platforms(platforms: object, version: str) -> dict[str, PlatformRelease]:
+    """The installers of ``version``: those of the platforms this version
+    knows. A platform it does not know is left out."""
+    if not isinstance(platforms, dict):
+        raise ManifestError("the manifest lists no platforms")
+    return {
+        key: _platform(key, entry, version)
+        for key, entry in platforms.items()
+        if key in PLATFORM_FILE_NAMES
+    }
+
+
+def _previous(entry: object, version: str) -> Release:
+    """The release before ``version`` that the manifest names.
+
+    Raises:
+        ManifestError: it is not well formed, or not earlier than ``version``.
+    """
+    if not isinstance(entry, dict):
+        raise ManifestError("the manifest's previous release is not well formed")
+    previous = _text(entry, "version")
+    parse_version(previous)
+    if not is_newer(version, previous):
+        raise ManifestError("the manifest's previous release is not earlier than its own")
+    return Release(version=previous, platforms=_platforms(entry.get("platforms"), previous))
+
+
+def _platform_entries(platforms: dict[str, PlatformRelease]) -> dict[str, dict[str, object]]:
+    return {
+        key: {
+            "file_name": release.file_name,
+            "file_size": release.file_size,
+            "sha256_hash": release.sha256,
+        }
+        for key, release in sorted(platforms.items())
+    }
 
 
 def parse_signed_at(value: object) -> datetime:
@@ -319,14 +370,13 @@ def build_payload(manifest: ReleaseManifest) -> bytes:
         "min_version": manifest.min_version,
         "release_notes": manifest.release_notes,
         **({} if manifest.signed_at is None else {"signed_at": format_signed_at(manifest.signed_at)}),
-        "platforms": {
-            key: {
-                "file_name": release.file_name,
-                "file_size": release.file_size,
-                "sha256_hash": release.sha256,
-            }
-            for key, release in sorted(manifest.platforms.items())
-        },
+        "platforms": _platform_entries(manifest.platforms),
+        **({} if manifest.previous is None else {
+            "previous": {
+                "version": manifest.previous.version,
+                "platforms": _platform_entries(manifest.previous.platforms),
+            },
+        }),
     }
     return (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode(_ENCODING)
 

@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.constants import PLOT_REGEX_TIMEOUT_SECONDS
+from app.diagnostic_log import log_data_failure
 from app.plot_config import (
     AUTO_PROFILE_NAME,
     PROFILE_NAME_MAX,
@@ -375,7 +376,7 @@ class PlotConfigDialog(DotGridDialog):
         try:
             lines = self._recent_lines_provider() or []
         except Exception:
-            logger.exception("recent_lines_provider raised")
+            log_data_failure(logger, "The recent lines could not be read")
             lines = []
         if not lines:
             empty = QListWidgetItem(

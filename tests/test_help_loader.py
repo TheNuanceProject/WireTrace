@@ -29,6 +29,7 @@ from app.help_loader import (
     render_user_guide,
     resolve_user_guide_source,
 )
+from app.privacy_policy import load_policy, to_html
 from core.records import COMMAND_PREFIX
 from ui import shortcuts
 from ui.themes import design_tokens, tokens
@@ -404,3 +405,9 @@ def test_the_hex_example_is_what_the_hex_view_shows() -> None:
     rows = framer.feed(line.encode("ascii") + b"\r\n") + framer.flush()
 
     assert shown.split("\n") == rows
+
+
+def test_the_privacy_section_is_the_policy_itself() -> None:
+    guide = load_user_guide()
+
+    assert f'<h2 id="privacy">Privacy</h2>\n{to_html(load_policy())}\n' in guide

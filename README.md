@@ -40,6 +40,10 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
 
 ![A session whose connection was lost](resources/help/images/connection-lost-light.png)
 
+**The tour, on the sample board built in:**
+
+![A step of the tour](resources/help/images/tour-light.png)
+
 </details>
 
 ---
@@ -50,8 +54,10 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
   own. Switching tabs interrupts nothing.
 - **The log comes first.** Every line goes from the port to the log
   without waiting for the screen, so a busy window never slows a
-  capture. A test holds the path from the port to the log file to ten
-  thousand lines a second, complete and in order, on every change.
+  capture. How many lines a second it takes in, and the processor and
+  memory it uses, are measured on GitHub's machines for every release
+  and published on the
+  [benchmarks page](https://thenuanceproject.com/projects/wiretrace/benchmarks/).
 - **Nothing is lost quietly.** On disconnect, on an unplugged device
   and on closing, what is waiting is written before the result is
   reported. If the disk cannot keep up or fails, the number of lines
@@ -95,9 +101,15 @@ Website: [thenuanceproject.com/projects/wiretrace](https://thenuanceproject.com/
   shortcuts.
 - **Light and dark themes**, or the system's.
 - **Verified updates.** A new version is accepted only if it is signed
-  by the maintainer, and installed only when you choose.
+  by the maintainer, and installed only when you choose. Help returns
+  to the previous version the same way.
+- **A diagnostic log** of WireTrace's own events stays on your
+  computer, never device data and never sent. Help copies a summary to
+  paste into a report.
 
-The user guide opens from the Help menu or with F1.
+The user guide opens from the Help menu or with F1. Help > Take the
+tour... walks through every part of WireTrace on a sample board built
+in.
 
 ## Platforms
 
@@ -167,48 +179,22 @@ every report it sent.
 - **Linux, `.deb`.** `sudo apt remove wiretrace`
 - **From source.** Delete the cloned folder.
 
-Your settings and logs are left in place. Settings are in
-`%APPDATA%\WireTrace\Config` on Windows, `~/.config/WireTrace` on Linux
-and `~/Library/Application Support/WireTrace` on macOS; logs are in
-`Documents/WireTrace/Logs` unless you chose another folder. Delete them
-too to remove everything.
+Your settings, logs and WireTrace's own files are left in place. Delete
+them too to remove everything:
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| Settings | `%APPDATA%\WireTrace\Config` | `~/.config/WireTrace` | `~/Library/Application Support/WireTrace` |
+| Cache and session recordings | `%LOCALAPPDATA%\WireTrace\Cache` | `~/.cache/WireTrace` | `~/Library/Caches/WireTrace` |
+| Diagnostic log | `%LOCALAPPDATA%\WireTrace\Logs` | `~/.local/state/WireTrace/logs` | `~/Library/Logs/WireTrace` |
+| Logs | `Documents/WireTrace/Logs`, unless you chose another folder | the same | the same |
+
+On Linux, the cache and the diagnostic log follow `XDG_CACHE_HOME` and
+`XDG_STATE_HOME` when they are set.
 
 ## Privacy
 
-What your devices send stays on your computer, in the files you choose
-to write.
-
-WireTrace checks for a new version when it starts and every 12 hours while
-it stays open. The request states the WireTrace version, the operating
-system, the processor type, how WireTrace was installed and the date of
-the previous check. It carries no identifier and nothing about you,
-your devices or your data. Like any request, it reaches the server from
-a network address: the server derives the country and an approximate
-city from it, uses the address for no more than a minute to limit abuse,
-and never stores it. The file it reads is on the
-website, which GitHub Pages hosts, so GitHub also receives the request,
-as it does every visit to the website. The check can be turned off in
-the Windows installer and at any time in Preferences, under Updates and
-privacy.
-
-Usage statistics are off unless you switch them on. WireTrace asks
-once, with a bar that blocks nothing, and the setting stays in
-Preferences. If you share them, WireTrace makes a random installation
-identifier and sends one report for each day it is used: the
-identifier and the date; its version, the operating system, the
-processor type and how it was installed; which features were used;
-whether lines were lost, a log could not be written, a connection was
-lost or WireTrace closed unexpectedly; the highest line rate, the
-number of connections, the longest time one window stayed open and the
-number of starts, each as a range; the theme; and the display scale. A
-report never holds a port or device name, a file name, a command, or
-anything a device sent. The server keeps reports for 14 months under a
-one-way hash of the identifier. Switching statistics off deletes the
-identifier and everything kept on your computer, and asks the server to
-delete every report sent under it.
-
-These are the only connections WireTrace makes by itself. The privacy
-policy, with every value a report can hold, is at
+The privacy policy is [PRIVACY.md](./PRIVACY.md), also at
 [thenuanceproject.com/privacy](https://thenuanceproject.com/privacy/).
 
 ## Verifying a download
@@ -224,9 +210,9 @@ how to make a build on your own computer.
 
 ## Contributing
 
-WireTrace is maintained by one person in spare hours. Contributions
-are welcome; please read [CONTRIBUTING.md](./CONTRIBUTING.md) first,
-and the [Code of Conduct](./CODE_OF_CONDUCT.md).
+Contributions are welcome; please read
+[CONTRIBUTING.md](./CONTRIBUTING.md) first, and the
+[Code of Conduct](./CODE_OF_CONDUCT.md).
 
 Security issues: see [SECURITY.md](./SECURITY.md).
 

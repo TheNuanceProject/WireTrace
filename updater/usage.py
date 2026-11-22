@@ -36,8 +36,8 @@ until it is delivered. Once delivered, it is delivered a second time
 its way, from this window or another, is deleted too. Switching them on
 again makes a new identifier.
 
-What a report holds is stated, field by field, in ``updater/privacy.py``;
-a test keeps the two in step.
+What a report holds is stated, field by field, in the privacy policy,
+``PRIVACY.md``; a test keeps the two in step.
 """
 
 from __future__ import annotations

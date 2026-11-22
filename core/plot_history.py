@@ -51,6 +51,7 @@ from app.constants import (
     PLOT_MAX_LINE_CHARACTERS,
     PLOT_REGEX_MAX_CONSECUTIVE_TIMEOUTS,
 )
+from app.diagnostic_log import log_data_failure
 from core.plot_overview import Overview, OverviewFigures
 from core.records import LineRecord, RecordOrigin
 from core.session_spool import SpoolPosition, SpoolRange, SpoolSnapshot
@@ -284,7 +285,7 @@ class HistoryReader:
             except Exception:
                 # A fault in reading must not take the plot with it: older
                 # values stop, and the log says why.
-                logger.exception("Reading older plot values failed")
+                log_data_failure(logger, "Reading older plot values failed")
                 with self._condition:
                     if self._source is source:
                         self._source = None

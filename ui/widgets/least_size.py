@@ -25,6 +25,10 @@ _FLOOR = "leastSizeFloor"
 def _apply(window: QWidget, floor: QSize) -> None:
     """Give ``window`` the larger of ``floor`` and what its content needs."""
     least = floor.expandedTo(window.minimumSizeHint())
+    # Text that wraps needs more height the narrower it is; the size hint
+    # alone counts one line.
+    if window.hasHeightForWidth():
+        least.setHeight(max(least.height(), window.heightForWidth(least.width())))
     # Never more than the screen holds, or the window could not be seen
     # whole; what does not fit then scrolls.
     screen = window.screen()

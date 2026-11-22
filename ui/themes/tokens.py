@@ -112,6 +112,9 @@ class Palette:
     primary_pressed: str
     selection: str
 
+    # Behind a dialog or the tour, dimming what it covers
+    scrim: Tint
+
     # Dot grid, and its dots lit near the pointer
     dot: Tint
     dot_glow: Tint
@@ -414,6 +417,29 @@ class Typography:
 
 
 TYPOGRAPHY = Typography()
+
+
+# ── Motion ───────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Motion:
+    """How long things take to move, and the curves they move on.
+
+    Only opacity and position move; with reduced motion nothing moves,
+    and opacity changes take at most ``fast``.
+    """
+
+    fast: int = design_tokens.DURATIONS_MS["fast"]   # hover and press colour changes
+    base: int = design_tokens.DURATIONS_MS["base"]   # toasts, menus, small moves
+    slow: int = design_tokens.DURATIONS_MS["slow"]   # panels, cross-fades, theme change
+    #: Cubic Bezier control points, (x1, y1, x2, y2): things arriving, and
+    #: things moving from one place on screen to another.
+    ease_out: tuple[float, float, float, float] = design_tokens.EASINGS["out"]
+    ease_in_out: tuple[float, float, float, float] = design_tokens.EASINGS["in-out"]
+
+
+MOTION = Motion()
 
 
 # ── Console tags ─────────────────────────────────────────────────────────

@@ -119,5 +119,5 @@ def test_the_documents_state_the_update_check_interval_of_the_code() -> None:
     from app.constants import UPDATE_CHECK_INTERVAL_HOURS
 
     stated = f"every {UPDATE_CHECK_INTERVAL_HOURS} hours"
-    for name in ("README.md", "CHANGELOG.md"):
+    for name in ("PRIVACY.md", "CHANGELOG.md"):
         assert stated in (ROOT / name).read_text(encoding="utf-8"), name

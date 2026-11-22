@@ -129,14 +129,15 @@ def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ConfigManager:
 
 @pytest.fixture(autouse=True)
 def isolated_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Keep session recordings, coloured icons and downloads out of the
-    real user cache."""
+    """Keep session recordings, coloured icons, downloads and the kept
+    manifest of the installed release out of the real user cache."""
     import ui.device_tab as device_tab_module
     import ui.themes.icons as icons_module
     import updater.download as download_module
+    import updater.update_manager as update_manager_module
 
     cache_dir = tmp_path / "cache"
-    for module in (device_tab_module, icons_module, download_module):
+    for module in (device_tab_module, icons_module, download_module, update_manager_module):
         monkeypatch.setattr(module, "get_cache_dir", lambda: str(cache_dir))
     return cache_dir
 

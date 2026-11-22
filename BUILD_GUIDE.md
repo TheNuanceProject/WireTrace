@@ -315,12 +315,11 @@ App must be installed on the repository.
 Installs for the current user (no administrator rights needed) or for
 all users; the person installing chooses.
 
-Before anything is installed it shows the privacy statement: what
-stays on the computer, what an update check sends, and what usage
-statistics send if the user switches them on. It is the policy itself,
-as SignPath Foundation's terms ask, not a summary. The text is
-`PRIVACY_STATEMENT` in `updater/privacy.py`, beside the code it
-describes, and tests hold it to the fields that code sends.
+Before anything is installed it shows the privacy policy, made as
+plain text from `PRIVACY.md`, the one file the policy is kept in: the
+user guide and the website show the same file. It is the policy
+itself, as SignPath Foundation's terms ask, not a summary, and tests
+hold it to the fields the code sends (`app/privacy_policy.py`).
 
 Among its options is the update check, ticked unless the person
 installing unticks it. The choice is written to `install.ini` beside

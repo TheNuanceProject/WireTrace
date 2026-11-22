@@ -30,13 +30,17 @@ import updater.update_manager as update_manager
 from app.application import WireTraceApp
 from app.config import ConfigManager
 from app.constants import (
+    UPDATE_CHANGE_HEADER,
     UPDATE_CHECK_INTERVAL_HOURS,
     UPDATE_CHECK_STARTUP_DELAY_S,
+    UPDATE_CHECKS_FAILING_DAYS,
     UPDATE_FIRST_CHECK_VALUE,
     UPDATE_LAST_CHECK_HEADER,
+    UPDATE_LAST_VERSION_HEADER,
     UPDATE_SERVER_DAY_HEADER,
     UPDATE_SERVER_DAY_TOLERANCE,
     UPDATE_SNOOZE_HOURS,
+    UPDATE_UNKNOWN_UNTIL_HEADER,
     ThemeID,
 )
 from app.licenses import LicensesNotFoundError, load_third_party_licenses
@@ -44,6 +48,7 @@ from tests.update_helpers import FakeServer, SigningKey, release, signed
 from tests_gui.support import LoopbackPort, wait_until
 from ui.dialogs.about_dialog import AboutDialog
 from ui.dialogs.licenses_dialog import LicensesDialog
+from ui.formatting import format_short_day
 from ui.main_window import MainWindow
 from ui.themes.theme_manager import ThemeManager
 from ui.widgets.connect_page import ConnectPage
@@ -53,7 +58,7 @@ from updater.install import InstallKind, UpdateApplyError, user_agent
 from updater.manifest import PlatformRelease, ReleaseManifest
 from updater.update_dialog import UpdateAnswer, UpdateDialog
 from updater.update_manager import UpdateManager
-from version import APP_NAME, APP_VERSION, UPDATE_MANIFEST_URL
+from version import APP_NAME, APP_VERSION, LATEST_RELEASE_URL, UPDATE_MANIFEST_URL
 
 INSTALLER = b"installer bytes " * 4096
 _RELEASE = PlatformRelease(
@@ -229,7 +234,7 @@ class TestAnOlderManifestServedAgain:
 
         manager.check_now()
 
-        assert outcome.failed == ["This build cannot verify updates"]
+        assert outcome.failed == [update_manager.CHECK_NO_KEYS]
         assert server.requests == []
 
 
@@ -309,6 +314,269 @@ class TestWhatACheckSends:
         _check(qapp, manager)
 
         assert config.update_last_check_day == ""
+
+
+#: A version no build is: the one an update came from.
+_EARLIER = "0.0.1"
+
+
+def _kept(name: str) -> str:
+    """A setting of ``Updates`` as the preferences file holds it."""
+    return ConfigManager().get("Updates", name, fallback="")
+
+
+class TestWhatACheckSaysOfAChange:
+    def test_a_counted_check_keeps_its_day_with_its_version(self, qapp, manager, server):
+        server.headers = {UPDATE_SERVER_DAY_HEADER: str(_TODAY)}
+
+        _check(qapp, manager)
+
+        assert _kept("last_check_version") == f"{APP_VERSION}@{_TODAY}"
+
+    def test_the_next_check_of_the_same_version_sends_the_day_alone(self, qapp, manager, server):
+        server.headers = {UPDATE_SERVER_DAY_HEADER: str(_TODAY)}
+        _check(qapp, manager)
+
+        _check(qapp, manager)
+
+        sent = {name.lower() for name, _ in server.requests[1].header_items()}
+        assert sent == {"user-agent", UPDATE_LAST_CHECK_HEADER.lower()}
+
+    def test_after_an_update_a_check_names_the_earlier_version_with_a_number_until_counted(
+        self, qapp, manager, config, server,
+    ):
+        config.set("Updates", "last_check_day", str(_TODAY - 2))
+        config.set("Updates", "last_check_version", f"{_EARLIER}@{_TODAY - 2}")
+        config.save()
+
+        _check(qapp, manager)                     # not counted: no day in the answer
+        server.headers = {UPDATE_SERVER_DAY_HEADER: str(_TODAY)}
+        _check(qapp, manager)                     # counted
+        _check(qapp, manager)
+
+        assert server.sent(UPDATE_LAST_VERSION_HEADER) == [_EARLIER, _EARLIER, None]
+        numbers = server.sent(UPDATE_CHANGE_HEADER)
+        assert numbers[0] is not None and numbers[1] == numbers[0] and numbers[2] is None
+        assert server.sent(UPDATE_LAST_CHECK_HEADER) == [str(_TODAY - 2), str(_TODAY - 2), str(_TODAY)]
+        assert _kept("change") == ""
+        assert _kept("last_check_version") == f"{APP_VERSION}@{_TODAY}"
+
+    def test_two_windows_checking_after_an_update_send_one_number(self, qapp, config, server, key, clock):
+        config.set("Updates", "last_check_day", str(_TODAY - 2))
+        config.set("Updates", "last_check_version", f"{_EARLIER}@{_TODAY - 2}")
+        config.save()
+        first = UpdateManager(ConfigManager(), opener=server, public_keys=(key.public_base64,), now=clock)
+        second = UpdateManager(ConfigManager(), opener=server, public_keys=(key.public_base64,), now=clock)
+
+        _check(qapp, first)
+        _check(qapp, second)
+
+        numbers = server.sent(UPDATE_CHANGE_HEADER)
+        assert numbers[0] is not None and numbers == [numbers[0], numbers[0]]
+
+    def test_a_day_kept_by_a_version_that_keeps_no_version_states_no_change(
+        self, qapp, manager, config, server,
+    ):
+        config.update_last_check_day = str(_TODAY - 3)     # as WireTrace 2.1 keeps it
+        config.save()
+        server.headers = {UPDATE_SERVER_DAY_HEADER: str(_TODAY)}
+
+        _check(qapp, manager)
+
+        assert server.sent(UPDATE_LAST_VERSION_HEADER) == [None]
+        assert server.sent(UPDATE_CHANGE_HEADER) == [None]
+        assert _kept("unknown_until") == str(_TODAY - 3)
+
+    def test_a_change_names_the_last_day_of_unknown_version(self, qapp, manager, config, server):
+        config.set("Updates", "last_check_day", str(_TODAY - 1))
+        config.set("Updates", "last_check_version", f"{_EARLIER}@{_TODAY - 1}")
+        config.set("Updates", "unknown_until", str(_TODAY - 30))
+        config.save()
+
+        _check(qapp, manager)
+
+        assert server.sent(UPDATE_UNKNOWN_UNTIL_HEADER) == [str(_TODAY - 30)]
+
+    def test_a_change_whose_number_cannot_be_kept_is_not_stated(
+        self, qapp, manager, config, server, monkeypatch,
+    ):
+        config.set("Updates", "last_check_day", str(_TODAY - 2))
+        config.set("Updates", "last_check_version", f"{_EARLIER}@{_TODAY - 2}")
+        config.save()
+        monkeypatch.setattr(config, "change_shared", lambda section, change: False)
+
+        _check(qapp, manager)
+
+        assert server.sent(UPDATE_CHANGE_HEADER) == [None]
+        assert server.sent(UPDATE_LAST_VERSION_HEADER) == [None]
+        assert server.sent(UPDATE_LAST_CHECK_HEADER) == [str(_TODAY - 2)]
+
+
+def _check_automatically(qapp: QApplication, manager: UpdateManager) -> None:
+    """One automatic check, to its end, whatever its outcome."""
+    manager._next_check.timeout.emit()
+    wait_until(qapp, lambda: not manager.checking)
+
+
+class TestTheLastingOffer:
+    """The release kept on offer in the status bar."""
+
+    @pytest.fixture(autouse=True)
+    def no_cleanup_of_the_real_temp_folder(self, monkeypatch):
+        monkeypatch.setattr(update_manager, "remove_legacy_downloads", lambda: None)
+
+    def test_a_newer_release_found_is_offered(self, qapp, manager):
+        offers: list[object] = []
+        manager.offer_changed.connect(offers.append)
+
+        _check_automatically(qapp, manager)
+
+        assert [offer.version for offer in offers] == ["9.9.9"]
+        assert manager.offer.version == "9.9.9"
+
+    def test_remind_later_takes_it_away_until_its_time_has_run(self, qapp, manager, clock):
+        _check_automatically(qapp, manager)
+
+        manager.snooze()
+
+        assert manager.offer is None
+        assert manager._snooze_end.isActive()
+        assert manager._snooze_end.interval() == UPDATE_SNOOZE_HOURS * 3_600_000
+        clock.now = NOW + timedelta(hours=UPDATE_SNOOZE_HOURS, seconds=1)
+        manager._snooze_end.timeout.emit()
+        assert manager.offer.version == "9.9.9"
+
+    def test_remind_later_that_ends_a_little_early_is_set_again_for_what_is_left(self, qapp, manager, clock):
+        # A timer of hours may fire a little before its time.
+        _check_automatically(qapp, manager)
+        manager.snooze()
+
+        clock.now = NOW + timedelta(hours=UPDATE_SNOOZE_HOURS, milliseconds=-400)
+        manager._snooze_end.stop()
+        manager._snooze_end.timeout.emit()
+
+        assert manager.offer is None
+        assert manager._snooze_end.isActive()
+        assert manager._snooze_end.interval() == 400
+        clock.now = NOW + timedelta(hours=UPDATE_SNOOZE_HOURS)
+        manager._snooze_end.timeout.emit()
+        assert manager.offer.version == "9.9.9"
+
+    def test_remind_later_from_before_a_restart_ends_by_itself(self, qapp, manager, server, key, clock):
+        manager.snooze()
+        clock.now = NOW + timedelta(hours=1)
+        restarted = UpdateManager(ConfigManager(), opener=server, public_keys=(key.public_base64,), now=clock)
+
+        _check_automatically(qapp, restarted)
+
+        assert restarted.offer is None
+        assert restarted._snooze_end.isActive()
+        assert restarted._snooze_end.interval() == (UPDATE_SNOOZE_HOURS - 1) * 3_600_000
+        clock.now = NOW + timedelta(hours=UPDATE_SNOOZE_HOURS)
+        restarted._snooze_end.timeout.emit()
+        assert restarted.offer.version == "9.9.9"
+
+    def test_remind_later_never_lasts_longer_than_its_hours(self, qapp, manager, clock):
+        # The clock was a month ahead when the user chose Remind later,
+        # then put right.
+        clock.now = NOW + timedelta(days=30)
+        manager.snooze()
+        clock.now = NOW
+
+        assert len(_check(qapp, manager).available) == 1
+        assert manager._snooze_end.interval() == UPDATE_SNOOZE_HOURS * 3_600_000
+        clock.now = NOW + timedelta(hours=UPDATE_SNOOZE_HOURS)
+        manager._snooze_end.timeout.emit()
+        assert manager.offer.version == "9.9.9"
+
+    def test_a_skipped_version_is_offered_no_more(self, qapp, manager):
+        _check_automatically(qapp, manager)
+
+        manager.skip_version("9.9.9")
+        assert manager.offer is None
+
+        _check_automatically(qapp, manager)
+        assert manager.offer is None
+
+    def test_a_skipped_version_asked_for_is_shown_but_not_kept_on_offer(self, qapp, manager):
+        manager.skip_version("9.9.9")
+
+        outcome = _check(qapp, manager)
+
+        assert [m.version for m, _asked in outcome.available] == ["9.9.9"]
+        assert manager.offer is None
+
+    def test_nothing_is_offered_once_this_is_the_latest(self, qapp, manager, server, key):
+        _check_automatically(qapp, manager)
+        server.pages[UPDATE_MANIFEST_URL] = signed(release(APP_VERSION), key)
+
+        _check_automatically(qapp, manager)
+
+        assert manager.offer is None
+
+
+class TestChecksFailing:
+    """The note that updates have not been checked for days."""
+
+    @pytest.fixture(autouse=True)
+    def no_cleanup_of_the_real_temp_folder(self, monkeypatch):
+        monkeypatch.setattr(update_manager, "remove_legacy_downloads", lambda: None)
+
+    def test_is_said_once_checks_have_failed_for_the_days_set(self, qapp, manager, server, clock):
+        seen: list[object] = []
+        manager.checks_failing_changed.connect(seen.append)
+        server.error = OSError("offline")
+
+        _check_automatically(qapp, manager)
+        clock.now = NOW + timedelta(days=UPDATE_CHECKS_FAILING_DAYS) - timedelta(seconds=1)
+        _check_automatically(qapp, manager)
+        assert seen == []
+
+        clock.now = NOW + timedelta(days=UPDATE_CHECKS_FAILING_DAYS)
+        _check_automatically(qapp, manager)
+        assert seen == [NOW]
+        assert manager.checks_failing_since == NOW
+
+    def test_an_answered_check_ends_it(self, qapp, manager, server, clock, config):
+        server.error = OSError("offline")
+        _check_automatically(qapp, manager)
+        clock.now = NOW + timedelta(days=UPDATE_CHECKS_FAILING_DAYS)
+        _check_automatically(qapp, manager)
+        assert manager.checks_failing_since == NOW
+
+        server.error = None
+        _check_automatically(qapp, manager)
+
+        assert manager.checks_failing_since is None
+        assert config.update_failing_since is None
+
+    def test_a_refused_manifest_counts_as_a_failure(self, qapp, manager, server, config):
+        server.pages[UPDATE_MANIFEST_URL] = b"not a manifest"
+
+        _check_automatically(qapp, manager)
+
+        assert config.update_failing_since == NOW
+
+    def test_is_not_said_while_automatic_checks_are_off(self, qapp, manager, config, clock):
+        config.update_failing_since = NOW
+        clock.now = NOW + timedelta(days=UPDATE_CHECKS_FAILING_DAYS + 1)
+        manager.reconsider()
+        assert manager.checks_failing_since == NOW
+
+        config.check_updates_on_startup = False
+        manager.reconsider()
+
+        assert manager.checks_failing_since is None
+
+    def test_is_said_at_start_from_what_was_kept(self, qapp, manager, config, clock):
+        config.update_failing_since = NOW
+        config.save()
+        clock.now = NOW + timedelta(days=UPDATE_CHECKS_FAILING_DAYS)
+
+        manager.start()
+        manager.stop()
+
+        assert manager.checks_failing_since == NOW
 
 
 class TestAutomaticChecks:
@@ -552,13 +820,15 @@ class TestUpdateDialog:
         dialog.show()
 
         _button(dialog, "Update now").click()
-        wait_until(qapp, lambda: "could not be downloaded" in dialog.status_text())
+        wait_until(qapp, lambda: dialog.status_text() == (
+            "The download did not match the release, so it was not kept. Try again, or get "
+            "the update from the release page."
+        ))
 
-        assert "does not match the release" in dialog.status_text()
         assert "verified" not in dialog.status_text()
         assert list(update_cache_dir().iterdir()) == []
-        assert not _button(dialog, "Update now").isHidden()
-        assert _button(dialog, "Update now").isEnabled()
+        assert _button(dialog, "Try again").isVisible() and _button(dialog, "Try again").isEnabled()
+        assert _button(dialog, "Open the release page").isVisible()
 
     def test_older_downloads_are_cleared_before_a_new_one(
         self, qapp, light, manager, server, monkeypatch,
@@ -589,7 +859,7 @@ class TestUpdateDialog:
             def cancel(self) -> None:
                 self.cancelled = True
 
-        dialog._task = task = Running()
+        dialog._download._task = task = Running()
 
         def keep(box: QMessageBox) -> None:
             asked.append(box.text())
@@ -709,7 +979,52 @@ class TestMainWindow:
 
         server.error = OSError("offline")
         _help_action(window).trigger()
-        wait_until(qapp, lambda: toast.message.startswith("The update check failed"))
+        wait_until(qapp, lambda: toast.message == update_manager.CHECK_UNREACHABLE)
+
+    def test_the_release_on_offer_is_in_every_tab_and_opens_the_update_window(
+        self, qapp, window, manager, monkeypatch,
+    ):
+        offered: list[str] = []
+        monkeypatch.setattr(window, "_offer_update", lambda manifest: offered.append(manifest.version))
+
+        _check_automatically(qapp, manager)
+        later = window.new_tab()
+
+        assert [tab.status_bar.update_texts() for tab in window.tabs()] == [["Update to 9.9.9"]] * 2
+        later.status_bar.update_requested.emit()
+        assert offered == ["9.9.9"]
+
+    def test_the_failing_checks_note_is_in_every_tab_and_checks_now(
+        self, qapp, window, manager, server, clock,
+    ):
+        server.error = OSError("offline")
+        _check_automatically(qapp, manager)
+        clock.now = NOW + timedelta(days=UPDATE_CHECKS_FAILING_DAYS)
+        _check_automatically(qapp, manager)
+        window.new_tab()
+        day = format_short_day(NOW.astimezone())
+
+        assert [tab.status_bar.update_texts() for tab in window.tabs()] == (
+            [[f"Updates not checked since {day}", "Check now"]] * 2
+        )
+        asked = len(server.requests)
+        window.current_tab().status_bar.check_requested.emit()
+        wait_until(qapp, lambda: len(server.requests) == asked + 1)
+
+    def test_a_failed_check_offers_the_release_page(self, qapp, window, server, monkeypatch):
+        opened: list[str] = []
+        monkeypatch.setattr(
+            main_window_module.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True,
+        )
+        toast = Toast.of(window.current_tab())
+        server.error = OSError("offline")
+
+        _help_action(window).trigger()
+        wait_until(qapp, lambda: toast.message == update_manager.CHECK_UNREACHABLE)
+        assert toast.action_label == "Open the release page"
+        toast.trigger_action()
+
+        assert opened == [LATEST_RELEASE_URL]
 
     def test_installing_prepares_closes_and_only_then_starts_the_installer(
         self, qapp, window, monkeypatch,

@@ -41,6 +41,7 @@ from app.constants import (
     LOG_PART_SUFFIX_FORMAT,
     LOG_PENDING_MAX_BYTES,
 )
+from app.diagnostic_log import described
 
 #: Builds the header bytes of the part with the given number (1-based).
 HeaderFactory = Callable[[int], bytes]
@@ -407,7 +408,7 @@ class SplitLogFile:
         try:
             self._backend.close(descriptor)
         except OSError as exc:
-            logger.warning("Closing %s reported: %s", self._paths[-1], exc)
+            logger.warning("Closing a log file reported: %s", described(exc))
 
     def _create_part(self, path: str) -> int:
         """Create a new file at ``path``, or at a numbered alternative

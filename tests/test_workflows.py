@@ -57,10 +57,26 @@ def test_the_release_is_built_with_the_python_the_lock_file_was_made_for() -> No
     assert re.search(rf"PYTHON_VERSION:\s*'{re.escape(locked_for)}'", RELEASE)
 
 
-def test_dependencies_are_installed_only_from_the_lock_file_with_hashes() -> None:
+def test_dependencies_are_installed_only_from_the_lock_files_with_hashes() -> None:
     installs = re.findall(r"pip install (.+)", RELEASE)
     assert installs
-    assert set(installs) == {"--require-hashes --requirement requirements-release.txt"}
+    assert set(installs) == {
+        "--require-hashes --requirement requirements-release.txt",
+        # The benchmarks add the one tool they need, locked the same way.
+        "--require-hashes --requirement requirements-release.txt"
+        " --requirement requirements-benchmark.txt",
+    }
+
+
+def test_the_benchmarks_lock_file_is_made_for_the_release_python_with_hashes() -> None:
+    benchmark_lock = (ROOT / "requirements-benchmark.txt").read_text(encoding="utf-8")
+    release_python = re.search(r"--python-version (\d+\.\d+)", LOCK_FILE).group(1)
+    assert re.search(rf"--python-version {re.escape(release_python)}\b", benchmark_lock)
+    pins = re.findall(r"^([\w-]+)==", benchmark_lock, re.MULTILINE)
+    assert pins
+    for package in pins:
+        block = benchmark_lock.split(f"{package}==", 1)[1].split("\n\n", 1)[0]
+        assert "--hash=sha256:" in block, package
 
 
 def test_the_release_names_files_that_exist() -> None:

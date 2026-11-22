@@ -52,6 +52,8 @@ from app.constants import (
     MS_PER_SECOND,
     NAME_SEPARATOR,
     RECONNECT_RECORD_WAIT_MS,
+    SAMPLE_PORT_DESCRIPTION,
+    SAMPLE_PORT_NAME,
     SPOOL_DIRECTORY_NAME,
     TAG_NOTICE,
     TAG_NOTICE_EVENT,
@@ -62,6 +64,7 @@ from app.constants import (
     get_cache_dir,
     timestamp_mode_of,
 )
+from app.diagnostic_log import described
 from app.file_names import output_base_path
 from app.modules import ALERTS, ANSI_COLOURS, HIGHLIGHTS, PLOT, REPORT, RESTARTS, ModuleSettings
 from app.port_memory import PortMemory
@@ -73,6 +76,7 @@ from core.log_writer import LogRequest, LogStartError, LogSummary
 from core.port_identity import PortIdentity, PortLister, read_identities
 from core.reconnect import Ask, Basis, Found
 from core.records import notice_record
+from core.sample_device import open_sample_transport
 from core.serial_settings import LineSettings, LineStates
 from core.session import DeviceSession
 from core.transport import PortInfo, available_ports, open_serial_transport
@@ -86,6 +90,7 @@ from ui.module_host import ModuleHost, TabContext
 from ui.reconnect_watcher import ReconnectWatcher
 from ui.themes import tokens
 from ui.themes.theme_manager import ThemeManager
+from ui.tour.targets import Target, mark
 from ui.widgets import banner as banners
 from ui.widgets.banner import BannerAction, BannerArea
 from ui.widgets.button import Button
@@ -102,6 +107,7 @@ from ui.widgets.toast import Toast
 from updater.usage import Feature, Problem
 
 if TYPE_CHECKING:
+    from core.session_counters import SessionFigures
     from ui.features.plot_feature import PlotFeature
     from ui.features.report_feature import ReportFeature
 
@@ -179,8 +185,16 @@ class DeviceTab(QWidget):
         transport_factory: TransportFactory = open_serial_transport,
         read_ports: PortLister = read_identities,
         alert_notifier: AlertNotifier | None = None,
+        *,
+        sample: bool = False,
     ) -> None:
+        """A ``sample`` tab reads the built-in sample board (the tour's) and
+        no port: nothing about it is remembered, and its board is opened
+        at once, having no identity to read."""
         super().__init__(parent)
+        self._sample = sample
+        if sample:
+            transport_factory = open_sample_transport
 
         self._theme_manager = theme_manager
         self._config_manager = config_manager
@@ -189,7 +203,7 @@ class DeviceTab(QWidget):
         self._alert_notifier = (
             alert_notifier if alert_notifier is not None else AlertNotifier(config_manager, self)
         )
-        self._port_memory = PortMemory(config_manager)
+        self._port_memory = PortMemory(config_manager, kept=not sample)
 
         # Core modules (per-tab isolation)
         self._session = DeviceSession()
@@ -300,12 +314,24 @@ class DeviceTab(QWidget):
         return self._session
 
     @property
+    def status_bar(self) -> DeviceStatusBar:
+        return self._status_bar
+
+    @property
     def console(self) -> ConsoleView:
         return self._console
 
     @property
     def is_connected(self) -> bool:
         return self._session.is_connected
+
+    def session_figures(self) -> SessionFigures | None:
+        """The exact figures of the current or last session; None before the first."""
+        return self._pipeline.session_figures()
+
+    def lines_waiting_for_console(self) -> int:
+        """Received lines the console has neither shown nor skipped yet."""
+        return self._pipeline.display_waiting()
 
     @property
     def is_logging(self) -> bool:
@@ -337,6 +363,16 @@ class DeviceTab(QWidget):
             return self._custom_name or NEW_TAB_TITLE
         name = self._custom_name or self._port_description
         return f"{self._recorded_port}{NAME_SEPARATOR}{name}" if name else self._recorded_port
+
+    @property
+    def is_sample(self) -> bool:
+        """Whether this tab reads the tour's sample board."""
+        return self._sample
+
+    def connect_sample(self) -> None:
+        """Open the sample board, in a sample tab."""
+        if self._sample:
+            self._on_connect(SAMPLE_PORT_NAME, self._config_manager.default_baud_rate)
 
     @property
     def custom_name(self) -> str:
@@ -554,6 +590,7 @@ class DeviceTab(QWidget):
         view.addWidget(self._search_bar)
 
         self._console = ConsoleView()
+        mark(self._console, Target.CONSOLE)
         self._console.setMinimumHeight(metrics.pane_min_height)
         self._console.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._search_bar.set_console(self._console)
@@ -745,6 +782,9 @@ class DeviceTab(QWidget):
         # The port is opened once its board's identity has been read, so a
         # board that drops as soon as it is opened is still known.
         self._pending_open = (port, baud)
+        if self._sample:
+            self._open_pending()
+            return
         self._record_wait.start()
         self._watcher.record(port)
 
@@ -798,7 +838,7 @@ class DeviceTab(QWidget):
         self._skipped_lines = 0
         self._display_timer.start()
 
-        self._port_description = next(
+        self._port_description = SAMPLE_PORT_DESCRIPTION if self._sample else next(
             (p.description for p in available_ports() if p.device == port_name), "",
         )
         self._restore_port_settings(port_name)
@@ -1352,7 +1392,7 @@ class DeviceTab(QWidget):
         try:
             started = self._pipeline.start_log(request)
         except LogStartError as exc:
-            logger.error("Could not start logging: %s", exc)
+            logger.error("Could not start logging: %s", described(exc))
             self._banners.show_banner(
                 _BANNER_LOG_END, banners.ERROR, "Logging could not be started", str(exc),
             )
@@ -1505,7 +1545,6 @@ class DeviceTab(QWidget):
         if result.cancelled:
             return
         if result.error:
-            logger.error("Export failed: %s", result.error)
             self._banners.show_banner(
                 _BANNER_EXPORT, banners.ERROR, "The export failed", result.error,
             )
@@ -1525,7 +1564,6 @@ class DeviceTab(QWidget):
 
     @Slot(str)
     def _on_log_write_failed(self, message: str) -> None:
-        logger.error("Log write failed: %s", message)
         self._add_notice(f"The log cannot be written: {message}. Still trying.")
         self._banners.show_banner(
             _BANNER_LOG_WRITE, banners.ERROR,
@@ -1724,7 +1762,7 @@ class DeviceTab(QWidget):
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             atomic_write_text(path, text + "\n")
         except OSError as exc:
-            logger.error("Could not export the selection: %s", exc)
+            logger.error("Could not export the selection: %s", described(exc))
             self._banners.show_banner(
                 _BANNER_EXPORT, banners.ERROR, "The selection could not be saved", str(exc),
             )

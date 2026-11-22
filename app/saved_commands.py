@@ -17,6 +17,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from app.constants import SAVED_COMMAND_MAX_LENGTH, SAVED_COMMANDS_MAX
+from app.diagnostic_log import described
 
 if TYPE_CHECKING:
     from app.config import ConfigManager
@@ -53,7 +54,7 @@ class SavedCommands:
         try:
             data = json.loads(raw)
         except (ValueError, RecursionError) as exc:
-            logger.warning("Saved commands are unreadable and are ignored: %s", exc)
+            logger.warning("Saved commands are unreadable and are ignored: %s", described(exc))
             return []
         return clean(data) if isinstance(data, list) else []
 

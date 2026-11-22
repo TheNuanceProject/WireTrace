@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+from pathlib import Path
 from types import TracebackType
 
 from version import APP_NAME, APP_VERSION
@@ -184,15 +185,22 @@ def main() -> int:
     if "--smoke-test" in sys.argv:
         return run_smoke_test()
 
-    logger = logging.getLogger(__name__)
-    logger.info("Starting %s v%s", APP_NAME, APP_VERSION)
+    from app.constants import get_diagnostic_log_dir
+    from app.diagnostic_log import DiagnosticLog
+    from updater.install import installation_lines
 
+    diagnostics = DiagnosticLog(Path(get_diagnostic_log_dir()))
+    diagnostics.start(installation_lines())
+    logger = logging.getLogger(__name__)
     try:
         from app.application import WireTraceApp
-        return WireTraceApp(sys.argv).run()
+        return WireTraceApp(sys.argv, diagnostics).run()
     except Exception:
         logger.exception("Fatal error during startup")
         return 1
+    finally:
+        logger.info("%s is closing", APP_NAME)
+        diagnostics.stop()
 
 
 if __name__ == "__main__":

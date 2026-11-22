@@ -12,8 +12,13 @@ folder on their own computer and runs this tool, which:
      (``gh attestation verify``).
   2. Recomputes the size and SHA-256 of every installer and checks them
      against the manifest and against ``SHA256SUMS``.
-  3. Shows what is about to be signed and asks.
-  4. Stamps the moment of signing, signs with the private key, reads the
+  3. Reads the manifest published now, before this release, verifies its
+     signature with the public keys in ``version.py``, and names the
+     release it describes as this one's previous release, the one an
+     installation can return to. Its files are those that manifest,
+     already signed, gives; they are not downloaded again.
+  4. Shows what is about to be signed and asks.
+  5. Stamps the moment of signing, signs with the private key, reads the
      result back exactly as an installed WireTrace reads it, with the
      public keys in ``version.py``, and only then writes the two files
      the website serves:
@@ -29,6 +34,7 @@ this process.
 
 Usage:
     python tools/sign_manifest.py RELEASE-FOLDER --key KEYFILE --out FOLDER
+        --previous PUBLISHED-MANIFEST
 """
 
 from __future__ import annotations
@@ -52,11 +58,13 @@ from tools.release_keys import SigningKeyError, load_key, public_bytes
 from tools.release_manifest import CHECKSUMS_NAME, UNSIGNED_MANIFEST_NAME, sha256_of
 from updater.manifest import (
     ManifestError,
+    Release,
     ReleaseManifest,
     build_envelope,
     build_payload,
     decode_public_key,
     format_signed_at,
+    is_newer,
     key_id,
     parse_manifest,
     read_signed_manifest,
@@ -168,6 +176,8 @@ def check_release(folder: Path, verify: Verifier) -> ReleaseManifest:
         )
     if manifest.signed_at is not None:
         raise ManifestError("the manifest already carries a time of signing")
+    if manifest.previous is not None:
+        raise ManifestError("the manifest already names a previous release")
     sums = _checksums((folder / CHECKSUMS_NAME).read_text(encoding=_ENCODING))
     verify(unsigned)
     if sums.get(UNSIGNED_MANIFEST_NAME) != sha256_of(unsigned):
@@ -208,6 +218,30 @@ def legacy_manifest(manifest: ReleaseManifest) -> bytes:
         },
     }
     return (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode(_ENCODING)
+
+
+def previous_release(published: Path) -> Release:
+    """The release the manifest published before this one describes,
+    once its signature is verified with the public keys in ``version.py``.
+
+    Raises:
+        ManifestError: it is not signed by a trusted key, not well formed,
+            or not of a version earlier than this one.
+        OSError: it cannot be read.
+    """
+    trusted = [decode_public_key(encoded) for encoded in UPDATE_PUBLIC_KEYS]
+    manifest = read_signed_manifest(published.read_bytes(), trusted)
+    if not is_newer(APP_VERSION, manifest.version):
+        raise ManifestError(
+            f"the published manifest is of version {manifest.version}, "
+            f"not of one earlier than {APP_VERSION}"
+        )
+    return Release(version=manifest.version, platforms=manifest.platforms)
+
+
+def with_previous(manifest: ReleaseManifest, previous: Release) -> ReleaseManifest:
+    """``manifest`` naming ``previous`` as the release before it."""
+    return dataclasses.replace(manifest, previous=previous)
 
 
 def stamped(manifest: ReleaseManifest, moment: datetime) -> ReleaseManifest:
@@ -268,6 +302,11 @@ def summary(manifest: ReleaseManifest) -> str:
     for key, release in manifest.platforms.items():
         lines.append(f"  {key}: {release.file_name}")
         lines.append(f"    {release.file_size:,} bytes, SHA-256 {release.sha256}")
+    if manifest.previous is not None:
+        lines.append(f"Installations can return to version {manifest.previous.version}, as published:")
+        for key, release in manifest.previous.platforms.items():
+            lines.append(f"  {key}: {release.file_name}")
+            lines.append(f"    {release.file_size:,} bytes, SHA-256 {release.sha256}")
     lines.extend(["", "What the update window will show:", ""])
     lines.extend(f"    {line}" for line in manifest.release_notes.splitlines())
     return "\n".join(lines)
@@ -286,12 +325,18 @@ def main(
     )
     parser.add_argument("--key", type=Path, required=True, help="the file of the private key")
     parser.add_argument("--out", type=Path, required=True, help="the folder to write into")
+    parser.add_argument(
+        "--previous", type=Path, required=True,
+        help="the signed manifest published now, before this release "
+             "(public/updates/wiretrace/manifest.json in the site's folder)",
+    )
     options = parser.parse_args(arguments)
 
     try:
+        previous = previous_release(options.previous)
         print(f"Confirming with GitHub that the files were built by {RELEASE_WORKFLOW} "
               f"from {tag_ref(APP_VERSION)}...")
-        manifest = stamped(check_release(options.folder, verifier(APP_VERSION)), now())
+        manifest = with_previous(stamped(check_release(options.folder, verifier(APP_VERSION)), now()), previous)
         print("Every file is confirmed and matches the manifest.\n")
         print(summary(manifest))
         if input(f"\nSign this manifest? Type {_YES} to go on: ").strip().lower() != _YES:

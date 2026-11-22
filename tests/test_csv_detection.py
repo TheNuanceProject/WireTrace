@@ -50,6 +50,14 @@ class TestDetection:
         assert engine.columns == ["Temperature", "Humidity"]
         assert engine.header == "Timestamp,Temperature,Humidity"
 
+    def test_the_columns_found_are_not_logged(self, caplog):
+        engine = CSVEngine()
+        with caplog.at_level("INFO", logger="core.csv_engine"):
+            engine.detect_mode([f"PatientRoom7: {i}, Humidity: {i}" for i in range(10)])
+
+        assert "CSV structure settled: AUTO, 2 columns" in caplog.text
+        assert "PatientRoom7" not in caplog.text
+
     def test_detects_key_value_equals(self):
         engine = CSVEngine()
         assert engine.detect_mode([f"v={i} i={i}" for i in range(10)]) == CSVMode.AUTO

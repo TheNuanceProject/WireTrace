@@ -40,6 +40,13 @@ SELECTED = "selected"
 #: A button or a field of the smaller of the two sizes.
 COMPACT = "compact"
 
+#: A button without fill or edge until it is pointed at: the quiet
+#: button of the design language.
+QUIET = "quiet"
+
+#: A quiet button whose label is in the accent, as a link is.
+ACCENT = "accent"
+
 
 def set_state(widget: QWidget, name: str, value: bool | str) -> None:
     """Set a style state and redraw the widget if the state changed."""

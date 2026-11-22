@@ -49,6 +49,16 @@ def spool(tmp_path):
 @pytest.fixture
 def plot(qapp: QApplication, theme_manager: ThemeManager, spool, monkeypatch):
     """A plot that keeps 100 samples in memory, after 1,000 lines with a spike."""
+    yield from _plot(qapp, theme_manager, spool, monkeypatch, reading=True)
+
+
+@pytest.fixture
+def unread_plot(qapp: QApplication, theme_manager: ThemeManager, spool, monkeypatch):
+    """The same plot before it reads the recording."""
+    yield from _plot(qapp, theme_manager, spool, monkeypatch, reading=False)
+
+
+def _plot(qapp, theme_manager, spool, monkeypatch, *, reading: bool):
     monkeypatch.setattr(plot_engine_module, "PLOT_RING_BUFFER_SIZE", _IN_MEMORY)
     theme_manager.apply_theme(ThemeID.LIGHT)
     engine = PlotEngine()
@@ -63,7 +73,7 @@ def plot(qapp: QApplication, theme_manager: ThemeManager, spool, monkeypatch):
     view = PlotView(engine, theme_manager, history=history)
     view.resize(1000, 520)
     view.show()
-    history.set_reading(True)
+    history.set_reading(reading)
     view._window_combo.setCurrentIndex(view._window_combo.findData(None))
     qapp.processEvents()
     yield view, engine, history
@@ -196,3 +206,43 @@ def test_a_plot_holding_the_whole_session_needs_no_note(qapp, theme_manager, spo
     finally:
         view.shutdown()
         history.shutdown()
+
+
+def test_older_values_arriving_live_are_drawn_by_the_ticks_alone(qapp, unread_plot):
+    view, engine, history = unread_plot
+    oldest_in_memory = float(engine.snapshot("temp")[0][0])
+    wait_until(qapp, lambda: view._data["temp"][0].size and view._data["temp"][0][0] == oldest_in_memory)
+    view._timer.timeout.emit()
+
+    history.set_reading(True)
+    wait_until(qapp, lambda: view._data["temp"][0][0] == 0.0)
+
+    x, y = view._traces["temp"].getData()
+    assert x[0] == 0.0
+    assert _SPIKE in y.tolist()
+
+
+def test_a_held_chart_is_painted_again_only_when_what_it_shows_changes(
+    qapp, plot, spool, monkeypatch,
+):
+    view, _, history = plot
+    _read_everything(qapp, view, history)
+    view._pause_btn.setChecked(True)
+    wait_until(qapp, lambda: view._detail_for_view() is not None)
+    x, _ = view._traces["temp"].getData()
+    assert x.size == _LINES
+
+    handed: list[int] = []
+    trace = view._traces["temp"]
+    original = trace.setData
+    monkeypatch.setattr(trace, "setData", lambda *a, **k: (handed.append(1), original(*a, **k))[1])
+    reached = history.reached
+    later = [
+        LineRecord(_START + timedelta(seconds=(_LINES + index) * 0.1), "temp=1.0", "DATA")
+        for index in range(50)
+    ]
+    spool.append(later)
+    wait_until(qapp, lambda: history.reached is not None and history.reached > reached)
+    qapp.processEvents()
+
+    assert handed == []

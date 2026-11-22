@@ -5,6 +5,64 @@ Notable changes to WireTrace, by version. Versions follow
 
 ---
 
+## [2.2.0] - 2026-11-22
+
+Updates you notice and can undo, a tour of every part of WireTrace, a
+diagnostic log to send with a report, and a lighter plot.
+
+### Added
+
+- **Tour.** Offered at the first start and kept in Help: eight chapters
+  walk through every part of WireTrace on a sample board built in, with
+  no device needed. Each step shows the control it describes, opening
+  its page of Preferences, and its menu where WireTrace draws the menu
+  bar; where the system draws it, the step says where the entry is.
+- **Return to the previous version.** Help > Return to version 2.1.0...
+  downloads the earlier release, verifies it by signature as an update
+  is, and installs it. From this version on, your settings are copied
+  before each update and put back on a return, keeping your own data
+  such as saved commands, plot profiles and highlight rules. With the
+  `.deb`, on macOS or running from source, it opens the earlier
+  release's page instead.
+- **Diagnostic log.** WireTrace's own events (ports opened and closed,
+  errors, recoveries, updates) are kept on this computer, never device
+  data or anything typed, and never sent. Help > Open diagnostic logs
+  opens the folder; Help > Copy diagnostic summary copies what a report
+  needs.
+- **An update stays offered.** An update found by an automatic check is
+  offered as "Update to" its version at the right of every tab's status
+  bar until it is installed or skipped, or for 24 hours after Remind
+  later. When automatic checks have failed for 3 days, the status bar
+  says since when updates have not been checked, with Check now.
+- **Benchmarks.** Each release carries `benchmarks.json`: WireTrace
+  measured on GitHub's machines as the release is built (the lines a
+  second it takes in, its processor and memory with two tabs idle and
+  receiving, its memory with a full console, and its start).
+  `tools/benchmark.py` measures any computer the same way.
+
+### Changed
+
+- A failed update check or download says in one sentence what happened
+  and what to do, with Open the release page.
+- The plot uses less of the processor, and still shows every spike. The
+  card under the pointer, the cursors, the figures and CSV export use
+  every sample.
+- The plot's grid is lighter, with one level of lines fewer.
+- After an update or a return to an earlier version, the update check
+  also says which version WireTrace changed from, with a one-time number
+  for that change, so the usage figures count each installation in the
+  version it runs. The privacy policy says what is sent and kept.
+
+### Fixed
+
+- On Windows, a tab could stop showing new lines while its port stayed
+  open. WireTrace now picks the lines up without reopening the port, so
+  the board is not reset.
+- On some computers, updates could not be downloaded because of how the
+  system held its certificates. Certificates are now checked by the
+  operating system itself.
+- A message that wraps is no longer cut off in a small window.
+
 ## [2.1.0] - 2026-11-17
 
 A tab can now wait for a lost board and carry on, the plot keeps the

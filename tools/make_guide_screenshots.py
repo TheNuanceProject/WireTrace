@@ -33,6 +33,7 @@ from tests_gui.offscreen import use_offscreen_display  # noqa: E402
 
 use_offscreen_display()
 
+from PySide6.QtCore import QAbstractAnimation  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
@@ -49,6 +50,8 @@ from ui.formatting import format_count  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 from ui.themes.fonts import register_bundled_fonts  # noqa: E402
 from ui.themes.theme_manager import BASE_STYLE, ThemeManager  # noqa: E402
+from ui.tour.chapters import CHAPTERS  # noqa: E402
+from ui.widgets.console_header import LEVEL_CHOICES  # noqa: E402
 from ui.widgets.plot_view import PlotLayout  # noqa: E402
 
 IMAGES_DIR = ROOT / "resources" / "help" / "images"
@@ -205,6 +208,33 @@ class Studio:
         self.save(preferences, "preferences")
         preferences.close()
 
+    def tour(self) -> None:
+        """The tour on the sample board, at the step about the level buttons."""
+        reading = next(chapter for chapter in CHAPTERS if chapter.id == "reading")
+        step = reading.steps[0]
+        self.window.start_tour((reading,))
+        tour = self.window._tour
+        while True:
+            self.wait(lambda: tour._overlay is not None and tour._overlay.isVisible())
+            overlay = tour._overlay
+            # The card has arrived: its fade and move are over.
+            self.wait(lambda overlay=overlay: overlay._arrival is None
+                      or overlay._arrival.state() == QAbstractAnimation.State.Stopped)
+            if overlay.card._title.text() == step.title:
+                break
+            overlay.card._default.click()
+            self.settle()
+        # The sample board has printed a line of every level, so each level
+        # button the step rings has lines to count.
+        console = tour._sample_tab.console
+        self.wait(lambda: all(
+            any(console.level_counts().get(tag, 0) for tag in choice.tags)
+            for choice in LEVEL_CHOICES if choice.tags is not None
+        ))
+        self.save(self.window, "tour")
+        tour.stop()
+        self.settle()
+
     def close(self) -> None:
         self.window.shutdown_all_tabs()
         self.window.close()
@@ -234,6 +264,7 @@ def main() -> int:
             studio.plot()
             studio.connection_lost()
             studio.dialogs()
+            studio.tour()
             studio.close()
     return 0
 

@@ -30,6 +30,7 @@ from PySide6.QtCore import QByteArray, Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from app.constants import FIELD_SEPARATOR, PLOT_PRELOAD_DELAY_MS
+from app.diagnostic_log import described, log_data_failure
 from app.file_names import output_base_path
 from app.plot_config import PlotConfig, PlotProfileStore
 from core.plot_engine import PlotEngine, PlotMode
@@ -468,7 +469,7 @@ class PlotFeature(TabModule):
         try:
             return self._engine.recent_lines()
         except Exception:
-            logger.exception("plot_engine.recent_lines() failed")
+            log_data_failure(logger, "The plot's recent lines could not be read")
             return []
 
     def open_config_dialog(self) -> None:
@@ -509,7 +510,7 @@ class PlotFeature(TabModule):
                 if self._visible:
                     self.context.note_usage(Feature.PLOT_PATTERN)
         except RegexParserError as exc:
-            logger.warning("Plot config rejected by engine: %s", exc)
+            logger.warning("Plot config rejected by engine: %s", described(exc))
             if emit_toast:
                 Toast.error(self.context.widget, f"Plot pattern rejected: {exc}")
             self._engine.set_auto_config()

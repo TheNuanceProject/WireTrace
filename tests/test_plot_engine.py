@@ -920,3 +920,18 @@ class TestPlotEngineActivation:
         assert not eng.has_any_data
         eng.set_active(True)
         assert list(eng.snapshot("RPM")[1]) == [1400.0, 1401.0, 1402.0, 1403.0, 1404.0]
+
+
+class TestAFaultLeavesTheLineOutOfTheLog:
+    def test_the_line_being_read_is_not_logged(self, caplog, monkeypatch):
+        eng = PlotEngine()
+
+        def fail(line: str, timestamp: object) -> None:
+            raise ValueError(f"could not read {line!r}")
+
+        monkeypatch.setattr(eng, "_process_one", fail)
+        with caplog.at_level("ERROR", logger="core.plot_engine"):
+            eng.process("temp=21 serial=SN-0042-PRIVATE", _tick())
+
+        assert "The plot could not read a line: ValueError, at" in caplog.text
+        assert "SN-0042-PRIVATE" not in caplog.text

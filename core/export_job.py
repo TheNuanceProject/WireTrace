@@ -24,6 +24,7 @@ from app.constants import (
     LOG_FLUSH_THRESHOLD_BYTES,
     ExportFormat,
 )
+from app.diagnostic_log import described, log_data_failure
 from core.csv_engine import CSVEngine
 from core.log_files import FileBackend, SplitLogFile
 from core.log_format import (
@@ -149,9 +150,9 @@ class ExportJob:
             # Whatever went wrong, the caller is told and no partial
             # file is left behind looking like a finished export.
             if isinstance(exc, OSError):
-                logger.error("Export failed: %s", exc)
+                logger.error("Export failed: %s", described(exc))
             else:
-                logger.exception("Export failed unexpectedly")
+                log_data_failure(logger, "Export failed unexpectedly")
             self._remove(files)
             result = ExportResult(
                 text_paths=(), csv_paths=(), lines=0,

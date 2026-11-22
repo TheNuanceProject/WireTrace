@@ -291,6 +291,20 @@ class TestDisplayBuffer:
         assert summary.lines_written == 1_000
         assert pipeline.take_display(10)[1] == 0
 
+    def test_waiting_counts_the_records_not_yet_taken(self):
+        buffer = DisplayBuffer(capacity=100)
+        start = datetime(2026, 1, 2, 3, 4, 5)
+
+        buffer.put([LineRecord(start, f"line {n}", "DATA") for n in range(250)])
+        assert buffer.waiting == 100
+
+        buffer.take(30)
+        assert buffer.waiting == 70
+        buffer.keep_newest(10)
+        assert buffer.waiting == 10
+        buffer.take(1_000)
+        assert buffer.waiting == 0
+
     def test_the_characters_waiting_are_bounded_as_well(self):
         buffer = DisplayBuffer(capacity=10_000, max_characters=1_000)
         start = datetime(2026, 1, 2, 3, 4, 5)

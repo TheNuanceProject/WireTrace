@@ -33,13 +33,13 @@ from app.constants import (
     ThemeID,
 )
 from app.file_lock import FileLock
+from app.privacy_policy import load_policy, to_plain_text
 from tests_gui.support import LoopbackPort, wait_until
 from ui.device_tab import DeviceTab
 from ui.main_window import MainWindow
 from ui.themes.theme_manager import ThemeManager
 from ui.widgets.banner import BannerArea
 from ui.widgets.connect_page import ConnectPage
-from updater.privacy import PRIVACY_STATEMENT
 from updater.usage import (
     REPORT_FIELDS,
     Feature,
@@ -371,13 +371,13 @@ class TestTheReport:
     def test_screen_scale_is_the_nearest_listed(self, ratio, expected):
         assert nearest_scale(ratio) == expected
 
-    def test_the_privacy_statement_names_every_field_a_report_holds(self):
+    def test_the_privacy_policy_names_every_field_a_report_holds(self):
         stated = {
-            "installation": "a random installation identifier",
-            "day": "the date of the day it describes",
-            "version": "the version of WireTrace",
-            "os": "the operating system",
-            "arch": "the processor type",
+            "installation": "a random identifier on your computer",
+            "day": "the identifier and the date",
+            "version": "the WireTrace version",
+            "os": "operating system",
+            "arch": "processor type",
             "channel": "how WireTrace was installed",
             "features": "which features were used",
             "problems": "whether lines were lost",
@@ -388,7 +388,7 @@ class TestTheReport:
             "longest_session": "the longest time one window stayed open",
             "starts": "how many times WireTrace was started",
         }
-        statement = " ".join(PRIVACY_STATEMENT.split())
+        statement = to_plain_text(load_policy())
         assert set(stated) == set(REPORT_FIELDS)
         for field_name, phrase in stated.items():
             assert phrase in statement, field_name

@@ -84,6 +84,15 @@ def format_time_of_day(moment: datetime) -> str:
     )
 
 
+#: The months as the interface names them, whatever the system's locale.
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def format_short_day(moment: datetime) -> str:
+    """A day as a short note names it: "15 Nov"."""
+    return f"{moment.day} {_MONTHS[moment.month - 1]}"
+
+
 def format_change(value: float) -> str:
     """A difference with its sign: "+1.66", "-41", "0"."""
     text = format_value(value)

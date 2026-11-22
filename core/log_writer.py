@@ -66,6 +66,7 @@ from app.constants import (
     MS_PER_SECOND,
     TAG_NOTICE_EVENT,
 )
+from app.diagnostic_log import described, log_data_failure
 from core.csv_engine import CSVEngine
 from core.log_files import FileBackend, SplitLogFile
 from core.log_format import (
@@ -532,7 +533,7 @@ class SessionWriter:
             call.done.set()
 
     def _report_unexpected(self, activity: str, error: Exception) -> None:
-        logger.exception("Unexpected error while %s", activity)
+        log_data_failure(logger, "Unexpected error while %s", activity)
         self._listener.writer_error(
             f"Unexpected error while {activity}: {type(error).__name__}: {error}",
         )
@@ -766,13 +767,13 @@ class SessionWriter:
             try:
                 log_file.sync()
             except OSError as exc:
-                logger.warning("Log sync failed: %s", exc)
+                logger.warning("Log sync failed: %s", described(exc))
 
     def _report_write_state(self, failure: OSError | None) -> None:
         """Tell the listener when a failure begins and when it ends."""
         if failure is not None and not self._failure_reported:
             self._failure_reported = True
-            logger.error("Log write failed: %s", failure)
+            logger.error("Log write failed: %s", described(failure))
             self._listener.log_write_failed(str(failure))
         elif failure is None and self._failure_reported:
             self._failure_reported = False

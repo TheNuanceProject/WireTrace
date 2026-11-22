@@ -299,6 +299,38 @@ QPushButton#iconButton[compact="true"]:focus {
     max-width: {{m.control_focus_height_compact}}px;
 }
 
+/* Quiet (property quiet="true"): no fill or edge until pointed at, then
+   the divider fill; its label text-secondary, or accent-strong where it
+   leads on, as a link does (property accent="true"). Its edge is kept,
+   unseen, so the focus ring takes its place without moving it. */
+
+QPushButton[quiet="true"] {
+    background-color: transparent;
+    border-color: transparent;
+    color: {{text_secondary}};
+}
+
+QPushButton[quiet="true"][accent="true"] {
+    color: {{accent_strong}};
+}
+
+QPushButton[quiet="true"]:hover, QPushButton[quiet="true"]:pressed {
+    background-color: {{divider}};
+    border-color: transparent;
+}
+
+/* The accent label falls below 4.5:1 on divider in the light theme: an
+   accent quiet button fills with paper on hover and shows its edge. */
+
+QPushButton[quiet="true"][accent="true"]:hover, QPushButton[quiet="true"][accent="true"]:pressed {
+    background-color: {{paper}};
+    border-color: {{edge}};
+}
+
+QPushButton[quiet="true"]:focus, QPushButton[quiet="true"][accent="true"]:focus {
+    border-color: {{accent_strong}};
+}
+
 QPushButton#flatIconButton {
     background-color: transparent;
     border: none;
@@ -766,7 +798,7 @@ QFrame#deviceStatusBar {
     border-top: {{m.border}}px solid {{divider}};
 }
 
-QFrame#deviceStatusBar QLabel {
+QFrame#deviceStatusBar QLabel, QFrame#deviceStatusBar QPushButton {
     font-size: {{f.caption}}px;
 }
 
@@ -893,6 +925,14 @@ QFrame#banner[level="error"] {
 /* ── Toast ─────────────────────────────────────────────────────────────── */
 
 /* A toast floats: a medium radius, its meaning as its edge. */
+
+/* ── The tour ─────────────────────────────────────────────────────────── */
+
+QFrame#tourCard {
+    background-color: {{paper}};
+    border: {{m.border}}px solid {{edge}};
+    border-radius: {{m.radius_md}}px;
+}
 
 QFrame#toast {
     background-color: {{surface}};

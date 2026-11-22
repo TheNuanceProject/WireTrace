@@ -31,7 +31,16 @@ from pathlib import Path
 
 import version
 from app import constants
-from app.constants import MS_PER_SECOND, ThemeID, get_cache_dir, get_config_dir, get_default_log_dir
+from app.constants import (
+    MS_PER_SECOND,
+    ThemeID,
+    get_cache_dir,
+    get_config_dir,
+    get_default_log_dir,
+    get_diagnostic_log_dir,
+    get_settings_copy_dir,
+)
+from app.privacy_policy import PolicyError, load_policy, to_html
 from core import records
 from ui import shortcuts
 from ui.formatting import format_size
@@ -193,6 +202,8 @@ _DIRECTORIES: Mapping[str, Callable[[], str]] = {
     "config": lambda: get_config_dir(),
     "logs": lambda: get_default_log_dir(),
     "cache": lambda: get_cache_dir(),
+    "settings_copies": lambda: get_settings_copy_dir(get_config_dir()),
+    "diagnostic_logs": lambda: get_diagnostic_log_dir(),
 }
 
 
@@ -306,6 +317,14 @@ def _picture(images: Path, argument: str) -> str:
     )
 
 
+def _fill_privacy(_: str) -> str:
+    """The privacy policy, from its one file (``app/privacy_policy.py``)."""
+    try:
+        return to_html(load_policy())
+    except PolicyError as exc:
+        raise UserGuideError(f"the privacy policy cannot be shown: {exc}") from exc
+
+
 def render_user_guide(template: str, images: Path, fonts: Path) -> str:
     """Fill every placeholder of the guide's template.
 
@@ -328,6 +347,7 @@ def render_user_guide(template: str, images: Path, fonts: Path) -> str:
         "css": lambda name: _fill_css(fonts, name),
         "below": _fill_below,
         "image": lambda argument: _picture(images, argument),
+        "privacy": _fill_privacy,
     }
 
     def fill(match: re.Match[str]) -> str:

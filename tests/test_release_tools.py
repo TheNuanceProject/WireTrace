@@ -5,6 +5,7 @@ a release, and the signing of its manifest."""
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -16,6 +17,10 @@ import pytest
 from tools import release_keys, release_manifest, sign_manifest
 from updater.manifest import (
     ManifestError,
+    PlatformRelease,
+    Release,
+    ReleaseManifest,
+    build_envelope,
     build_payload,
     decode_public_key,
     expected_file_name,
@@ -61,6 +66,24 @@ def trusted(key_file, monkeypatch):
     key = release_keys.load_key(key_file, PASSPHRASE)
     monkeypatch.setattr(sign_manifest, "UPDATE_PUBLIC_KEYS", (release_keys.public_text(key),))
     return key
+
+
+def _earlier_manifest() -> ReleaseManifest:
+    """The manifest of a release before this one."""
+    earlier = "0.9.0"
+    return ReleaseManifest(
+        version=earlier,
+        min_version="0.1.0",
+        release_notes="- Earlier",
+        signed_at=datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc),
+        platforms={
+            key: PlatformRelease(
+                file_name=expected_file_name(key, earlier), file_size=7 + index,
+                sha256=hashlib.sha256(bytes([index])).hexdigest(),
+            )
+            for index, key in enumerate(PLATFORMS)
+        },
+    )
 
 
 class TestKeys:
@@ -333,18 +356,91 @@ class TestSigning:
 
     # ── The command ──────────────────────────────────────────────────────
 
-    def _run_main(self, monkeypatch, tmp_path, folder, key_file, answer, verify=lambda path: None):
+    def _run_main(
+        self, monkeypatch, tmp_path, folder, key_file, answer, verify=lambda path: None, previous=None,
+    ):
         monkeypatch.setattr("builtins.input", lambda prompt: answer)
         monkeypatch.setattr(sign_manifest.getpass, "getpass", lambda prompt: PASSPHRASE)
         out = tmp_path / "out"
+        if previous is None:
+            previous = tmp_path / "published.json"
+            if not previous.exists():
+                previous.write_bytes(b"{}")
         code = sign_manifest.main(
-            [str(folder), "--key", str(key_file), "--out", str(out)],
+            [str(folder), "--key", str(key_file), "--out", str(out), "--previous", str(previous)],
             verifier=lambda version: verify, now=lambda: SIGNED,
         )
         return code, out
 
-    def test_main_signs_after_a_yes(self, monkeypatch, tmp_path, described, key_file, trusted, capsys):
+    # ── The previous release ─────────────────────────────────────────────
+
+    @pytest.fixture
+    def published(self, tmp_path, key_file, trusted):
+        """The manifest of an earlier release, signed and published."""
+        earlier = _earlier_manifest()
+        key = release_keys.load_key(key_file, PASSPHRASE)
+        payload = build_payload(earlier)
+        path = tmp_path / "published.json"
+        path.write_bytes(build_envelope(payload, [(key_id(release_keys.public_bytes(key)), key.sign(payload))]))
+        return path
+
+    def test_the_previous_release_is_the_published_one(self, published):
+        previous = sign_manifest.previous_release(published)
+
+        earlier = _earlier_manifest()
+        assert previous == Release(version=earlier.version, platforms=earlier.platforms)
+
+    def test_a_published_manifest_not_signed_by_a_trusted_key_is_refused(self, published, monkeypatch):
+        monkeypatch.setattr(sign_manifest, "UPDATE_PUBLIC_KEYS", (base64.b64encode(bytes(32)).decode(),))
+
+        with pytest.raises(ManifestError, match="not signed by a trusted key"):
+            sign_manifest.previous_release(published)
+
+    def test_a_published_manifest_of_this_version_is_refused(self, published, monkeypatch):
+        monkeypatch.setattr(sign_manifest, "APP_VERSION", _earlier_manifest().version)
+
+        with pytest.raises(ManifestError, match="not of one earlier than"):
+            sign_manifest.previous_release(published)
+
+    def test_an_unsigned_manifest_that_already_names_a_previous_release_is_refused(self, described):
+        unsigned = described / release_manifest.UNSIGNED_MANIFEST_NAME
+        manifest = parse_manifest(unsigned.read_bytes())
+        earlier = _earlier_manifest()
+        named = dataclasses.replace(
+            manifest, previous=Release(version=earlier.version, platforms=earlier.platforms),
+        )
+        unsigned.write_bytes(build_payload(named))
+
+        with pytest.raises(ManifestError, match="already names a previous release"):
+            sign_manifest.check_release(described, lambda path: None)
+
+    def test_main_signs_the_previous_release_into_the_manifest(
+        self, monkeypatch, tmp_path, described, key_file, trusted, published, capsys,
+    ):
+        code, out = self._run_main(monkeypatch, tmp_path, described, key_file, "yes", previous=published)
+
+        assert code == 0
+        signed = read_signed_manifest(
+            sign_manifest.signed_manifest_path(out).read_bytes(), [release_keys.public_bytes(trusted)],
+        )
+        earlier = _earlier_manifest()
+        assert signed.previous == Release(version=earlier.version, platforms=earlier.platforms)
+        printed = capsys.readouterr().out
+        assert f"Installations can return to version {earlier.version}, as published:" in printed
+        for release in earlier.platforms.values():
+            assert release.sha256 in printed
+
+    def test_main_signs_nothing_without_a_trusted_published_manifest(
+        self, monkeypatch, tmp_path, described, key_file, trusted, capsys,
+    ):
         code, out = self._run_main(monkeypatch, tmp_path, described, key_file, "yes")
+
+        assert code == 1
+        assert not out.exists()
+        assert "error:" in capsys.readouterr().err
+
+    def test_main_signs_after_a_yes(self, monkeypatch, tmp_path, described, key_file, trusted, published, capsys):
+        code, out = self._run_main(monkeypatch, tmp_path, described, key_file, "yes", previous=published)
         assert code == 0
         assert sign_manifest.signed_manifest_path(out).is_file()
         assert (out / UPDATE_LEGACY_JSON_FILE).is_file()
@@ -353,8 +449,8 @@ class TestSigning:
         for release in manifest.platforms.values():
             assert release.sha256 in printed
 
-    def test_main_writes_nothing_without_a_yes(self, monkeypatch, tmp_path, described, key_file, trusted):
-        code, out = self._run_main(monkeypatch, tmp_path, described, key_file, "y")
+    def test_main_writes_nothing_without_a_yes(self, monkeypatch, tmp_path, described, key_file, trusted, published):
+        code, out = self._run_main(monkeypatch, tmp_path, described, key_file, "y", previous=published)
         assert code == 1
         assert not out.exists()
 
@@ -365,12 +461,12 @@ class TestSigning:
         assert "error:" in capsys.readouterr().err
 
     def test_main_writes_nothing_when_github_does_not_confirm(
-        self, monkeypatch, tmp_path, described, key_file, trusted, capsys,
+        self, monkeypatch, tmp_path, described, key_file, trusted, published, capsys,
     ):
         def refuse(path: Path) -> None:
             raise sign_manifest.ProvenanceError("not built by the release workflow")
 
-        code, out = self._run_main(monkeypatch, tmp_path, described, key_file, "yes", refuse)
+        code, out = self._run_main(monkeypatch, tmp_path, described, key_file, "yes", refuse, published)
         assert code == 1
         assert not out.exists()
         assert "not built by the release workflow" in capsys.readouterr().err

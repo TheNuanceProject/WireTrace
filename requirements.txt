@@ -12,3 +12,4 @@ pyqtgraph>=0.13         # Live-plot rendering
 numpy>=1.24             # Plot ring buffers (required by pyqtgraph)
 regex>=2024.0.0         # Timeout-capable regex for user-supplied plot patterns (ReDoS guard)
 cryptography>=42.0      # Verifies the signature of the update manifest (Ed25519)
+truststore>=0.10        # Verifies HTTPS certificates with the operating system's own trust store

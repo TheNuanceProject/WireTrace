@@ -67,6 +67,7 @@ from app.constants import (
     DisplayMode,
     LineEnding,
 )
+from app.diagnostic_log import log_data_failure
 from core.ansi import AnsiColours
 from core.export_job import ExportJob, ExportRequest, ExportResult
 from core.framing import HexFramer, LineFramer, decode_line, escape_control_characters
@@ -142,6 +143,12 @@ class DisplayBuffer:
         with self._lock:
             self._capacity = capacity
             self._trim()
+
+    @property
+    def waiting(self) -> int:
+        """How many records are waiting to be taken."""
+        with self._lock:
+            return len(self._records)
 
     def put(self, records: list[LineRecord]) -> None:
         with self._lock:
@@ -537,7 +544,7 @@ class _ReaderWorker(QObject):
         except Exception:
             # Last resort. These bytes cannot be turned into lines, but
             # the session says so where they would have been.
-            logger.exception("Could not process %d received bytes", len(data))
+            log_data_failure(logger, "Could not process %d received bytes", len(data))
             records = [notice_record(
                 f"{len(data):,} received bytes could not be processed: internal error",
                 self._stamp_now(),
@@ -933,6 +940,10 @@ class DevicePipeline(QObject):
     def limit_display_backlog(self, count: int) -> None:
         """Skip the console ahead to the newest ``count`` waiting lines."""
         self._display.keep_newest(count)
+
+    def display_waiting(self) -> int:
+        """How many received lines wait for the console: neither shown nor skipped yet."""
+        return self._display.waiting
 
     def discard_display(self) -> None:
         """Forget the lines still waiting for the console."""

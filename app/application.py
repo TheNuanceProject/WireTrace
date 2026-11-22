@@ -34,6 +34,7 @@ from app.constants import (
     TOOLTIP_WAKE_UP_MS,
     get_cache_dir,
 )
+from app.diagnostic_log import DiagnosticLog
 from app.main_thread_gc import MainThreadCollector
 from core.session_spool import SessionSpool
 from ui.main_window import MainWindow
@@ -67,8 +68,9 @@ class _FastTooltipStyle(QProxyStyle):
 class WireTraceApp:
     """Application lifecycle manager."""
 
-    def __init__(self, argv: list[str] | None = None) -> None:
+    def __init__(self, argv: list[str] | None = None, diagnostics: DiagnosticLog | None = None) -> None:
         self._argv = argv or sys.argv
+        self._diagnostics = diagnostics
         self._app: QApplication | None = None
         self._splash: SplashScreen | None = None
         self._main_window: MainWindow | None = None
@@ -115,8 +117,8 @@ class WireTraceApp:
         """Load preferences and apply the theme before any window is shown."""
         register_bundled_fonts()
         install_console_accessibility()
+        # The manager reads the file as it is made.
         self._config = ConfigManager()
-        self._config.load()
         self._theme_manager = ThemeManager(self._app)
         self._theme_manager.apply_preference(self._config.theme)
 
@@ -146,7 +148,7 @@ class WireTraceApp:
         SessionSpool.remove_stale(os.path.join(get_cache_dir(), SPOOL_DIRECTORY_NAME))
 
     def _build_main_window(self) -> None:
-        self._main_window = MainWindow(self._config, self._theme_manager)
+        self._main_window = MainWindow(self._config, self._theme_manager, diagnostics=self._diagnostics)
         # Closing the window shuts every tab down. This covers an exit
         # that never closes it, such as the end of the desktop session.
         self._app.aboutToQuit.connect(self._main_window.shutdown_all_tabs)
@@ -158,7 +160,9 @@ class WireTraceApp:
         self._take_over_installer_choice()
         self._main_window.updates.start()
         self._main_window.usage.start()
-        self._main_window.ask_about_usage_statistics()
+        # The question about usage statistics waits until the tour has
+        # been offered, so the two are never shown at once.
+        self._main_window.offer_tour(then=self._main_window.ask_about_usage_statistics)
 
     def _take_over_installer_choice(self) -> None:
         """Apply, once, what was chosen in the Windows installer about

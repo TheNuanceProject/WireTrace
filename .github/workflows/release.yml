@@ -59,6 +59,59 @@ jobs:
     name: Checks
     uses: ./.github/workflows/ci.yml
 
+  # ─── Benchmarks ──────────────────────────────────────────────────────
+  # WireTrace measured on GitHub's machines (tools/benchmark.py): how
+  # much it takes in, how fast through a pseudo-terminal, its processor
+  # and memory use, and its start. Each machine's results are kept and
+  # published with the release, in benchmarks.json. A run that loses or
+  # reorders a line fails the job, and with it the release.
+  benchmarks:
+    name: Benchmarks on ${{ matrix.machine }}
+    needs: [version, checks]
+    runs-on: ${{ matrix.machine }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The small reference (1 processor, 5 GB) and GitHub's standard
+        # Linux and Windows machines (4 processors, 16 GB).
+        machine: [ubuntu-slim, ubuntu-24.04, windows-2022]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Shared libraries Qt loads at import time that a minimal Linux
+      # image does not guarantee.
+      - name: Install Qt system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+
+      - name: Install the locked dependencies
+        run: python -m pip install --require-hashes --requirement requirements-release.txt --requirement requirements-benchmark.txt
+
+      - name: Measure
+        run: >-
+          python tools/benchmark.py
+          --machine "GitHub ${{ matrix.machine }}"
+          --output "benchmarks-${{ matrix.machine }}.json"
+
+      - name: Keep the results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: benchmarks-${{ matrix.machine }}
+          path: benchmarks-${{ matrix.machine }}.json
+          if-no-files-found: error
+
   # ─── Linux: AppImage and .deb ────────────────────────────────────────
   # Built on the oldest Ubuntu offered, so that the result runs there
   # and on everything newer. The build fails if it needs a newer C
@@ -261,7 +314,7 @@ jobs:
   # ─── The draft release ───────────────────────────────────────────────
   release:
     name: Draft release
-    needs: [build-linux, check-deb, build-windows]
+    needs: [build-linux, check-deb, build-windows, benchmarks]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -293,6 +346,18 @@ jobs:
         with:
           name: windows
           path: release
+
+      - name: Fetch the benchmarks
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: benchmarks-*
+          path: benchmarks
+          merge-multiple: true
+
+      # The results of every machine, in one file published with the
+      # release (and so in its checksums and its attestation).
+      - name: Put the benchmarks together
+        run: python tools/benchmark.py --merge benchmarks/*.json --output release/benchmarks.json
 
       # The licence texts, a bill of materials, the checksums of every
       # file, and the update manifest, which is not yet signed.

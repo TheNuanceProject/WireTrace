@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QPlainTextEdit, QWidget
 from ui.dialogs.common import action_button, button_row, dialog_layout, note
 from ui.themes import tokens
 from ui.themes.fonts import monospace_font
+from ui.tour.targets import Target, mark
 from ui.widgets.dot_grid import DotGridDialog
 from ui.widgets.least_size import keep_least_size
 from ui.widgets.toast import Toast
@@ -34,9 +35,9 @@ class SessionReportDialog(DotGridDialog):
         self._text.setAccessibleName("Session report")
         self._text.setPlainText(report)
 
-        copy = action_button("Copy")
+        copy = mark(action_button("Copy"), Target.REPORT_ACTIONS)
         copy.clicked.connect(self._copy)
-        save_button = action_button("Save...")
+        save_button = mark(action_button("Save..."), Target.REPORT_ACTIONS)
         save_button.clicked.connect(lambda: save(self, self.text()))
         close = action_button("Close", primary=True)
         close.setDefault(True)

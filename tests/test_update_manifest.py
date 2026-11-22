@@ -9,6 +9,7 @@ getting past that is tried here and must fail.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 
 import pytest
@@ -19,6 +20,8 @@ from updater.manifest import (
     MANIFEST_FORMAT,
     PLATFORM_FILE_NAMES,
     ManifestError,
+    Release,
+    ReleaseManifest,
     build_envelope,
     build_payload,
     decode_public_key,
@@ -303,3 +306,59 @@ def test_a_payload_that_is_not_as_expected_is_refused(payload: bytes) -> None:
 def test_an_installer_entry_that_is_not_exact_is_refused(changes: dict[str, object]) -> None:
     with pytest.raises(ManifestError):
         parse_manifest(_platform_payload(**changes))
+
+
+# ── The previous release ─────────────────────────────────────────────────
+
+
+def _with_previous(version: str = "9.8.0") -> ReleaseManifest:
+    earlier = release(version, content=b"earlier")
+    return dataclasses.replace(release(), previous=Release(version=version, platforms=earlier.platforms))
+
+
+def test_a_manifest_names_the_release_before_it_and_reads_back() -> None:
+    manifest = _with_previous()
+
+    read = parse_manifest(build_payload(manifest))
+
+    assert read == manifest
+    assert read.previous.version == "9.8.0"
+    assert read.previous.download_url("windows-x86_64") == (
+        f"{RELEASES_BASE_URL}/v9.8.0/{expected_file_name('windows-x86_64', '9.8.0')}"
+    )
+
+
+def test_a_manifest_without_a_previous_release_is_written_as_before() -> None:
+    assert b'"previous"' not in build_payload(release())
+    assert parse_manifest(build_payload(release())).previous is None
+
+
+@pytest.mark.parametrize(
+    ("previous", "why"),
+    [
+        ("9.8.0", "not well formed"),
+        ({"platforms": {}}, "no version"),
+        ({"version": "9.9.9", "platforms": {}}, "not earlier than its own"),
+        ({"version": "10.0.0", "platforms": {}}, "not earlier than its own"),
+        ({"version": "9.8", "platforms": {}}, "not a version"),
+        ({"version": "9.8.0"}, "lists no platforms"),
+    ],
+)
+def test_a_previous_release_out_of_shape_is_refused(previous: object, why: str) -> None:
+    with pytest.raises(ManifestError, match=why):
+        parse_manifest(_payload(previous=previous))
+
+
+def test_a_previous_release_names_only_its_own_files() -> None:
+    data = json.loads(build_payload(_with_previous()))
+    data["previous"]["platforms"]["windows-x86_64"]["file_name"] = expected_file_name("windows-x86_64", "9.9.9")
+
+    with pytest.raises(ManifestError, match="unexpected file"):
+        parse_manifest(json.dumps(data).encode())
+
+
+def test_a_platform_the_previous_release_names_and_this_version_does_not_know_is_left_out() -> None:
+    data = json.loads(build_payload(_with_previous()))
+    data["previous"]["platforms"]["plan9-mips"] = {"file_name": "x", "file_size": 1, "sha256_hash": "0" * 64}
+
+    assert set(parse_manifest(json.dumps(data).encode()).previous.platforms) == set(PLATFORM_FILE_NAMES)

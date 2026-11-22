@@ -65,6 +65,7 @@ from ui.alert_notifier import (
     notifications_unavailable,
     play_alert_sound,
 )
+from ui.dialogs import preference_pages as pages
 from ui.dialogs.common import (
     ChoiceRow,
     action_button,
@@ -76,8 +77,10 @@ from ui.dialogs.common import (
     tighten,
 )
 from ui.dialogs.messages import confirm
+from ui.dialogs.preference_pages import PAGE_AFTER_DIVIDER, PAGES
 from ui.themes import tokens
 from ui.themes.theme_manager import ThemeManager, normalise_preference
+from ui.tour.targets import FEATURE_TARGETS, Target, mark
 from ui.widgets.command_bar import LINE_ENDING_NAMES
 from ui.widgets.dot_grid import DotGridDialog
 from ui.widgets.highlight_editor import HighlightEditor
@@ -87,15 +90,6 @@ from ui.widgets.toast import Toast
 from ui.widgets.vertical_scroll import VerticalScrollArea
 from updater.install import UPDATE_CHECK_OPTION
 from version import APP_NAME, APP_PRIVACY_URL
-
-_UPDATES_AND_PRIVACY = "Updates and privacy"
-
-#: The pages, in the order of the list. Advanced comes after a divider.
-PAGES: tuple[str, ...] = (
-    "Appearance", "Console", "Connection", "Logging", "Features", "Plot", "Alerts",
-    "Highlights", _UPDATES_AND_PRIVACY, "Advanced",
-)
-_PAGE_AFTER_DIVIDER = "Advanced"
 
 
 class PreferencesDialog(DotGridDialog):
@@ -132,23 +126,24 @@ class PreferencesDialog(DotGridDialog):
         self._sidebar.setFixedWidth(metrics.sidebar_width)
         self._sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._sidebar.setAccessibleName("Pages")
+        mark(self._sidebar, Target.PREFERENCE_PAGES)
         self._pages = QStackedWidget()
         self._page_rows: dict[str, int] = {}
 
         builders: dict[str, Callable[[QVBoxLayout], None]] = {
-            "Appearance": self._build_appearance,
-            "Console": self._build_console,
-            "Connection": self._build_connection,
-            "Logging": self._build_logging,
-            "Features": self._build_features,
-            "Plot": self._build_plot,
-            "Alerts": self._build_alerts,
-            "Highlights": self._build_highlights,
-            _UPDATES_AND_PRIVACY: self._build_updates_and_privacy,
-            "Advanced": self._build_advanced,
+            pages.APPEARANCE: self._build_appearance,
+            pages.CONSOLE: self._build_console,
+            pages.CONNECTION: self._build_connection,
+            pages.LOGGING: self._build_logging,
+            pages.FEATURES: self._build_features,
+            pages.PLOT: self._build_plot,
+            pages.ALERTS: self._build_alerts,
+            pages.HIGHLIGHTS: self._build_highlights,
+            pages.UPDATES_AND_PRIVACY: self._build_updates_and_privacy,
+            pages.ADVANCED: self._build_advanced,
         }
         for name in PAGES:
-            if name == _PAGE_AFTER_DIVIDER:
+            if name == PAGE_AFTER_DIVIDER:
                 divider = QListWidgetItem()
                 divider.setFlags(Qt.ItemFlag.NoItemFlags)
                 divider.setData(Qt.ItemDataRole.AccessibleTextRole, "")
@@ -219,9 +214,12 @@ class PreferencesDialog(DotGridDialog):
         )
         self._sidebar.setFixedWidth(max(metrics.sidebar_width, needed))
 
-    def _add_row(self, page: QVBoxLayout, label: str, hint: str, field: QWidget) -> None:
-        """Add a setting: its name and hint on the left, its field on the right."""
-        page.addLayout(setting_row(label, hint, field))
+    def _add_row(
+        self, page: QVBoxLayout, label: str, hint: str, field: QWidget, target: Target | None = None,
+    ) -> None:
+        """Add a setting: its name and hint on the left, its field on the right.
+        The tour finds a setting marked as ``target``."""
+        page.addLayout(setting_row(label, hint, field, target))
         self._hints[label] = hint
 
     @staticmethod
@@ -306,21 +304,21 @@ class PreferencesDialog(DotGridDialog):
             page, "Reconnect",
             "The session and its log continue once the same board is back. "
             "Another board is never taken in its place.",
-            self._reconnect,
+            self._reconnect, Target.RECONNECT_SETTINGS,
         )
         self._reconnect_limit = self._number(0, RECONNECT_LIMIT_MINUTES_MAX, "min")
         self._reconnect_limit.setSpecialValueText("Never")
         self._add_row(
             page, "Stop waiting after",
             "Never keeps waiting until you stop it or disconnect.",
-            self._reconnect_limit,
+            self._reconnect_limit, Target.RECONNECT_SETTINGS,
         )
         self._reconnect_by_name = QCheckBox("Reconnect by port name")
         self._add_row(
             page, "Ports without USB identity",
             "A built-in COM port, a PCI card or a Bluetooth port has only its name "
             "to tell it apart.",
-            self._reconnect_by_name,
+            self._reconnect_by_name, Target.RECONNECT_SETTINGS,
         )
         for row in (self._reconnect_limit, self._reconnect_by_name):
             self._reconnect.toggled.connect(row.setEnabled)
@@ -340,7 +338,7 @@ class PreferencesDialog(DotGridDialog):
         self._add_row(
             page, "Log folder",
             "Where new logs are written. Choosing another folder when starting a log changes it.",
-            folder,
+            folder, Target.LOG_SETTINGS,
         )
 
         self._log_format = ChoiceRow(
@@ -349,7 +347,7 @@ class PreferencesDialog(DotGridDialog):
         self._add_row(
             page, "Log format",
             "The text log is always written. CSV adds a spreadsheet file beside it.",
-            self._log_format,
+            self._log_format, Target.LOG_SETTINGS,
         )
 
         self._split = self._number(0, LOG_SPLIT_MAX_MB, "MB")
@@ -357,7 +355,7 @@ class PreferencesDialog(DotGridDialog):
         self._add_row(
             page, "Maximum log file size",
             "A log that reaches this size continues in a new file. Off keeps each log in one file.",
-            self._split,
+            self._split, Target.LOG_SETTINGS,
         )
 
         self._line_ending = ChoiceRow(
@@ -381,7 +379,7 @@ class PreferencesDialog(DotGridDialog):
         for spec in MODULES:
             switch = QCheckBox("On")
             switch.toggled.connect(self._show_module_pages)
-            self._add_row(page, spec.title, spec.summary, switch)
+            self._add_row(page, spec.title, spec.summary, switch, FEATURE_TARGETS[spec.id])
             self._module_switches[spec.id] = switch
         self._module_switches[ALERTS.id].clicked.connect(
             lambda on: self._preview_alert_sound(on and self._alert_sound.isChecked())
@@ -389,7 +387,7 @@ class PreferencesDialog(DotGridDialog):
 
     def _show_module_pages(self) -> None:
         """Show the page of a module only while it is switched on."""
-        for spec, page in ((PLOT, "Plot"), (ALERTS, "Alerts"), (HIGHLIGHTS, "Highlights")):
+        for spec, page in ((PLOT, pages.PLOT), (ALERTS, pages.ALERTS), (HIGHLIGHTS, pages.HIGHLIGHTS)):
             on = self._module_switches[spec.id].isChecked()
             self._sidebar.setRowHidden(self._page_rows[page], not on)
 
@@ -408,12 +406,12 @@ class PreferencesDialog(DotGridDialog):
         self._add_row(
             page, "Error lines", "Lines at the Error or Critical level. While they keep "
             "arriving, a reminder comes every time between alerts until you dismiss the "
-            "banner.", self._alert_errors,
+            "banner.", self._alert_errors, Target.ALERT_SETTINGS,
         )
         self._alert_lost = QCheckBox("Alert when the connection is lost")
         self._add_row(
             page, "Connection lost", "The board was unplugged or the link failed.",
-            self._alert_lost,
+            self._alert_lost, Target.ALERT_SETTINGS,
         )
         self._alert_quiet = QCheckBox("Alert after no line for")
         self._alert_quiet_seconds = self._number(
@@ -428,7 +426,7 @@ class PreferencesDialog(DotGridDialog):
         quiet_layout.addWidget(self._alert_quiet_seconds)
         self._add_row(
             page, "Quiet board", "While connected. The banner goes once lines arrive again.",
-            quiet,
+            quiet, Target.ALERT_SETTINGS,
         )
         self._alert_sound = QCheckBox(
             f"Play the {WINDOWS_ALERT_SOUND_NAME} sound" if sys.platform == "win32"
@@ -438,7 +436,7 @@ class PreferencesDialog(DotGridDialog):
         self._add_row(
             page, "Sound", "As your system's sound settings have it; silent if they are. "
             "Choosing it plays it once.",
-            self._alert_sound,
+            self._alert_sound, Target.ALERT_SETTINGS,
         )
         self._alert_notification = QCheckBox("Show a desktop notification")
         unavailable = notifications_unavailable()
@@ -453,7 +451,7 @@ class PreferencesDialog(DotGridDialog):
                     if NOTIFICATION_BRINGS_SOUND else "."
                 )
             ),
-            self._alert_notification,
+            self._alert_notification, Target.ALERT_SETTINGS,
         )
         self._alert_pause_seconds = self._number(
             ALERT_PAUSE_SECONDS_MIN, ALERT_PAUSE_SECONDS_MAX, "s",
@@ -471,7 +469,7 @@ class PreferencesDialog(DotGridDialog):
             "colour, with a mark beside it. The first rule a line matches decides. "
             f"Up to {HIGHLIGHT_RULES_MAX} rules; on screen only, logs stay as received.",
         ))
-        self._highlights = HighlightEditor()
+        self._highlights = mark(HighlightEditor(), Target.HIGHLIGHT_RULES)
         page.addWidget(self._highlights)
 
     def _build_plot(self, page: QVBoxLayout) -> None:

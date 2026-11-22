@@ -64,10 +64,10 @@ from app.constants import (
     WINDOWS_INSTALLER_MUTEX,
 )
 from app.licenses import ENCODING, SYSTEM_LICENSE_SUFFIX, SYSTEM_LICENSES_DIR
+from app.privacy_policy import POLICY_FILENAME, PolicyError, parse_policy, to_plain_text
 from tools import collect_licenses
 from updater.install import UPDATE_CHECK_OPTION, system_name
 from updater.manifest import ManifestError, decode_public_key
-from updater.privacy import PRIVACY_STATEMENT
 from version import (
     APP_AUTHOR,
     APP_DESCRIPTION,
@@ -91,12 +91,13 @@ _COMPILED_NAMES = {"windows": "main.exe", "linux": "main.bin"}
 _EXECUTABLE_NAMES = {"windows": f"{APP_NAME}.exe", "linux": APP_NAME.lower()}
 
 #: Files of the repository that go beside the program.
-_ROOT_DOCUMENTS = ("LICENSE", "NOTICE")
+_ROOT_DOCUMENTS = ("LICENSE", "NOTICE", POLICY_FILENAME)
 
 #: What the program reads at run time, relative to its folder. A glob
 #: must match at least one file.
 _REQUIRED_FILES = (
     "LICENSE",
+    POLICY_FILENAME,
     "resources/help/user_guide.html",
     "resources/help/images/*.png",
     "resources/icons/*.svg",
@@ -728,14 +729,17 @@ def installer_definitions(privacy_file: Path, output_dir: Path) -> dict[str, str
 
 
 def write_privacy_statement(path: Path) -> None:
-    """The privacy statement the installer shows, as a text file.
+    """The privacy policy the installer shows, as a plain text file made
+    from ``PRIVACY.md`` (``app/privacy_policy.py``).
 
     Raises:
-        BuildError: it holds a character the installer cannot show.
+        BuildError: the policy cannot be read or taken.
     """
-    if not PRIVACY_STATEMENT.isascii():
-        raise BuildError("the privacy statement must be plain ASCII for the installer")
-    path.write_text(PRIVACY_STATEMENT, encoding="ascii", newline="\r\n")
+    try:
+        text = to_plain_text(parse_policy((PROJECT_ROOT / POLICY_FILENAME).read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError, PolicyError) as exc:
+        raise BuildError(f"the privacy policy cannot be shown by the installer: {exc}") from exc
+    path.write_text(text, encoding="ascii", newline="\r\n")
 
 
 def package_windows() -> list[Path]:

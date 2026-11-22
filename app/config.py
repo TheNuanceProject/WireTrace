@@ -15,10 +15,12 @@ import configparser
 import io
 import logging
 import os
+import re
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from app._atomic import atomic_write_text
+from app._atomic import atomic_write_bytes, atomic_write_text
 from app.constants import (
     ALERT_PAUSE_SECONDS_DEFAULT,
     ALERT_PAUSE_SECONDS_MAX,
@@ -54,6 +56,9 @@ from app.constants import (
     MAX_CONSOLE_LINES_MIN,
     PREFERENCES_FILENAME,
     RECONNECT_LIMIT_MINUTES_MAX,
+    SETTINGS_COPIES_KEPT,
+    SETTINGS_COPY_PREFIX,
+    SETTINGS_COPY_SUFFIX,
     SETTINGS_VERSION,
     SETTINGS_VERSION_UNVERSIONED,
     SHARED_FILE_LOCK_SUFFIX,
@@ -69,8 +74,10 @@ from app.constants import (
     TimestampMode,
     get_config_dir,
     get_default_log_dir,
+    get_settings_copy_dir,
     timestamp_mode_of,
 )
+from app.diagnostic_log import described
 from app.file_lock import held_lock
 from app.modules import SECTION as MODULES_SECTION
 from app.modules import module_defaults
@@ -141,10 +148,26 @@ _DEFAULTS = {
         # server named at the previous check. See updater/update_manager.py.
         "skipped_version": "",
         "snoozed_until": "",
+        # Since when update checks have failed, with none answered in
+        # between, in UTC; empty while they are answered.
+        "failing_since": "",
         "last_check_day": "",
+        # The version and day of the previous counted check, the last day
+        # of a check whose version was not kept, and the version change
+        # not yet answered, with its one-time number. See
+        # updater/version_change.py.
+        "last_check_version": "",
+        "unknown_until": "",
+        "change": "",
         # When the newest update manifest accepted was signed. One signed
         # earlier is refused. See updater/update_manager.py.
         "newest_manifest_signed_at": "",
+    },
+    "Tour": {
+        # The version that last offered the tour at start, and the
+        # chapters taken, by id. See ui/tour/.
+        "offered_version": "",
+        "chapters_taken": "",
     },
     "Privacy": {
         # Whether usage statistics are shared (off unless the user
@@ -199,7 +222,8 @@ _DEFAULTS = {
 
 
 #: Values that are the user's own data, not settings. Restoring the
-#: defaults leaves them as they are.
+#: defaults leaves them as they are, and so does putting back the settings
+#: kept from before an update (``ConfigManager.put_back``).
 _KEPT_ON_RESET: tuple[tuple[str, str], ...] = (
     ("Plot", "profiles_json"),
     ("Highlights", "rules_json"),
@@ -212,6 +236,14 @@ _KEPT_ON_RESET: tuple[tuple[str, str], ...] = (
     # So are the answers about usage statistics.
     *(("Privacy", key) for key in _DEFAULTS["Privacy"]),
     *(("WindowState", key) for key in _DEFAULTS["WindowState"]),
+    # What the tour has offered and what has been taken of it.
+    *(("Tour", key) for key in _DEFAULTS["Tour"]),
+)
+
+
+#: The name of a settings copy: the version that made it is the group.
+_COPY_NAME = re.compile(
+    rf"{re.escape(SETTINGS_COPY_PREFIX)}(\d+)\.(\d+)\.(\d+){re.escape(SETTINGS_COPY_SUFFIX)}"
 )
 
 
@@ -343,7 +375,36 @@ class ConfigManager:
             return True
         except OSError as e:
             # LockTimeout is an OSError: another window held the file too long.
-            logger.error("Failed to save configuration: %s", e)
+            logger.error("Failed to save configuration: %s", described(e))
+            return False
+
+    def change_shared(self, section: str, change: Callable[[dict[str, str]], dict[str, str]]) -> bool:
+        """Change settings of ``section`` that every WireTrace window must
+        agree on, from what the file holds now.
+
+        While the file's lock is held, the file is read again with the
+        settings changed here set on it, as ``save`` does; ``change`` is
+        given ``section`` as that holds it and returns the settings to set;
+        and the result is written atomically. So two windows doing this at
+        once each see what the other wrote. Returns False, with nothing
+        written, when the file cannot be locked or written.
+        """
+        try:
+            os.makedirs(self._config_dir, exist_ok=True)
+            with held_lock(self._lock_path, SHARED_FILE_LOCK_TIMEOUT_S):
+                merged = self._merged_with_file()
+                if not merged.has_section(section):
+                    merged.add_section(section)
+                for key, value in change(dict(merged.items(section))).items():
+                    merged.set(section, key, value)
+                buffer = io.StringIO()
+                merged.write(buffer)
+                atomic_write_text(self._config_path, buffer.getvalue(), encoding="utf-8")
+            self._config = merged
+            self._changed.clear()
+            return True
+        except OSError as e:
+            logger.error("Failed to save configuration: %s", described(e))
             return False
 
     def _merged_with_file(self) -> configparser.ConfigParser:
@@ -355,7 +416,7 @@ class ConfigManager:
             if not on_disk.read(self._config_path, encoding="utf-8"):
                 return self._config
         except (configparser.Error, OSError, UnicodeDecodeError) as e:
-            logger.warning("Preferences file unreadable (%s); writing the settings held here", e)
+            logger.warning("Preferences file unreadable (%s); writing the settings held here", described(e))
             return self._config
         for section, key in self._changed:
             if self._config.has_option(section, key):
@@ -369,6 +430,99 @@ class ConfigManager:
                 if not on_disk.has_option(section, key):
                     on_disk.set(section, key, value)
         return on_disk
+
+    # ── Settings kept from before an update ──────────────────────────────
+
+    def _copies_folder(self) -> str:
+        return get_settings_copy_dir(self._config_dir)
+
+    def copy_path(self, version: str) -> str:
+        """Where the settings copy made by ``version`` is kept."""
+        return os.path.join(
+            self._copies_folder(), f"{SETTINGS_COPY_PREFIX}{version}{SETTINGS_COPY_SUFFIX}",
+        )
+
+    def has_copy(self, version: str) -> bool:
+        """Whether a settings copy made by ``version`` is kept."""
+        return os.path.isfile(self.copy_path(version))
+
+    def keep_copy(self, version: str) -> None:
+        """Copy the preferences file, as it is now, as made by ``version``.
+
+        Called before an update, once the settings are saved, so that a
+        return to ``version`` can put them back. The copy is readable and
+        writable by its owner only, as the file is. Only the copies of the
+        newest ``SETTINGS_COPIES_KEPT`` versions are kept.
+
+        Raises:
+            OSError: the file cannot be read or locked, or the copy written.
+        """
+        with (
+            held_lock(self._lock_path, SHARED_FILE_LOCK_TIMEOUT_S),
+            open(self._config_path, "rb") as source,
+        ):
+            data = source.read()
+        target = self.copy_path(version)
+        os.makedirs(self._copies_folder(), exist_ok=True)
+        atomic_write_bytes(target, data)
+        logger.info("Settings kept from before the update, as %s", target)
+        self._remove_older_copies()
+
+    def _remove_older_copies(self) -> None:
+        """Remove the copies of all but the newest ``SETTINGS_COPIES_KEPT``
+        versions. A file in the folder not named as a copy is left alone."""
+        folder = self._copies_folder()
+        copies = []
+        for name in os.listdir(folder):
+            match = _COPY_NAME.fullmatch(name)
+            if match is not None:
+                copies.append((tuple(int(part) for part in match.groups()), name))
+        for _, name in sorted(copies, reverse=True)[SETTINGS_COPIES_KEPT:]:
+            try:
+                os.remove(os.path.join(folder, name))
+            except OSError as e:
+                logger.warning("An older settings copy was left in place (%s): %s", name, described(e))
+
+    def put_back(self, version: str) -> bool:
+        """Put back the settings kept from before the update that
+        ``version`` made, before a return to ``version``.
+
+        What is the user's own data, not a setting (``_KEPT_ON_RESET``:
+        saved plot profiles, commands and highlights, remembered ports,
+        the choices about update checks and usage statistics, what is
+        remembered about updates), keeps its value as the file holds it
+        now: it may have been added to since. Everything else is as it
+        was in the copy.
+
+        Returns:
+            True if the settings were put back; False, with nothing
+            changed, when no copy made by ``version`` is kept or it
+            cannot be read as preferences.
+
+        Raises:
+            OSError: the file cannot be locked or written.
+        """
+        restored = _new_parser()
+        try:
+            if not restored.read(self.copy_path(version), encoding="utf-8"):
+                return False
+        except (configparser.Error, UnicodeDecodeError) as e:
+            logger.warning("The settings kept from before the update cannot be read: %s", described(e))
+            return False
+        with held_lock(self._lock_path, SHARED_FILE_LOCK_TIMEOUT_S):
+            current = self._merged_with_file()
+            for section, key in _KEPT_ON_RESET:
+                if current.has_option(section, key):
+                    if not restored.has_section(section):
+                        restored.add_section(section)
+                    restored.set(section, key, current.get(section, key))
+            buffer = io.StringIO()
+            restored.write(buffer)
+            atomic_write_text(self._config_path, buffer.getvalue(), encoding="utf-8")
+        self._config = restored
+        self._changed.clear()
+        logger.info("Settings from before the update put back, from %s", self.copy_path(version))
+        return True
 
     def reset_to_defaults(self) -> None:
         """Return every setting to its default.
@@ -646,6 +800,25 @@ class ConfigManager:
         self.set("Privacy", "usage_question_answered", str(value).lower())
 
     @property
+    def tour_offered_version(self) -> str:
+        """The version that last offered the tour at start, or ""."""
+        return self.get("Tour", "offered_version", fallback="")
+
+    @tour_offered_version.setter
+    def tour_offered_version(self, value: str) -> None:
+        self.set("Tour", "offered_version", value)
+
+    @property
+    def tour_chapters_taken(self) -> tuple[str, ...]:
+        """The chapters of the tour taken, by id."""
+        raw = self.get("Tour", "chapters_taken", fallback="")
+        return tuple(part for part in raw.split(",") if part)
+
+    @tour_chapters_taken.setter
+    def tour_chapters_taken(self, value: tuple[str, ...]) -> None:
+        self.set("Tour", "chapters_taken", ",".join(value))
+
+    @property
     def installer_choice_read(self) -> bool:
         """Whether the choice made in the Windows installer has been taken over."""
         return self.get_bool("Updates", "installer_choice_read", fallback=False)
@@ -676,6 +849,25 @@ class ConfigManager:
     @update_snoozed_until.setter
     def update_snoozed_until(self, value: datetime | None) -> None:
         self.set("Updates", "snoozed_until", "" if value is None else value.isoformat())
+
+    @property
+    def update_failing_since(self) -> datetime | None:
+        """Since when update checks have failed, with none answered in
+        between, in UTC, or None."""
+        stored = self.get("Updates", "failing_since", fallback="")
+        try:
+            moment = datetime.fromisoformat(stored)
+        except ValueError:
+            return None
+        return moment if moment.tzinfo is not None else None
+
+    @update_failing_since.setter
+    def update_failing_since(self, value: datetime | None) -> None:
+        self.set("Updates", "failing_since", "" if value is None else value.isoformat())
+
+    def updates_section(self) -> dict[str, str]:
+        """The ``Updates`` settings as this window holds them."""
+        return dict(self._config.items("Updates")) if self._config.has_section("Updates") else {}
 
     @property
     def update_last_check_day(self) -> str:
@@ -842,7 +1034,7 @@ class ConfigManager:
             self._apply_defaults()
             logger.info("Preferences loaded from %s", self._config_path)
         except (configparser.Error, OSError, UnicodeDecodeError) as e:
-            logger.warning("Failed to parse preferences file (%s). Resetting to defaults", e)
+            logger.warning("Failed to parse preferences file (%s). Resetting to defaults", described(e))
             self._config = _new_parser()
             self._apply_defaults()
 

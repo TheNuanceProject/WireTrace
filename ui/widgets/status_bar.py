@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The status bar of a tab: connection, input lines, line rate, line count and log state."""
+"""The status bar of a tab: connection, input lines, line rate, line count
+and log state; and, at its right, a newer release to update to, or since
+when updates have not been checked."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPainter, QPaintEvent
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QWidget
 
@@ -12,8 +14,10 @@ from core.log_writer import LogProgress
 from core.serial_settings import LineStates
 from ui.formatting import format_count, format_duration, format_size, input_line_texts
 from ui.themes import tokens
+from ui.tour.targets import Target, mark
+from ui.widgets.button import Button
 from ui.widgets.status_dot import LinkState, StatusDot
-from ui.widgets.styling import SECONDARY, plain_label, plain_tooltip, set_state
+from ui.widgets.styling import ACCENT, QUIET, SECONDARY, plain_label, plain_tooltip, set_state
 
 #: Received bytes are read as this encoding.
 _ENCODING = "UTF-8"
@@ -62,11 +66,20 @@ class ElidedLabel(QLabel):
 
 
 class DeviceStatusBar(QFrame):
-    """Per-tab status bar."""
+    """Per-tab status bar.
+
+    Signals:
+        update_requested():  "Update to ..." was pressed.
+        check_requested():   "Check now" was pressed.
+    """
+
+    update_requested = Signal()
+    check_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("deviceStatusBar")
+        mark(self, Target.STATUS_BAR)
         metrics = tokens.METRICS
         self.setFixedHeight(metrics.status_height)
 
@@ -74,13 +87,24 @@ class DeviceStatusBar(QFrame):
         self._dot = StatusDot()
         self._connection = plain_label()
         self._detail = self._secondary_label()
-        self._input_lines = [self._secondary_label(name) for name, _ in input_line_texts(None)]
+        self._input_lines = [
+            mark(self._secondary_label(name), Target.INPUT_LINES) for name, _ in input_line_texts(None)
+        ]
         self._inputs_separator = self._separator()
         self._rate = self._secondary_label()
         self._lines = self._secondary_label()
         self._log = ElidedLabel()
         self._log.setProperty(SECONDARY, True)
+        mark(self._log, Target.LOG_STATE)
         self._encoding = self._secondary_label(_ENCODING)
+        self._update_separator = self._separator()
+        self._update = self._quiet_button(accent=True)
+        self._update.clicked.connect(self.update_requested)
+        self._failing_separator = self._separator()
+        self._failing = self._secondary_label()
+        self._check_now = self._quiet_button("Check now")
+        self._check_now.setToolTip("Check for updates now")
+        self._check_now.clicked.connect(self.check_requested)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(metrics.space_3, 0, metrics.space_3, 0)
@@ -97,12 +121,20 @@ class DeviceStatusBar(QFrame):
         layout.addWidget(self._separator())
         layout.addWidget(self._log, 1)
         layout.addWidget(self._encoding)
+        for widget in (
+            self._update_separator, self._update,
+            self._failing_separator, self._failing, self._check_now,
+        ):
+            layout.addWidget(widget)
 
+        self._offered: str | None = None
+        self._failing_since: str | None = None
         self.set_idle()
         self.set_line_states(None)
         self.set_not_logging()
         self.set_data_rate(0)
         self.set_total_lines(0)
+        self._show_updates()
 
     # ── Connection ───────────────────────────────────────────────────────
 
@@ -181,6 +213,38 @@ class DeviceStatusBar(QFrame):
         self._log.setText(FIELD_SEPARATOR.join(parts))
         self._dot.set_state(LinkState.LOGGING)
 
+    # ── Updates ──────────────────────────────────────────────────────────
+
+    def set_update_offer(self, version: str | None) -> None:
+        """Offer the newer release ``version``, until it is None."""
+        self._offered = version
+        self._show_updates()
+
+    def set_checks_failing(self, since: str | None) -> None:
+        """Say that updates have not been checked since the day ``since``,
+        until it is None. Not shown while a release is offered, which is
+        already the way forward."""
+        self._failing_since = since
+        self._show_updates()
+
+    def update_texts(self) -> list[str]:
+        """What the update part of the bar shows, left to right."""
+        widgets = (self._update, self._failing, self._check_now)
+        return [widget.text() for widget in widgets if not widget.isHidden()]
+
+    def _show_updates(self) -> None:
+        offered = self._offered is not None
+        if offered:
+            self._update.setText(f"Update to {self._offered}")
+            self._update.setToolTip(f"See what is new in {self._offered} and update")
+        failing = not offered and self._failing_since is not None
+        if failing:
+            self._failing.setText(f"Updates not checked since {self._failing_since}")
+        for widget in (self._update_separator, self._update):
+            widget.setVisible(offered)
+        for widget in (self._failing_separator, self._failing, self._check_now):
+            widget.setVisible(failing)
+
     def texts(self) -> list[str]:
         """Every text the bar shows, left to right."""
         labels = (self._connection, self._detail, self._rate, self._lines, self._log, self._encoding)
@@ -204,6 +268,14 @@ class DeviceStatusBar(QFrame):
         label = plain_label(text)
         label.setProperty(SECONDARY, True)
         return label
+
+    @staticmethod
+    def _quiet_button(text: str = "", *, accent: bool = False) -> Button:
+        button = Button(text, compact=True)
+        set_state(button, QUIET, True)
+        if accent:
+            set_state(button, ACCENT, True)
+        return button
 
     @staticmethod
     def _separator() -> QFrame:

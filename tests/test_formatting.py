@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from ui.formatting import (
@@ -10,6 +12,7 @@ from ui.formatting import (
     format_change,
     format_count,
     format_duration,
+    format_short_day,
     format_size,
     format_value,
 )
@@ -120,3 +123,15 @@ def test_files_written_are_described_in_a_few_words(
     text: list[str], csv: list[str], expected: str,
 ) -> None:
     assert describe_files(text, csv) == expected
+
+
+@pytest.mark.parametrize(
+    ("moment", "expected"),
+    [
+        (datetime(2026, 11, 15, 23, 59), "15 Nov"),
+        (datetime(2027, 1, 1), "1 Jan"),
+        (datetime(2026, 5, 9), "9 May"),
+    ],
+)
+def test_a_short_day_names_the_day_and_month_whatever_the_locale(moment: datetime, expected: str) -> None:
+    assert format_short_day(moment) == expected

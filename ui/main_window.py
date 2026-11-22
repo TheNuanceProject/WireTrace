@@ -16,8 +16,9 @@ This module does not touch serial I/O or log files.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
@@ -56,7 +57,10 @@ from app.constants import (
     UPDATE_SNOOZE_HOURS,
     USAGE_QUESTION_MAX_SHOWINGS,
     DisplayMode,
+    get_diagnostic_log_dir,
 )
+from app.diagnostic_log import DiagnosticLog, described, diagnostic_summary
+from app.system_motion import reduced_motion
 from core.device_pipeline import TransportFactory
 from core.port_identity import PortLister, read_identities
 from core.transport import open_serial_transport
@@ -64,30 +68,55 @@ from ui import shortcuts
 from ui.alert_notifier import AlertNotifier
 from ui.device_tab import NEW_TAB_TITLE, DeviceTab
 from ui.dialogs.messages import confirm, tell
-from ui.formatting import format_count
+from ui.formatting import format_count, format_short_day
 from ui.themes import tokens
 from ui.themes.icons import bind_icon
 from ui.themes.theme_manager import ThemeManager, normalise_preference
+from ui.tour.chapters import CHAPTERS, Chapter, line_order, whats_new
+from ui.tour.overlay import CardAction, TourOverlay
+from ui.tour.targets import Target, mark
+from ui.tour.tour import Tour
+from ui.tour.tour_dialog import TourDialog
 from ui.widgets import banner as banners
 from ui.widgets.banner import BannerAction, BannerArea
 from ui.widgets.button import Button
 from ui.widgets.command_bar import LINE_ENDING_NAMES
 from ui.widgets.least_size import keep_least_size
-from ui.widgets.status_dot import state_icon
+from ui.widgets.status_dot import LinkState, state_icon
 from ui.widgets.styling import plain_tooltip, set_compact
 from ui.widgets.toast import Toast
 from ui.window_geometry import visible_geometry
-from updater.install import UpdateApplyError, launch_update, prepare_update
-from updater.manifest import PlatformRelease, ReleaseManifest
+from updater.install import UpdateApplyError, installation_lines, launch_update, prepare_update
+from updater.manifest import PlatformRelease, Release, ReleaseManifest
+from updater.return_dialog import ReturnDialog
 from updater.update_dialog import UpdateAnswer, UpdateDialog
 from updater.update_manager import UpdateManager
 from updater.usage import Feature, Problem, UsageStatistics
-from version import APP_ISSUES_URL, APP_NAME, APP_PRIVACY_URL, APP_VERSION, WINDOW_TITLE
+from version import (
+    APP_ISSUES_URL,
+    APP_NAME,
+    APP_PRIVACY_URL,
+    APP_VERSION,
+    LATEST_RELEASE_URL,
+    RELEASES_URL,
+    WINDOW_TITLE,
+)
+
+if TYPE_CHECKING:
+    from ui.dialogs.preferences_dialog import PreferencesDialog
 
 logger = logging.getLogger(__name__)
 
 #: The key of the bar that asks about usage statistics.
 _BANNER_USAGE = "usage"
+
+#: How the diagnostic summary names the state of an open port.
+_LINK_WORDS = {
+    LinkState.CONNECTED: "connected",
+    LinkState.LOGGING: "connected and logging",
+    LinkState.WAITING: "waiting for the board to return",
+}
+
 #: What a tab's tooltip adds while it has an alert not yet seen.
 _NEW_ALERT = "New alert"
 
@@ -111,6 +140,7 @@ class TabBar(QTabBar):
         self._add.setObjectName("flatIconButton")
         self._add.setToolTip(shortcuts.with_keys("New tab", "new_tab"))
         self._add.setAccessibleName("New tab")
+        mark(self._add, Target.NEW_TAB)
         bind_icon(self._add, "add_tab", "text_secondary")
         self._add.clicked.connect(self.new_tab_requested)
 
@@ -245,6 +275,7 @@ class MainWindow(QMainWindow):
         transport_factory: TransportFactory = open_serial_transport,
         updates: UpdateManager | None = None,
         usage: UsageStatistics | None = None,
+        diagnostics: DiagnosticLog | None = None,
         read_ports: PortLister = read_identities,
     ) -> None:
         super().__init__(parent)
@@ -264,7 +295,18 @@ class MainWindow(QMainWindow):
             lambda: self._notify(Toast.success, f"{APP_NAME} {APP_VERSION} is the latest version")
         )
         self._updates.check_failed.connect(self._on_update_check_failed)
+        self._updates.offer_changed.connect(lambda _offer: self._show_update_state())
+        self._updates.checks_failing_changed.connect(lambda _since: self._show_update_state())
+        self._updates.returnable_changed.connect(self._name_return)
+        self._updates.return_found.connect(self._offer_return)
+        self._updates.return_not_found.connect(self._on_return_not_found)
         self._usage = usage if usage is not None else UsageStatistics(config, self)
+        #: This run's diagnostic log; None when it is not kept (in tests).
+        self._diagnostics = diagnostics
+        #: The tour under way, and what to do once it ends.
+        self._tour: Tour | None = None
+        self._after_tour: Callable[[], None] | None = None
+        self._offer: TourOverlay | None = None
         self._exit_confirmed = False
 
         self.setWindowTitle(WINDOW_TITLE)
@@ -313,6 +355,14 @@ class MainWindow(QMainWindow):
     def current_tab(self) -> DeviceTab | None:
         return self._tabs.currentWidget()
 
+    def tab_index(self, tab: DeviceTab) -> int:
+        """Where ``tab`` is on the tab bar, or -1."""
+        return self._tabs.indexOf(tab)
+
+    def show_tab(self, tab: DeviceTab) -> None:
+        """Bring ``tab`` to the front."""
+        self._tabs.setCurrentWidget(tab)
+
     def _show_alerting_tab(self, tab: DeviceTab | None) -> None:
         """Bring the window forward, at ``tab`` if it is still open."""
         if self.isMinimized():
@@ -322,11 +372,15 @@ class MainWindow(QMainWindow):
         if tab is not None and self._tabs.indexOf(tab) >= 0:
             self._tabs.setCurrentWidget(tab)
 
-    def new_tab(self) -> DeviceTab:
-        """Open a tab on its first screen and bring it to the front."""
+    def new_tab(self, *, sample: bool = False) -> DeviceTab:
+        """Open a tab on its first screen and bring it to the front.
+
+        A ``sample`` tab reads the tour's built-in sample board; nothing
+        done in it is counted in the usage statistics.
+        """
         tab = DeviceTab(
             self._theme_manager, self._config, self, self._transport_factory, self._read_ports,
-            self._alert_notifier,
+            self._alert_notifier, sample=sample,
         )
         for signal in (
             tab.title_changed,
@@ -342,15 +396,19 @@ class MainWindow(QMainWindow):
         ):
             signal.connect(lambda *_args, t=tab: self._on_tab_state_changed(t))
         tab.alerted.connect(lambda t=tab: self._mark_alerted(t))
-        tab.usage_noted.connect(self._note_usage)
-        tab.line_rate_measured.connect(self._usage.note_line_rate)
-        tab.connection_changed.connect(
-            lambda connected: self._usage.note_connection() if connected else None
-        )
+        if not sample:
+            tab.usage_noted.connect(self._note_usage)
+            tab.line_rate_measured.connect(self._usage.note_line_rate)
+            tab.connection_changed.connect(
+                lambda connected: self._usage.note_connection() if connected else None
+            )
+        tab.status_bar.update_requested.connect(self.check_for_updates)
+        tab.status_bar.check_requested.connect(self._check_now)
+        self._show_update_state(tab)
         index = self._tabs.addTab(tab, tab.title)
         self._show_tab_state(tab)
         self._tabs.setCurrentIndex(index)
-        if self._tabs.count() > 1:
+        if self._tabs.count() > 1 and not sample:
             self._usage.note_feature(Feature.TABS)
         return tab
 
@@ -494,7 +552,9 @@ class MainWindow(QMainWindow):
         self._setup_edit_menu(bar.addMenu("&Edit"))
         self._setup_view_menu(bar.addMenu("&View"))
         self._setup_device_menu(bar.addMenu("&Device"))
-        self._setup_help_menu(bar.addMenu("&Help"))
+        help_menu = bar.addMenu("&Help")
+        mark(help_menu.menuAction(), Target.MENU_HELP)
+        self._setup_help_menu(help_menu)
 
     def shortcut_actions(self) -> dict[str, QAction]:
         """The action behind each name in ``ui.shortcuts``."""
@@ -507,16 +567,18 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         self._act_start_log = add(menu, "Start log...", self._for_tab(DeviceTab.start_log), "start_log")
         self._act_stop_log = add(menu, "Stop log", self._for_tab(DeviceTab.stop_log))
-        self._act_log_folder = add(menu, "Open log folder", self._for_tab(DeviceTab.open_log_folder))
+        self._act_log_folder = mark(
+            add(menu, "Open log folder", self._for_tab(DeviceTab.open_log_folder)), Target.MENU_LOG_FOLDER,
+        )
         menu.addSeparator()
         self._act_export = add(
             menu, "Export session...", self._for_tab(DeviceTab.export_session), "export",
         )
         menu.addSeparator()
-        add(
+        mark(add(
             menu, "Preferences...", self._open_preferences, "preferences",
             role=QAction.MenuRole.PreferencesRole,
-        )
+        ), Target.MENU_PREFERENCES)
         menu.addSeparator()
         add(menu, "Exit", self.close, "quit", role=QAction.MenuRole.QuitRole)
 
@@ -549,7 +611,7 @@ class MainWindow(QMainWindow):
     def _setup_view_menu(self, menu: QMenu) -> None:
         add = self._add_action
         self._theme_actions = self._add_choices(
-            menu.addMenu("Theme"),
+            mark(menu.addMenu("Theme").menuAction(), Target.MENU_THEME).menu(),
             [(name, preference) for preference, name in self._theme_manager.available_preferences()],
             self._choose_theme,
         )
@@ -610,11 +672,13 @@ class MainWindow(QMainWindow):
         self._saved_menu.aboutToShow.connect(self._fill_saved_menu)
         self._fill_saved_menu()
         menu.addSeparator()
-        self._act_reconnect = add(menu, "Reconnect lost board", self._toggle_reconnect, checkable=True)
-        self._act_alerts = add(menu, "Alerts", self._toggle_alerts, checkable=True)
-        self._act_report = add(
-            menu, "Session report...", self._for_tab(DeviceTab.open_session_report),
+        self._act_reconnect = mark(
+            add(menu, "Reconnect lost board", self._toggle_reconnect, checkable=True), Target.MENU_RECONNECT,
         )
+        self._act_alerts = mark(add(menu, "Alerts", self._toggle_alerts, checkable=True), Target.MENU_ALERTS)
+        self._act_report = mark(add(
+            menu, "Session report...", self._for_tab(DeviceTab.open_session_report),
+        ), Target.MENU_SESSION_REPORT)
         add(menu, "Rename tab", self.rename_current_tab, "rename_tab")
 
     def _fill_saved_menu(self) -> None:
@@ -638,9 +702,18 @@ class MainWindow(QMainWindow):
         add = self._add_action
         add(menu, "User guide", self._open_user_guide, "user_guide")
         add(menu, "Keyboard shortcuts", self._show_shortcuts)
+        add(menu, "Take the tour...", self.open_tour_chapters)
+        news = whats_new(APP_VERSION)
+        if news is not None:
+            add(menu, news.title, lambda: self.start_tour((news,)))
         menu.addSeparator()
         self._act_update = add(menu, "Check for updates...", self.check_for_updates)
+        self._act_return = mark(add(menu, "", self.return_to_previous_version), Target.MENU_RETURN)
+        self._name_return(self._updates.returnable)
+        menu.addSeparator()
         add(menu, "Report a problem", self._report_problem)
+        mark(add(menu, "Open diagnostic logs", self._open_diagnostic_logs), Target.MENU_DIAGNOSTIC_LOGS)
+        add(menu, "Copy diagnostic summary", self._copy_diagnostic_summary)
         menu.addSeparator()
         add(menu, f"About {APP_NAME}", self._show_about, role=QAction.MenuRole.AboutRole)
 
@@ -790,15 +863,19 @@ class MainWindow(QMainWindow):
             tab.apply_preferences()
         self._sync_with_current_tab()
 
-    def _open_preferences(self) -> None:
+    def preferences_dialog(self) -> PreferencesDialog:
+        """The Preferences window, with the saved values, not yet shown."""
         from ui.dialogs.preferences_dialog import PreferencesDialog
 
-        dialog = PreferencesDialog(
+        return PreferencesDialog(
             self._config, self._theme_manager, self,
             open_plot_config=self._for_tab(DeviceTab.open_plot_config_dialog),
         )
+
+    def _open_preferences(self) -> None:
+        dialog = self.preferences_dialog()
         sharing = self._config.usage_statistics
-        saved = dialog.exec() == PreferencesDialog.DialogCode.Accepted
+        saved = dialog.exec() == dialog.DialogCode.Accepted
 
         # The dialog may have changed any of these, by Save or by
         # Restore defaults, which takes effect even if it is then cancelled.
@@ -809,6 +886,7 @@ class MainWindow(QMainWindow):
         self._act_hide_blank.setChecked(self._config.hide_blank_lines)
         self._apply_preferences_to_tabs()
         self._alert_notifier.apply_preferences()
+        self._updates.reconsider()
         if self._config.usage_statistics != sharing:
             self._usage.apply_setting()
         if saved:
@@ -858,6 +936,33 @@ class MainWindow(QMainWindow):
         if not QDesktopServices.openUrl(QUrl(APP_ISSUES_URL)):
             self._notify(Toast.warning, f"The page could not be opened: {APP_ISSUES_URL}")
 
+    def _diagnostic_log_dir(self) -> Path:
+        if self._diagnostics is not None:
+            return self._diagnostics.directory
+        return Path(get_diagnostic_log_dir())
+
+    def _open_diagnostic_logs(self) -> None:
+        """Open the folder of the diagnostic log in the system's file manager."""
+        folder = self._diagnostic_log_dir()
+        if not folder.is_dir():
+            self._notify(Toast.info, "No diagnostic log has been written yet")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            self._notify(Toast.warning, f"The folder could not be opened: {folder}")
+
+    def _copy_diagnostic_summary(self) -> None:
+        """Copy what a report needs: what this run is, the ports open, and
+        its latest warnings, errors and events."""
+        ports = [
+            f"{tab.port_name}, {tab.session.baud_rate} baud, {_LINK_WORDS[tab.link_state]}"
+            for tab in self.tabs() if tab.link_state is not LinkState.IDLE
+        ]
+        events, problems = self._diagnostics.recent() if self._diagnostics is not None else ([], [])
+        QGuiApplication.clipboard().setText(diagnostic_summary(
+            installation_lines(), ports, self._diagnostic_log_dir(), events, problems,
+        ))
+        self._notify(Toast.success, "Diagnostic summary copied, ready to paste into a report")
+
     def _show_about(self) -> None:
         from ui.dialogs.about_dialog import AboutDialog
 
@@ -874,6 +979,94 @@ class MainWindow(QMainWindow):
             self._usage.note_feature(item)
         elif isinstance(item, Problem):
             self._usage.note_problem(item)
+
+    # ── The tour ─────────────────────────────────────────────────────────
+
+    def offer_tour(self, then: Callable[[], None]) -> None:
+        """Offer the tour once, at start: to everyone the first time a
+        version with the tour starts, and after that the chapter of what
+        is new, when a version has one. ``then`` runs once the offer has
+        been answered, or at once when there is none to make."""
+        config = self._config
+        offered = config.tour_offered_version
+        news = whats_new(APP_VERSION)
+        # Offered once per release line, and only by a later line than the
+        # one last offered: a release that only fixes offers nothing again,
+        # nor does an earlier version returned to.
+        if offered and (line_order(offered) >= line_order(APP_VERSION) or news is None):
+            then()
+            return
+        config.tour_offered_version = APP_VERSION
+        config.save()
+        self._after_tour = then
+        if offered and news is not None:
+            title, text = news.title, news.summary
+            actions = [
+                CardAction("Not now", self._end_offer, leading=True),
+                CardAction("Show me", lambda: self._take_from_offer((news,)), primary=True),
+            ]
+        else:
+            title = f"Welcome to {APP_NAME}" if config.first_run else f"{APP_NAME} now has a tour"
+            text = "See what each part does, on a sample board built in. The tour is in Help at any time."
+            actions = [
+                CardAction("Not now", self._end_offer, leading=True),
+                CardAction("Choose a chapter", self._choose_from_offer),
+                CardAction("Start the tour", lambda: self._take_from_offer(CHAPTERS), primary=True),
+            ]
+        self._offer = TourOverlay(self, reduced_motion())
+        self._offer.close_requested.connect(self._end_offer)
+        self._offer.show_step(title, text, "", actions, lambda: None)
+
+    def _close_offer(self) -> None:
+        if self._offer is not None:
+            self._offer.close_overlay()
+            self._offer = None
+
+    def _end_offer(self) -> None:
+        self._close_offer()
+        self._run_after_tour()
+
+    def _take_from_offer(self, chapters: tuple[Chapter, ...]) -> None:
+        self._close_offer()
+        self._start(chapters)
+
+    def _choose_from_offer(self) -> None:
+        self._close_offer()
+        if not self.open_tour_chapters():
+            self._run_after_tour()
+
+    def open_tour_chapters(self) -> bool:
+        """Open the list of the tour's chapters. Returns whether one was chosen."""
+        listed = CHAPTERS + tuple(n for n in (whats_new(APP_VERSION),) if n is not None)
+        dialog = TourDialog(listed, CHAPTERS, self._config.tour_chapters_taken, self)
+        chosen: list[tuple[Chapter, ...]] = []
+        dialog.chosen.connect(chosen.append)
+        dialog.exec()
+        if chosen:
+            self._start(chosen[0])
+        return bool(chosen)
+
+    def start_tour(self, chapters: Sequence[Chapter]) -> None:
+        """Take ``chapters`` of the tour."""
+        self._start(tuple(chapters))
+
+    def _start(self, chapters: tuple[Chapter, ...]) -> None:
+        if self._tour is not None:
+            self._tour.stop()
+        self._tour = Tour(self, self._config, chapters)
+        self._tour.finished.connect(self._on_tour_finished)
+        self._tour.start()
+
+    def _on_tour_finished(self) -> None:
+        tour, self._tour = self._tour, None
+        if tour is not None:
+            tour.deleteLater()
+        self._run_after_tour()
+
+    def _run_after_tour(self) -> None:
+        then, self._after_tour = self._after_tour, None
+        if then is not None:
+            then()
 
     def ask_about_usage_statistics(self) -> None:
         """Ask, once, whether usage statistics may be shared.
@@ -928,8 +1121,21 @@ class MainWindow(QMainWindow):
         if found is not None:
             self._offer_update(found)
             return
+        self._check_now()
+
+    def _check_now(self) -> None:
         self._notify(Toast.info, "Checking for updates")
         self._updates.check_now()
+
+    def _show_update_state(self, tab: DeviceTab | None = None) -> None:
+        """Show, in the status bar of ``tab`` or of every tab, the release
+        to update to, or since when updates have not been checked."""
+        offer = self._updates.offer
+        since = self._updates.checks_failing_since
+        day = None if since is None else format_short_day(since.astimezone())
+        for each in (tab,) if tab is not None else self.tabs():
+            each.status_bar.set_update_offer(None if offer is None else offer.version)
+            each.status_bar.set_checks_failing(day)
 
     def _on_update_available(self, manifest: ReleaseManifest, asked: bool) -> None:
         """Offer a newer release.
@@ -964,11 +1170,45 @@ class MainWindow(QMainWindow):
             )
 
     def _on_update_check_failed(self, reason: str) -> None:
-        self._notify(Toast.error, f"The update check failed: {reason}")
+        """``reason`` says what happened and what to do; the release page
+        is the way out."""
+        self._notify(Toast.error, reason, "Open the release page", self._open_latest_release)
+
+    def _open_latest_release(self) -> None:
+        if not QDesktopServices.openUrl(QUrl(LATEST_RELEASE_URL)):
+            self._notify(Toast.warning, f"The page could not be opened: {LATEST_RELEASE_URL}")
 
     def install_update(self, installer: Path, release: PlatformRelease) -> None:
         """Install a verified download and close. ``release`` is what the
         signed manifest says the download must be.
+
+        Once the settings are saved on closing, a copy of them is kept for
+        a return to this version (``ConfigManager.keep_copy``). The update
+        goes ahead without one if it cannot be made.
+        """
+        self._install(
+            installer, release, "Update", "The update", after_closing=self._keep_settings_copy,
+        )
+
+    def _keep_settings_copy(self) -> None:
+        try:
+            self._config.keep_copy(APP_VERSION)
+        except OSError as exc:
+            logger.warning("The settings could not be kept before the update: %s", described(exc))
+
+    def _install(
+        self,
+        installer: Path,
+        release: PlatformRelease,
+        title: str,
+        what: str,
+        *,
+        before_closing: Callable[[], None] | None = None,
+        after_closing: Callable[[], None] | None = None,
+    ) -> None:
+        """Install the verified ``installer`` of ``release``, an update or a
+        return, and close. ``what`` names it in what the user is told, and
+        ``title`` is the title of a message.
 
         The part that can fail is done while the window is still open.
         Sessions are then closed as on any exit, asking first if that
@@ -979,17 +1219,82 @@ class MainWindow(QMainWindow):
         try:
             prepare_update(installer, release)
         except UpdateApplyError as exc:
-            logger.error("The update could not be put in place: %s", exc)
-            self._notify(Toast.error, f"The update could not be installed: {exc}")
+            logger.error("%s could not be put in place: %s", what, described(exc))
+            self._notify(Toast.error, f"{what} could not be installed: {exc}")
             return
+        if before_closing is not None:
+            before_closing()
         self._exit_confirmed = True
         self.close()
+        if after_closing is not None:
+            after_closing()
         try:
             launch_update(installer, release)
         except UpdateApplyError as exc:
-            logger.error("The update could not be started: %s", exc)
-            tell(None, "Update", f"The update could not be started: {exc}\n\n{installer}")
+            logger.error("%s could not be started: %s", what, described(exc))
+            tell(None, title, f"{what} could not be started: {exc}\n\n{installer}")
         QApplication.quit()
+
+    # ── Returning to the previous version ────────────────────────────────
+
+    def _name_return(self, release: Release | None) -> None:
+        self._act_return.setText(
+            "Return to the previous version..." if release is None
+            else f"Return to version {release.version}..."
+        )
+
+    def return_to_previous_version(self) -> None:
+        """Offer the return to the release before this one, looking it up
+        first if it is not known."""
+        if self._updates.returnable is None:
+            self._notify(Toast.info, "Looking up the previous version")
+        self._updates.find_return()
+
+    def _offer_return(self, release: Release) -> None:
+        dialog = ReturnDialog(
+            release, self._config.has_copy(release.version), self._updates.opener, self,
+        )
+        dialog.return_requested.connect(
+            lambda installer, platform: self.install_return(installer, platform, release.version)
+        )
+        dialog.exec()
+
+    def _on_return_not_found(self, reason: str) -> None:
+        self._notify(Toast.error, reason, "Open the release list", self._open_release_list)
+
+    def _open_release_list(self) -> None:
+        if not QDesktopServices.openUrl(QUrl(RELEASES_URL)):
+            self._notify(Toast.warning, f"The page could not be opened: {RELEASES_URL}")
+
+    def install_return(self, installer: Path, release: PlatformRelease, version: str) -> None:
+        """Install the verified ``installer`` of ``version``, the release
+        before this one, and close.
+
+        The settings kept from before the update that ``version`` made are
+        put back first, while the window is open (``ConfigManager.put_back``);
+        saving on closing then writes only what changed after that. If
+        they cannot be put back, the user is told and the current settings
+        are kept: an earlier version reads them, keeping what it does not
+        know.
+        """
+        def put_back() -> None:
+            # The return window promised the settings of that version when
+            # a copy was kept; a copy that cannot be read is said as a copy
+            # that cannot be put in place is.
+            kept = self._config.has_copy(version)
+            try:
+                put = self._config.put_back(version)
+            except OSError as exc:
+                logger.error("The settings could not be put back: %s", described(exc))
+                put = False
+            if kept and not put:
+                tell(
+                    self, "Return",
+                    f"Your settings as they were in version {version} could not be put back, "
+                    "so the current ones are kept.",
+                )
+
+        self._install(installer, release, "Return", f"Version {version}", before_closing=put_back)
 
     # ── Window state ─────────────────────────────────────────────────────────
 
@@ -1058,6 +1363,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ask before closing would end a connection, a log or an export."""
+        if self._tour is not None:
+            self._tour.stop()
         if not self._exit_confirmed and not self._may_exit():
             event.ignore()
             return
@@ -1070,7 +1377,8 @@ class MainWindow(QMainWindow):
     def _may_exit(self) -> bool:
         """Whether the window may close: at once if nothing is running,
         otherwise only if the user agrees."""
-        tabs = self.tabs()
+        # The tour's sample board is no connection of the user's.
+        tabs = [tab for tab in self.tabs() if not tab.is_sample]
         connected = [tab.port_name for tab in tabs if tab.is_connected]
         logging_ports = [tab.port_name for tab in tabs if tab.is_logging]
         exporting = any(tab.is_exporting for tab in tabs)

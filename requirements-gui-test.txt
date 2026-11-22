@@ -8,5 +8,5 @@
 # CI installs EXACTLY this file for the GUI job. The headless logic
 # suite in tests/ keeps using requirements-test.txt and its Qt stubs.
 
--r requirements.txt       # PySide6, pyserial, pyqtgraph, numpy, regex, cryptography
+-r requirements.txt       # PySide6, pyserial, pyqtgraph, numpy, regex, cryptography, truststore
 -r requirements-dev.txt   # pytest, ruff

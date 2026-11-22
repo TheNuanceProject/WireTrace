@@ -162,11 +162,29 @@ class TestLimits:
         assert f"{stem}.log" in names and f"{stem}-2.log" in names
         for name in names:
             assert (tmp_path / "logs" / name).stat().st_size <= 600
+        # In the order the run wrote them: its first file, then each part.
         text = "".join(
             (tmp_path / "logs" / name).read_text(encoding="utf-8")
-            for name in sorted(names, key=lambda name: (tmp_path / "logs" / name).stat().st_mtime)
+            for name in sorted(names, key=lambda name: int(module._RUN_FILE.fullmatch(name)["part"] or 1))
         )
         assert [int(n) for n in re.findall(r"event (\d\d)", text)] == list(range(20))
+
+    def test_files_written_at_the_same_moment_go_in_the_order_they_were_written(self, tmp_path):
+        # The system's clock may move only every few milliseconds, so a
+        # run's files can carry the same time.
+        first = tmp_path / "wiretrace-20261101-080000-1.log"
+        second = tmp_path / "wiretrace-20261101-080000-1-2.log"
+        moment = time.time() - 3600
+        for path in (first, second):
+            path.write_bytes(b"x" * 400)
+            os.utime(path, (moment, moment))
+
+        run = module._RunFiles(tmp_path, f"wiretrace-20261121-000000-{os.getpid()}", lambda: 0, 400, 1000)
+        run.handle(logging.makeLogRecord({"msg": "event", "levelno": 20}))
+        run.close()
+
+        assert not first.exists()
+        assert second.exists()
 
     def test_the_oldest_files_go_while_the_folder_holds_more_than_its_total(self, log_at, tmp_path):
         folder = tmp_path / "logs"

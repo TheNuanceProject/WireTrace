@@ -91,6 +91,17 @@ def _hold(stream: int) -> None:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+def _age(modified: float, name: str) -> tuple[float, str, int]:
+    """The order in which files are removed, oldest first: by the time each
+    was last written, and among files written at the same time (the
+    system's clock may move only every few milliseconds), by run and then
+    by part, so a run's first file goes before its second."""
+    match = _RUN_FILE.fullmatch(name)
+    if match is None:
+        return (modified, name, 0)
+    return (modified, match.group("run"), int(match.group("part") or 1))
+
+
 def _being_written(path: Path) -> bool:
     """Whether another run holds ``path`` open to write it (``_hold``).
     Only the system's answer that the mark is held counts: any other
@@ -347,7 +358,7 @@ class _RunFiles:
                 stat = path.stat()
             except OSError:
                 continue
-            files.append((stat.st_mtime, path.name, stat.st_size, path))
+            files.append((_age(stat.st_mtime, path.name), path.name, stat.st_size, path))
         # Each other run's newest file, by run: its part and the file.
         newest: dict[str, tuple[int, Path]] = {}
         for _, name, _, path in files:

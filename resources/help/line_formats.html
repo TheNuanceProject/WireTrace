@@ -28,7 +28,7 @@
   <li>Text is read as UTF-8. A byte that is not valid UTF-8 is shown and logged as <code>\xNN</code>, so its value is kept.</li>
   <li>Tab is kept. Other control characters are shown and logged as escapes: a bell (byte 07) appears as <code>\x07</code>.</li>
   <li>ANSI escape codes (colours, cursor moves) are removed from what is shown, logged and exported. Their colours can be shown in the console: switch on <strong>ANSI colours</strong> on the Features page of Preferences. A line made only of escape codes, such as a clear-screen, is dropped.</li>
-  <li>A line longer than {{count:SERIAL_MAX_LINE_BYTES}} bytes is cut into pieces of that length.</li>
+  <li>A line longer than {{count:SERIAL_MAX_LINE_BYTES}} bytes is cut into pieces of that length, with one exception in this version: see <a href="#known-issues">Known issues</a>.</li>
 </ul>
 <p>Everything below reads a line after these steps, so a coloured ESP-IDF line is read like a plain one.</p>
 
@@ -90,7 +90,7 @@
 <p class="result">Plotted: temp, hum</p>
 <pre data-check="plot" data-expect="temp, hum">temp=22.4 hum=55</pre>
 <p class="result">Plotted: temp, hum</p>
-<p>A name is letters, digits, underscores and spaces, up to {{count:STRUCTURE_KEY_MAX_LENGTH}} characters, followed by <code>:</code> or <code>=</code>. The value is a number. Text right after the number is ignored, so <code>temp: 22.4C</code> plots 22.4. Anything else on the line is ignored.</p>
+<p>A name is letters, digits, underscores and spaces, up to {{count:STRUCTURE_KEY_MAX_LENGTH}} characters, followed by <code>:</code> or <code>=</code>. The value is a number. Text right after the number is ignored, so <code data-check="values" data-expect="temp = 22.4">temp: 22.4C</code> gives temp = 22.4. Anything else on the line is ignored.</p>
 
 <p><strong>3. Values only</strong></p>
 <pre data-check="plot" data-expect="ch0, ch1, ch2">22.4,55,1013</pre>
@@ -103,10 +103,11 @@
   <li>A name becomes a value when it is on at least {{percent:STRUCTURE_KEY_FREQUENCY_THRESHOLD}} of those lines, in the order the firmware prints them. Occasional lines without it are fine.</li>
   <li>For values only, the most common number of fields is used. A line with another number of fields, or with a field that is not a number, is not plotted. It is still shown and logged.</li>
   <li>At most {{count:PLOT_MAX_SERIES}} values are followed. Lines that carry more give the first {{count:PLOT_MAX_SERIES}}.</li>
+  <li>Only the first {{count:PLOT_MAX_LINE_CHARACTERS}} characters of a line are read for values.</li>
 </ul>
 
 <h3 id="plot-numbers">Numbers</h3>
-<p>Write a number with a point as the decimal separator, and an optional sign and exponent: <code>22</code>, <code>-3.5</code>, <code>1.2e-3</code>. Write a digit before the point: <code>0.5</code>, not <code>.5</code>. A decimal comma, as in <code>3,5</code>, is not read as a number.</p>
+<p>Write a number with a point as the decimal separator, and an optional sign and exponent: <code>22</code>, <code>-3.5</code>, <code>1.2e-3</code>. Write a digit before the point: <code>0.5</code>, not <code>.5</code>. A decimal comma ends the number: <code data-check="values" data-expect="temp = 3">temp: 3,5</code> gives temp = 3, and <code data-check="plot" data-expect="ch0, ch1">3,5</code> alone is two values, ch0 and ch1.</p>
 
 <h3 id="plt">Marking the reading lines: <code>plt:</code></h3>
 <p>When the firmware prints messages and readings, start each reading line with <code>plt:</code>:</p>
@@ -189,7 +190,7 @@ ESP_LOGE(TAG, "read failed: %d", err);</pre>
     <tr><td>One number alone on each line: <code data-check="plot" data-expect="none">23.3</code></td><td>Not plotted: values only needs two values on a line</td><td>Give it a name: <code data-check="plot" data-expect="temp">temp: 23.3</code></td></tr>
     <tr><td>Different values on alternating lines</td><td>Not plotted: each name is on only half of the lines</td><td>Print them on one line</td></tr>
     <tr><td>Several kinds of reading line, told apart by their number of fields</td><td>Only the most common number of fields is plotted</td><td>Mark one kind with <code>plt:</code></td></tr>
-    <tr><td>A decimal comma: <code>3,5</code></td><td>Not a number</td><td>Use a point: <code>3.5</code></td></tr>
+    <tr><td>A decimal comma: <code data-check="values" data-expect="temp = 3">temp: 3,5</code></td><td>Read as temp = 3: the comma ends the number</td><td>Use a point: <code data-check="values" data-expect="temp = 3.5">temp: 3.5</code>, which gives temp = 3.5</td></tr>
     <tr><td>Its own times</td><td>Points use the time each line arrived</td><td></td></tr>
   </tbody>
 </table>
@@ -201,4 +202,5 @@ hum: 53</pre>
 <p>Zephyr's default timestamp, as in the line below, is read as a name and a value, so the plot shows an extra value named 00 that is always 0. Untick it in the plot's value list, or print readings with <code>printk("plt: ...")</code> as in the <a href="#example-zephyr">Zephyr example</a>.</p>
 <pre data-check="plot" data-expect="00, temp, hum">[00:00:03.234,000] &lt;inf&gt; sensor: temp: 23 hum: 53</pre>
 <p class="result">Plotted: 00, temp, hum</p>
+<p>A line longer than {{count:SERIAL_MAX_LINE_BYTES}} bytes is kept whole, not cut, when all of it, its line ending included, arrives between two reads of the port.</p>
 <!-- /document -->

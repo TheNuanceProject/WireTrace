@@ -3,7 +3,7 @@
 
 Every example in ``resources/help/line_formats.html`` that a device
 could print carries ``data-check`` (what is checked: ``level``, ``plot``,
-``restart`` or ``csv``) and ``data-expect`` (the result the page states).
+``values``, ``restart`` or ``csv``) and ``data-expect`` (the result the page states).
 Each is fed here through the program's own code, the way a received line
 goes: framed, decoded, then given to the level detector, the restart
 detector, the plot's parsers or the CSV engine. A change of behaviour
@@ -26,7 +26,9 @@ from app.constants import (
     CSV_AUTODETECT_SAMPLE_SIZE,
     LEVEL_NAMES,
     PLOT_AUTODETECT_SAMPLE_SIZE,
+    PLOT_MAX_LINE_CHARACTERS,
     PLOT_MAX_SERIES,
+    STRUCTURE_MAX_LINE_CHARACTERS,
 )
 from app.help_loader import (
     LINE_FORMATS_FILENAME,
@@ -170,6 +172,16 @@ def _plot(lines: list[str]) -> str:
     return _NOTHING if columns is None else ", ".join(columns[:PLOT_MAX_SERIES])
 
 
+def _values(lines: list[str]) -> str:
+    """The values the plot takes from the last line, once it has found
+    its columns in lines like these."""
+    pipeline = ParserPipeline()
+    if pipeline.detect(_cycled(lines, PLOT_AUTODETECT_SAMPLE_SIZE)) is None:
+        return _NOTHING
+    values = pipeline.extract(lines[-1]) or {}
+    return ", ".join(f"{name} = {value:g}" for name, value in values.items()) or _NOTHING
+
+
 def _restart(lines: list[str]) -> str:
     detector = ResetDetector()
     reasons = [reason for line in lines if (reason := detector.check(line)) is not None]
@@ -184,7 +196,7 @@ def _csv(lines: list[str]) -> str:
     return engine.header
 
 
-_CHECKS = {"level": _level, "plot": _plot, "restart": _restart, "csv": _csv}
+_CHECKS = {"level": _level, "plot": _plot, "values": _values, "restart": _restart, "csv": _csv}
 
 
 # ── The tests ───────────────────────────────────────────────────────────────
@@ -216,6 +228,12 @@ def test_the_separators_are_tried_in_the_order_the_page_gives() -> None:
     # The page: "comma, tab, semicolon, bar (|), then spaces".
     assert DelimitedParser._DELIMITERS == (",", "\t", ";", "|")
     assert "comma, tab, semicolon, bar (<code>|</code>), then spaces" in DOCUMENT
+
+
+def test_csv_columns_read_as_much_of_a_line_as_the_plot() -> None:
+    # The page: CSV columns are "found as for the plot", and the plot reads
+    # the first PLOT_MAX_LINE_CHARACTERS characters of a line.
+    assert STRUCTURE_MAX_LINE_CHARACTERS == PLOT_MAX_LINE_CHARACTERS
 
 
 def test_every_link_inside_the_reference_leads_somewhere() -> None:

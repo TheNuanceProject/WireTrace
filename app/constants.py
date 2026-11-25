@@ -19,6 +19,8 @@ Constants are grouped by domain:
 
 import os
 import sys
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from enum import Enum, auto
 
 from ui.themes.design_tokens import FONT_FAMILIES as _FONT_FAMILIES
@@ -574,60 +576,87 @@ LEGACY_THEME_VALUES = {
 # ── Platform-Specific Paths ──────────────────────────────────────────────────
 
 
-def get_config_dir() -> str:
+@dataclass(frozen=True)
+class FolderSystem:
+    """How one operating system names a user's folders.
+
+    ``platform`` is the name ``sys.platform`` gives the system, ``join``
+    joins a path the way that system does, ``home`` is the user's home
+    folder, and ``environ`` holds the environment variables that move a
+    folder. The folder functions below take one, so the user guide can
+    state each system's folders with the same code that makes them.
+    """
+
+    platform: str
+    join: Callable[..., str]
+    home: str
+    environ: Mapping[str, str]
+
+
+def this_computer() -> FolderSystem:
+    """The system WireTrace is running on, read at the moment of the call."""
+    return FolderSystem(
+        platform=sys.platform,
+        join=os.path.join,
+        home=os.path.expanduser("~"),
+        environ=os.environ,
+    )
+
+
+def get_config_dir(system: FolderSystem | None = None) -> str:
     """Return platform-appropriate configuration directory path.
 
     Windows: %APPDATA%/WireTrace/Config/
     macOS:   ~/Library/Application Support/WireTrace/
     Linux:   ~/.config/WireTrace/
     """
-    if sys.platform == "win32":
-        return os.path.join(os.environ.get("APPDATA", ""), "WireTrace", "Config")
-    elif sys.platform == "darwin":
-        return os.path.join(os.path.expanduser("~"), "Library",
-                            "Application Support", "WireTrace")
-    else:
-        return os.path.join(os.path.expanduser("~"), ".config", "WireTrace")
+    s = system or this_computer()
+    if s.platform == "win32":
+        return s.join(s.environ.get("APPDATA", ""), "WireTrace", "Config")
+    if s.platform == "darwin":
+        return s.join(s.home, "Library", "Application Support", "WireTrace")
+    return s.join(s.home, ".config", "WireTrace")
 
 
-def get_cache_dir() -> str:
+def get_cache_dir(system: FolderSystem | None = None) -> str:
     """Return platform-appropriate directory for disposable working files.
 
     Windows: %LOCALAPPDATA%/WireTrace/Cache/
     macOS:   ~/Library/Caches/WireTrace/
     Linux:   $XDG_CACHE_HOME/WireTrace/ (default ~/.cache/WireTrace/)
     """
-    home = os.path.expanduser("~")
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
-        return os.path.join(base, "WireTrace", "Cache")
-    if sys.platform == "darwin":
-        return os.path.join(home, "Library", "Caches", "WireTrace")
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
-    return os.path.join(base, "WireTrace")
+    s = system or this_computer()
+    if s.platform == "win32":
+        base = s.environ.get("LOCALAPPDATA") or s.join(s.home, "AppData", "Local")
+        return s.join(base, "WireTrace", "Cache")
+    if s.platform == "darwin":
+        return s.join(s.home, "Library", "Caches", "WireTrace")
+    base = s.environ.get("XDG_CACHE_HOME") or s.join(s.home, ".cache")
+    return s.join(base, "WireTrace")
 
 
-def get_default_log_dir() -> str:
+def get_default_log_dir(system: FolderSystem | None = None) -> str:
     """Return the default log directory: ~/Documents/WireTrace/Logs on
     every platform."""
-    return os.path.join(os.path.expanduser("~"), "Documents", "WireTrace", "Logs")
+    s = system or this_computer()
+    return s.join(s.home, "Documents", "WireTrace", "Logs")
 
 
-def get_diagnostic_log_dir() -> str:
+def get_diagnostic_log_dir(system: FolderSystem | None = None) -> str:
     """Return the system's place for the application's diagnostic log.
 
     Windows: %LOCALAPPDATA%/WireTrace/Logs/
     macOS:   ~/Library/Logs/WireTrace/
     Linux:   $XDG_STATE_HOME/WireTrace/logs/ (default ~/.local/state/WireTrace/logs/)
     """
-    home = os.path.expanduser("~")
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
-        return os.path.join(base, "WireTrace", "Logs")
-    if sys.platform == "darwin":
-        return os.path.join(home, "Library", "Logs", "WireTrace")
-    base = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
-    return os.path.join(base, "WireTrace", "logs")
+    s = system or this_computer()
+    if s.platform == "win32":
+        base = s.environ.get("LOCALAPPDATA") or s.join(s.home, "AppData", "Local")
+        return s.join(base, "WireTrace", "Logs")
+    if s.platform == "darwin":
+        return s.join(s.home, "Library", "Logs", "WireTrace")
+    base = s.environ.get("XDG_STATE_HOME") or s.join(s.home, ".local", "state")
+    return s.join(base, "WireTrace", "logs")
 
 
 # ── Preferences File ─────────────────────────────────────────────────────────
@@ -783,10 +812,10 @@ SETTINGS_COPY_SUFFIX = ".ini"
 SETTINGS_COPIES_KEPT = 2
 
 
-def get_settings_copy_dir(config_dir: str) -> str:
+def get_settings_copy_dir(config_dir: str, system: FolderSystem | None = None) -> str:
     """The folder of the settings copies, beside the preferences file in
-    ``config_dir``."""
-    return os.path.join(config_dir, SETTINGS_COPY_DIRECTORY)
+    ``config_dir``, joined the way ``system`` joins a path."""
+    return (system or this_computer()).join(config_dir, SETTINGS_COPY_DIRECTORY)
 
 # The signed update manifest of the installed version, kept in the cache
 # folder from the last check that found it, so that the release before

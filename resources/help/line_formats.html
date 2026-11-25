@@ -1,0 +1,204 @@
+<!--
+  The line format reference: how WireTrace reads the lines a device
+  prints, for people writing firmware. A template, filled by
+  app/help_loader.py from the program's constants, and shown on the
+  website (the web edition, between the document marks).
+
+  Every example a device could print carries data-check and data-expect.
+  tests/test_line_formats.py feeds each one through WireTrace's own code
+  and fails if the result is not the one written here, so this page
+  cannot say something the program does not do. No script.
+-->
+<!-- document -->
+<h1>{{const:APP_NAME}} line format reference</h1>
+<p class="lead">How {{const:APP_NAME}} reads the lines your firmware prints: where a line ends, how its level is decided, which numbers are plotted, which columns a CSV log gets, and which lines mark a restart. For version {{const:APP_VERSION}}.</p>
+
+<h2 id="quick-start">Quick start</h2>
+<p>Three habits let {{const:APP_NAME}} read your firmware's output with no set-up:</p>
+<ol>
+  <li><strong>One reading per line, with names.</strong> <code data-check="plot" data-expect="temp, hum">temp: 23.3, hum: 53</code> plots temp and hum.</li>
+  <li><strong>The levels your logging framework already prints.</strong> <code data-check="level" data-expect="Error">E (1234) wifi: timeout</code> is shown as an Error, and so is <code data-check="level" data-expect="Error">[ERROR] sensor timeout</code>.</li>
+  <li><strong><code>plt:</code> in front of each reading, when readings are mixed with messages.</strong> See <a href="#plt">Marking the reading lines</a>.</li>
+</ol>
+<p>End every line with a newline. The rest of this page gives the exact rules.</p>
+
+<h2 id="lines">Lines</h2>
+<ul>
+  <li>A line ends at LF (<code>\n</code>), CR LF (<code>\r\n</code>) or a lone CR (<code>\r</code>). A CR LF split across two reads is still one ending.</li>
+  <li>Text is read as UTF-8. A byte that is not valid UTF-8 is shown and logged as <code>\xNN</code>, so its value is kept.</li>
+  <li>Tab is kept. Other control characters are shown and logged as escapes: a bell (byte 07) appears as <code>\x07</code>.</li>
+  <li>ANSI escape codes (colours, cursor moves) are removed from what is shown, logged and exported. Their colours can be shown in the console: switch on <strong>ANSI colours</strong> on the Features page of Preferences. A line made only of escape codes, such as a clear-screen, is dropped.</li>
+  <li>A line longer than {{count:SERIAL_MAX_LINE_BYTES}} bytes is cut into pieces of that length.</li>
+</ul>
+<p>Everything below reads a line after these steps, so a coloured ESP-IDF line is read like a plain one.</p>
+
+<h2 id="levels">Levels</h2>
+<p>Each line gets one level: Critical, Error, Warning, Info, Debug or Data. The level sets the line's colour and the level buttons above the console. It never decides whether a line is logged, exported or plotted.</p>
+
+<h3 id="level-markers">Level markers come first</h3>
+<p>A level that a logging framework prints decides the line's level. {{const:APP_NAME}} looks for one in this order:</p>
+<table class="wrap">
+  <thead><tr><th>Framework</th><th>Form</th><th>Where</th><th>Levels</th></tr></thead>
+  <tbody>
+    <tr><td>ESP-IDF</td><td><code data-check="level" data-expect="Error">E (1234) wifi: timeout</code><br>one letter, a space, the tick count in brackets, a space</td><td>At the start of the line</td><td>{{levels:esp_idf}}</td></tr>
+    <tr><td>Zephyr</td><td><code data-check="level" data-expect="Warning">[00:00:01.234,000] &lt;wrn&gt; net: retry</code><br>the level in angle brackets, then a space</td><td>Anywhere in the line</td><td>{{levels:zephyr}}</td></tr>
+    <tr><td>Bracketed</td><td><code data-check="level" data-expect="Error">[ERROR] sensor timeout</code></td><td>Anywhere in the line, in any letter case</td><td>{{levels:bracketed}}</td></tr>
+  </tbody>
+</table>
+<p>A marker wins over the words in the line:</p>
+<table class="wrap">
+  <thead><tr><th>Line</th><th>Level</th></tr></thead>
+  <tbody>
+    <tr><td><code data-check="level" data-expect="Info">[INFO] error count: 0</code></td><td>Info</td></tr>
+    <tr><td><code data-check="level" data-expect="Info">I (88) app: error count: 0</code></td><td>Info</td></tr>
+  </tbody>
+</table>
+<p>ESP-IDF's tick count is the form that is recognised. A line with system time in the brackets, such as <code data-check="level" data-expect="Data">I (12:30:01.000) app: loop 41</code>, has no marker and is read by its words; with none of them, it is Data.</p>
+
+<h3 id="level-words">Words, when there is no marker</h3>
+<table class="wrap">
+  <thead><tr><th>Level</th><th>Words</th></tr></thead>
+  <tbody>
+{{keywords}}
+  </tbody>
+</table>
+<p>A word counts at the start of a word, in any letter case, with any ending: "fail" matches "failed", and "fault" does not match inside "default". If several match, the most severe wins. A line with none is Data.</p>
+<table class="wrap">
+  <thead><tr><th>Line</th><th>Level</th></tr></thead>
+  <tbody>
+    <tr><td><code data-check="level" data-expect="Error">Sensor failed to start</code></td><td>Error</td></tr>
+    <tr><td><code data-check="level" data-expect="Data">Using default value</code></td><td>Data</td></tr>
+    <tr><td><code data-check="level" data-expect="Critical">PANIC at line 12</code></td><td>Critical</td></tr>
+    <tr><td><code data-check="level" data-expect="Data">temp: 22.5</code></td><td>Data</td></tr>
+  </tbody>
+</table>
+
+<h2 id="plot-data">Plot data</h2>
+
+<h3 id="plot-when">When {{const:APP_NAME}} looks</h3>
+<p>Once the plot has {{count:PLOT_AUTODETECT_SAMPLE_SIZE}} lines, {{const:APP_NAME}} looks for numbers in all the lines since the plot opened, and again with each new line, until it finds them. A plot opened later starts from the most recent {{count:PLOT_RECENT_LINES_BUFFER_SIZE}} lines. After {{count:PLOT_DETECTION_GIVE_UP_LINES}} lines with no numbers found, the plot says so and offers <strong>Describe the format...</strong></p>
+<p>Points are placed at the time each line arrived on the computer. Times the device prints are not used.</p>
+
+<h3 id="plot-forms">Three forms, tried in this order</h3>
+<p><strong>1. JSON, one object per line</strong></p>
+<pre data-check="plot" data-expect="temp, hum">{"temp": 22.4, "hum": 55, "ok": true}</pre>
+<p class="result">Plotted: temp, hum</p>
+<p>The line starts with <code>{</code>; spaces before it are allowed. A number, or a string holding a number such as <code>"55"</code>, is a value. <code>true</code> and <code>false</code> are not.</p>
+
+<p><strong>2. Names and values</strong></p>
+<pre data-check="plot" data-expect="temp, hum">temp: 22.4, hum: 55</pre>
+<p class="result">Plotted: temp, hum</p>
+<pre data-check="plot" data-expect="temp, hum">temp=22.4 hum=55</pre>
+<p class="result">Plotted: temp, hum</p>
+<p>A name is letters, digits, underscores and spaces, up to {{count:STRUCTURE_KEY_MAX_LENGTH}} characters, followed by <code>:</code> or <code>=</code>. The value is a number. Text right after the number is ignored, so <code>temp: 22.4C</code> plots 22.4. Anything else on the line is ignored.</p>
+
+<p><strong>3. Values only</strong></p>
+<pre data-check="plot" data-expect="ch0, ch1, ch2">22.4,55,1013</pre>
+<p class="result">Plotted: ch0, ch1, ch2</p>
+<p>Separators are tried in this order: comma, tab, semicolon, bar (<code>|</code>), then spaces. Every field must be a number, and a line needs at least two. The values are named ch0, ch1 and so on, unless they are named with <a href="#plt-names"><code>plt!</code></a>.</p>
+
+<h3 id="plot-choosing">How values are chosen</h3>
+<ul>
+  <li>A form is used when at least {{percent:STRUCTURE_MIN_MATCHING_FRACTION}} of the lines looked at are in it.</li>
+  <li>A name becomes a value when it is on at least {{percent:STRUCTURE_KEY_FREQUENCY_THRESHOLD}} of those lines, in the order the firmware prints them. Occasional lines without it are fine.</li>
+  <li>For values only, the most common number of fields is used. A line with another number of fields, or with a field that is not a number, is not plotted. It is still shown and logged.</li>
+  <li>At most {{count:PLOT_MAX_SERIES}} values are followed. Lines that carry more give the first {{count:PLOT_MAX_SERIES}}.</li>
+</ul>
+
+<h3 id="plot-numbers">Numbers</h3>
+<p>Write a number with a point as the decimal separator, and an optional sign and exponent: <code>22</code>, <code>-3.5</code>, <code>1.2e-3</code>. Write a digit before the point: <code>0.5</code>, not <code>.5</code>. A decimal comma, as in <code>3,5</code>, is not read as a number.</p>
+
+<h3 id="plt">Marking the reading lines: <code>plt:</code></h3>
+<p>When the firmware prints messages and readings, start each reading line with <code>plt:</code>:</p>
+<pre data-check="plot" data-expect="ch0, ch1">I (1001) app: loop 41
+plt: 21.1,51</pre>
+<p class="result">Plotted: ch0, ch1, from the <code>plt:</code> line only</p>
+<p>If any line looked at starts with <code>plt:</code>, only the lines that start with it are plotted, and the rest of each such line is read in the three forms above. Letter case does not matter. The prefix may carry digits, as in <code>plt1:</code>, which version {{const:APP_VERSION}} reads the same as <code>plt:</code>.</p>
+
+<h3 id="plt-names">Naming values: <code>plt!</code></h3>
+<pre data-check="plot" data-expect="Temperature, Humidity">plt! Temperature,Humidity
+plt: 21.1,51</pre>
+<p class="result">Plotted: Temperature, Humidity</p>
+<p>A line that starts with <code>plt!</code> names the values of values-only lines, in order. It is used when it has as many names as the lines have values, and the first such line wins. Print it before the readings, so that it is among the lines {{const:APP_NAME}} looks at. JSON and name and value lines keep their own names.</p>
+
+<h3 id="plot-pattern">Any other form: a pattern</h3>
+<p><span class="menu">View &gt; Configure plot...</span> takes a pattern with named groups, such as <code>RPM:\s*(?P&lt;RPM&gt;\d+)</code>. Each named group is a value. <strong>Capture from sample...</strong> builds the pattern for you: click each number in a recent line and give it a name. The pattern is looked for anywhere in the line, and a group that does not hold a number is skipped on that line. A pattern that takes more than {{const:PLOT_REGEX_TIMEOUT_SECONDS}} s on a line skips that line; after {{count:PLOT_REGEX_MAX_CONSECUTIVE_TIMEOUTS}} such lines in a row, the plot stops and says so. A pattern can be saved as a profile.</p>
+
+<h2 id="csv">CSV logs</h2>
+<p>A log written as CSV gets its columns from JSON objects or from names and values, found as for the plot, with these differences:</p>
+<ul>
+  <li>A name starts with a letter or an underscore, so a clock time such as <code>12:30:45</code> is never read as a name.</li>
+  <li>A value is any text up to a space, a comma or a semicolon.</li>
+  <li>A line becomes a row when it has at least {{percent:CSV_ROW_MIN_COLUMN_FRACTION}} of the columns. Other lines are left out of the CSV and kept in the text log.</li>
+  <li>With no names after {{count:CSV_DETECTION_GIVE_UP_LINES}} lines, the CSV has two columns, Timestamp and Data. Values-only lines are written this way.</li>
+  <li>A value that a spreadsheet would read as a formula is written with a quote in front of it.</li>
+</ul>
+<pre data-check="csv" data-expect="Timestamp,temp,hum">temp: 21.1, hum: 51</pre>
+<p class="result">Columns: Timestamp,temp,hum</p>
+
+<h2 id="restarts">Restarts</h2>
+<p>When a board restarts, {{const:APP_NAME}} adds a notice after the line, such as <code>[{{const:APP_NAME}}] Board restart 2 of this session: POWERON_RESET</code>, to the console, the log and any export, and counts it in <span class="menu">Device &gt; Session report...</span> Restart detection can be switched off on the Features page of Preferences.</p>
+<table class="wrap">
+  <thead><tr><th>Board</th><th>Line</th><th>Reason given</th></tr></thead>
+  <tbody>
+    <tr><td>ESP32, every chip of the family</td><td><code data-check="restart" data-expect="POWERON_RESET">rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)</code><br>printed by the boot ROM, at the start of a line</td><td>The name in brackets: POWERON_RESET</td></tr>
+    <tr><td>Zephyr</td><td><code data-check="restart" data-expect="Zephyr boot banner">*** Booting Zephyr OS build v3.7.0 ***</code><br>or <code data-check="restart" data-expect="Zephyr boot banner">*** Using Zephyr OS v3.7.99 ***</code>, at the start of a line</td><td>Zephyr boot banner</td></tr>
+  </tbody>
+</table>
+<p>One restart is counted once. A Zephyr banner that follows an ESP32 reset line, or MCUboot's <code>Jumping to the first image slot</code>, with no banner between, belongs to that restart:</p>
+<pre data-check="restart" data-expect="POWERON_RESET">rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+*** Booting Zephyr OS build v3.7.0 ***</pre>
+<p class="result">Counted once: POWERON_RESET</p>
+<p>A bootloader built on Zephyr whose own log is switched off prints no such line, and its restarts are counted twice.</p>
+
+<h2 id="examples">Examples</h2>
+<h3 id="example-arduino">Arduino</h3>
+<pre class="code">Serial.print("temp: ");
+Serial.print(temperature, 1);
+Serial.print(", hum: ");
+Serial.println(humidity);</pre>
+<p>Prints:</p>
+<pre data-check="plot" data-expect="temp, hum">temp: 23.3, hum: 53</pre>
+<p class="result">Plotted: temp, hum</p>
+
+<h3 id="example-esp-idf">ESP-IDF</h3>
+<pre class="code">ESP_LOGI(TAG, "temp=%.1f hum=%d", temperature, humidity);
+ESP_LOGE(TAG, "read failed: %d", err);</pre>
+<p>Prints:</p>
+<pre data-check="plot" data-expect="temp, hum">I (1003) sensor: temp=23.3 hum=53</pre>
+<p class="result">Plotted: temp, hum</p>
+<pre data-check="level" data-expect="Error">E (1004) sensor: read failed: -1</pre>
+<p class="result">Error, from the E marker</p>
+
+<h3 id="example-zephyr">Zephyr</h3>
+<pre class="code">printk("plt: %d,%d\n", temperature_centi, humidity);</pre>
+<p>Prints a line with no timestamp in front, so it starts with <code>plt:</code>:</p>
+<pre data-check="plot" data-expect="ch0, ch1">plt: 2333,53</pre>
+<p class="result">Plotted: ch0, ch1</p>
+
+<h3 id="example-c">Plain C</h3>
+<pre class="code">printf("{\"temp\": %.1f, \"hum\": %d}\n", temperature, humidity);</pre>
+<p>Prints:</p>
+<pre data-check="plot" data-expect="temp, hum">{"temp": 23.3, "hum": 53}</pre>
+<p class="result">Plotted: temp, hum</p>
+
+<h2 id="not-read">What is not read</h2>
+<table class="wrap">
+  <thead><tr><th>Firmware prints</th><th>What happens</th><th>Instead</th></tr></thead>
+  <tbody>
+    <tr><td>One number alone on each line: <code data-check="plot" data-expect="none">23.3</code></td><td>Not plotted: values only needs two values on a line</td><td>Give it a name: <code data-check="plot" data-expect="temp">temp: 23.3</code></td></tr>
+    <tr><td>Different values on alternating lines</td><td>Not plotted: each name is on only half of the lines</td><td>Print them on one line</td></tr>
+    <tr><td>Several kinds of reading line, told apart by their number of fields</td><td>Only the most common number of fields is plotted</td><td>Mark one kind with <code>plt:</code></td></tr>
+    <tr><td>A decimal comma: <code>3,5</code></td><td>Not a number</td><td>Use a point: <code>3.5</code></td></tr>
+    <tr><td>Its own times</td><td>Points use the time each line arrived</td><td></td></tr>
+  </tbody>
+</table>
+<pre data-check="plot" data-expect="none">temp: 23
+hum: 53</pre>
+<p class="result">Alternating lines like these are not plotted.</p>
+
+<h2 id="known-issues">Known issues</h2>
+<p>Zephyr's default timestamp, as in the line below, is read as a name and a value, so the plot shows an extra value named 00 that is always 0. Untick it in the plot's value list, or print readings with <code>printk("plt: ...")</code> as in the <a href="#example-zephyr">Zephyr example</a>.</p>
+<pre data-check="plot" data-expect="00, temp, hum">[00:00:03.234,000] &lt;inf&gt; sensor: temp: 23 hum: 53</pre>
+<p class="result">Plotted: 00, temp, hum</p>
+<!-- /document -->

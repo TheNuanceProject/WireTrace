@@ -261,8 +261,9 @@
 
 <main>
 
+<!-- document -->
 <h1>{{const:APP_NAME}} user guide</h1>
-<p class="lead">For version {{const:APP_VERSION}}. Press {{key:user_guide}} in {{const:APP_NAME}} to open this page at any time.</p>
+<p class="lead">{{edition:guide_lead}}</p>
 
 <!-- ───────────────────────────── Start here ───────────────────────────── -->
 
@@ -368,6 +369,7 @@
 <div class="note"><p>The level only chooses a colour and feeds the level buttons. It never decides whether a line is logged, exported or plotted.</p></div>
 <p>The level buttons above the console show <strong>All</strong>, <strong>Error</strong> (errors and critical lines), <strong>Warning</strong>, <strong>Info</strong>, <strong>Debug</strong> and <strong>Data</strong> (data and the commands you sent). Each shows how many lines it holds. In a narrow window they become one drop-down.</p>
 <p>To show every line alike, turn off <strong>Colour lines by severity</strong> on the Console page of Preferences.</p>
+<p>The exact rules, with examples for firmware, are in the {{see:formats#levels|line format reference}}.</p>
 
 <h3 id="highlights">Highlight rules</h3>
 <p>To make the lines you are watching for stand out, add a rule on the Highlights page of <a href="#preferences">Preferences</a>: a text to look for and a colour. A line that holds the text, whatever its case, is drawn in that colour, with a mark beside it in the margin. The first rule a line matches decides its colour. Up to {{const:HIGHLIGHT_RULES_MAX}} rules can be set. Highlights are on screen only: logs and exports keep every line as received.</p>
@@ -534,6 +536,7 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 <p>To name values that are sent without names, have the device print a line that begins with <code>plt!</code> and lists the names, before its readings:</p>
 <pre><code>plt! Temperature,Humidity,Pressure</code></pre>
 <p>The names are used when there are as many of them as there are values in a line.</p>
+<p>The exact rules, with examples for firmware and what is not read, are in the {{see:formats#plot-data|line format reference}}.</p>
 
 <h3>If nothing is found</h3>
 <p>The plot looks for numbers once it has collected {{const:PLOT_AUTODETECT_SAMPLE_SIZE}} lines. After {{const:PLOT_DETECTION_GIVE_UP_LINES}} lines with no numbers recognised, the plot says so and offers <strong>Describe the format...</strong>, which opens <a href="#configure-plot">Configure plot</a>.</p>
@@ -760,7 +763,7 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 <p>The defaults of the Advanced page suit almost every computer.</p>
 
 <h2 id="shortcuts">Keyboard shortcuts</h2>
-<p>These are the shortcuts on this computer. <span class="menu">Help &gt; Keyboard shortcuts</span> shows the same list inside {{const:APP_NAME}}.</p>
+<p>{{edition:shortcuts_intro}} <span class="menu">Help &gt; Keyboard shortcuts</span> shows the same list inside {{const:APP_NAME}}.</p>
 <table>
   <thead><tr><th>Keys</th><th>Action</th></tr></thead>
   <tbody>
@@ -769,17 +772,18 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 </table>
 
 <h2 id="folders">Folders</h2>
-<p>On this computer:</p>
+<p>{{edition:folders_intro}}</p>
 <table class="wrap paths">
   <thead><tr><th>What</th><th>Where</th></tr></thead>
   <tbody>
-    <tr><td>Logs, unless you choose another folder</td><td><code>{{dir:logs}}</code></td></tr>
-    <tr><td>Settings (<code>{{const:PREFERENCES_FILENAME}}</code>)</td><td><code>{{dir:config}}</code></td></tr>
-    <tr><td>Copies of the settings from before each update, kept for <a href="#return">a return</a></td><td><code>{{dir:settings_copies}}</code></td></tr>
-    <tr><td><a href="#diagnostic-logs">Diagnostic logs</a></td><td><code>{{dir:diagnostic_logs}}</code></td></tr>
-    <tr><td>Working files, including the recording of each open session. Safe to delete while {{const:APP_NAME}} is closed.</td><td><code>{{dir:cache}}</code></td></tr>
+    <tr><td>Logs, unless you choose another folder</td><td>{{dir:logs}}</td></tr>
+    <tr><td>Settings (<code>{{const:PREFERENCES_FILENAME}}</code>)</td><td>{{dir:config}}</td></tr>
+    <tr><td>Copies of the settings from before each update, kept for <a href="#return">a return</a></td><td>{{dir:settings_copies}}</td></tr>
+    <tr><td><a href="#diagnostic-logs">Diagnostic logs</a></td><td>{{dir:diagnostic_logs}}</td></tr>
+    <tr><td>Working files, including the recording of each open session. Safe to delete while {{const:APP_NAME}} is closed.</td><td>{{dir:cache}}</td></tr>
   </tbody>
 </table>
+{{edition:folders_note}}
 <p>The recording of a session is removed when its tab is closed or connects again.</p>
 
 <h2 id="updates">Updates</h2>
@@ -819,6 +823,8 @@ Bench_COM7_2026-03-14_09-30-00_003.txt</code></pre>
 
 <h2 id="help">Help and problems</h2>
 <p><span class="menu">Help &gt; Report a problem</span> opens the page where problems are reported: <a href="{{const:APP_ISSUES_URL}}">{{const:APP_ISSUES_URL}}</a>. Paste the diagnostic summary into your report (<span class="menu">Help &gt; Copy diagnostic summary</span>): it says which version and system you use and what {{const:APP_NAME}} recorded, never what your devices sent. See <a href="#diagnostic-logs">Diagnostic logs</a>.</p>
+
+<!-- /document -->
 
 <footer>
   {{const:APP_NAME}} {{const:APP_VERSION}}. {{const:COPYRIGHT}}.

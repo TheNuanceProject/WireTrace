@@ -85,6 +85,12 @@ RELEASES_URL = f"{APP_REPOSITORY_URL}/releases"
 # What the update check sends, and why, is described here
 APP_PRIVACY_URL = f"{APP_WEBSITE}/privacy/"
 
+# The documents on the website: the user guide, and the reference of the
+# lines WireTrace reads, for people writing firmware. Both are made from
+# the templates in resources/help by app/help_loader.py.
+APP_GUIDE_URL = f"{APP_WEBSITE}/projects/wiretrace/guide/"
+APP_FORMATS_URL = f"{APP_WEBSITE}/projects/wiretrace/formats/"
+
 # ── Derived Constants (used by UI and build scripts) ─────────────────────────
 
 WINDOW_TITLE = f"{APP_NAME} v{APP_VERSION}"

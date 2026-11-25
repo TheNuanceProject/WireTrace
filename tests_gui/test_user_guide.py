@@ -89,7 +89,7 @@ def test_f1_opens_the_filled_guide_from_the_cache(
 ):
     opened: list[QUrl] = []
     monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url) or True)
-    monkeypatch.setattr(help_loader, "get_cache_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(help_loader, "get_cache_dir", lambda system=None: str(tmp_path))
 
     with main_window(qapp, config, theme_manager) as (window, _port):
         window.shortcut_actions()["user_guide"].trigger()

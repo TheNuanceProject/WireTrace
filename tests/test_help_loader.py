@@ -9,6 +9,7 @@ written by hand fails here and not in front of a user.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from pathlib import Path
 
@@ -16,24 +17,34 @@ import pytest
 
 import app.help_loader as help_loader
 from app import constants
-from app.constants import ThemeID
+from app.constants import (
+    FolderSystem,
+    ThemeID,
+    get_cache_dir,
+    get_diagnostic_log_dir,
+    this_computer,
+)
 from app.help_loader import (
     FONTS_DIRECTORY,
     IMAGES_DIRECTORY,
+    LINE_FORMATS_FILENAME,
     USER_GUIDE_FILENAME,
+    WEB_DOCUMENTS,
+    Edition,
     UserGuideError,
     UserGuideNotFoundError,
     key_names,
     load_user_guide,
     prepare_user_guide,
     render_user_guide,
+    render_web_document,
     resolve_user_guide_source,
 )
 from app.privacy_policy import load_policy, to_html
 from core.records import COMMAND_PREFIX
 from ui import shortcuts
 from ui.themes import design_tokens, tokens
-from version import APP_NAME, APP_VERSION
+from version import APP_FORMATS_URL, APP_NAME, APP_PRIVACY_URL, APP_VERSION
 
 GUIDE = resolve_user_guide_source()
 TEMPLATE = GUIDE.read_text(encoding="utf-8")
@@ -57,7 +68,7 @@ def images(tmp_path: Path) -> Path:
 def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Send the filled guide to the test's own folder."""
     directory = tmp_path / "cache"
-    monkeypatch.setattr(help_loader, "get_cache_dir", lambda: str(directory))
+    monkeypatch.setattr(help_loader, "get_cache_dir", lambda system=None: str(directory))
     return directory
 
 
@@ -167,13 +178,13 @@ def test_the_bundled_fonts_are_embedded(images: Path) -> None:
 def test_folders_are_those_of_this_computer(
     images: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(help_loader, "get_config_dir", lambda: "/settings & more")
-    monkeypatch.setattr(help_loader, "get_default_log_dir", lambda: "/logs")
-    monkeypatch.setattr(help_loader, "get_cache_dir", lambda: "/cache")
+    monkeypatch.setattr(help_loader, "get_config_dir", lambda system=None: "/settings & more")
+    monkeypatch.setattr(help_loader, "get_default_log_dir", lambda system=None: "/logs")
+    monkeypatch.setattr(help_loader, "get_cache_dir", lambda system=None: "/cache")
 
     filled = render_user_guide("{{dir:config}}|{{dir:logs}}|{{dir:cache}}", images, FONTS)
 
-    assert filled == "/settings &amp; more|/logs|/cache"
+    assert filled == "<code>/settings &amp; more</code>|<code>/logs</code>|<code>/cache</code>"
 
 
 @pytest.mark.parametrize(
@@ -359,7 +370,7 @@ def test_a_changed_guide_gets_a_new_page_and_the_old_one_is_removed(
     cache: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = prepare_user_guide()
-    monkeypatch.setattr(help_loader, "get_default_log_dir", lambda: "/another/log/folder")
+    monkeypatch.setattr(help_loader, "get_default_log_dir", lambda system=None: "/another/log/folder")
 
     second = prepare_user_guide()
 
@@ -411,3 +422,111 @@ def test_the_privacy_section_is_the_policy_itself() -> None:
     guide = load_user_guide()
 
     assert f'<h2 id="privacy">Privacy</h2>\n{to_html(load_policy())}\n' in guide
+
+
+# ── The web edition ──────────────────────────────────────────────────────────
+
+WEB_GUIDE = render_web_document(USER_GUIDE_FILENAME)
+
+
+@pytest.mark.parametrize("filename", sorted(WEB_DOCUMENTS))
+def test_a_web_document_names_itself_and_its_version(filename: str) -> None:
+    document = render_web_document(filename)
+
+    assert document.startswith(
+        f'<article data-document="{WEB_DOCUMENTS[filename]}" data-version="{APP_VERSION}">'
+    )
+    assert document.rstrip().endswith("</article>")
+
+
+@pytest.mark.parametrize("filename", sorted(WEB_DOCUMENTS))
+def test_a_web_document_holds_the_document_alone(filename: str) -> None:
+    """The website lays the document out; nothing of a page comes with it."""
+    document = render_web_document(filename)
+
+    for page_part in ("<html", "<head", "<body", "<style", "<script", "<nav", "<footer",
+                      "data:font/", "{{", "}}"):
+        assert page_part not in document
+
+
+def test_the_web_guide_writes_keys_as_every_system_names_them() -> None:
+    assert "<kbd>Cmd</kbd>" not in WEB_GUIDE
+    assert "On macOS, Ctrl is Cmd and Alt is Option." in WEB_GUIDE
+
+
+@pytest.mark.parametrize(
+    "folder",
+    [
+        r"%APPDATA%\WireTrace\Config",
+        r"%LOCALAPPDATA%\WireTrace\Cache",
+        r"%LOCALAPPDATA%\WireTrace\Logs",
+        r"%USERPROFILE%\Documents\WireTrace\Logs",
+        "~/Library/Application Support/WireTrace",
+        "~/Library/Caches/WireTrace",
+        "~/Library/Logs/WireTrace",
+        "~/.config/WireTrace",
+        "~/.cache/WireTrace",
+        "~/.local/state/WireTrace/logs",
+        "~/Documents/WireTrace/Logs",
+    ],
+)
+def test_the_web_guide_states_each_systems_folders(folder: str) -> None:
+    assert f"<code>{folder}" in WEB_GUIDE
+
+
+def test_the_web_guide_names_no_folder_of_the_computer_it_was_made_on() -> None:
+    home = this_computer().home
+    assert home not in WEB_GUIDE
+    assert "On this computer" not in WEB_GUIDE
+    assert "shortcuts on this computer" not in WEB_GUIDE
+
+
+def test_the_linux_folders_follow_the_xdg_variables_the_web_guide_names() -> None:
+    linux = FolderSystem(
+        platform="linux", join=posixpath.join, home="~", environ={"XDG_CACHE_HOME": "/xdg/cache", "XDG_STATE_HOME": "/xdg/state"},
+    )
+
+    assert get_cache_dir(linux) == "/xdg/cache/WireTrace"
+    assert get_diagnostic_log_dir(linux) == "/xdg/state/WireTrace/logs"
+    assert "<code>XDG_CACHE_HOME</code> and <code>XDG_STATE_HOME</code>" in WEB_GUIDE
+
+
+def test_the_web_guide_links_to_the_privacy_policy_instead_of_repeating_it() -> None:
+    assert f'href="{APP_PRIVACY_URL}"' in WEB_GUIDE
+    assert to_html(load_policy()) not in WEB_GUIDE
+
+
+def test_the_app_guide_still_holds_the_privacy_policy() -> None:
+    assert to_html(load_policy()) in load_user_guide()
+
+
+def test_the_guide_links_to_the_reference_in_both_editions() -> None:
+    for document in (load_user_guide(), WEB_GUIDE):
+        assert f'href="{APP_FORMATS_URL}#levels"' in document
+        assert f'href="{APP_FORMATS_URL}#plot-data"' in document
+
+
+def test_a_link_to_a_document_needs_its_text(images: Path) -> None:
+    with pytest.raises(UserGuideError):
+        render_user_guide("{{see:formats#levels}}", images, FONTS)
+
+
+@pytest.mark.parametrize("name", ["APP_NAME", "PLOT_MAX_SERIES"])
+def test_a_percentage_is_made_only_from_a_share(name: str, images: Path) -> None:
+    with pytest.raises(UserGuideError):
+        render_user_guide(f"{{{{percent:{name}}}}}", images, FONTS)
+
+
+def test_a_share_is_written_as_a_percentage(images: Path) -> None:
+    assert render_user_guide(
+        "{{percent:STRUCTURE_KEY_FREQUENCY_THRESHOLD}}", images, FONTS,
+    ) == f"{constants.STRUCTURE_KEY_FREQUENCY_THRESHOLD * 100:g} %"
+
+
+def test_the_web_edition_needs_its_document_marks(images: Path) -> None:
+    with pytest.raises(UserGuideError):
+        render_user_guide("<p>no marks</p>", images, FONTS, Edition.WEB)
+
+
+def test_the_reference_is_one_of_the_web_documents() -> None:
+    assert WEB_DOCUMENTS[LINE_FORMATS_FILENAME] == "line-formats"
